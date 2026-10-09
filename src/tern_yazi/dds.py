@@ -11,9 +11,18 @@ import queue
 import signal
 import subprocess
 import threading
+import time
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+
+DEBUG = os.environ.get("TERN_YAZI_DEBUG")
+
+
+def dlog(msg: str) -> None:
+    if DEBUG:
+        with open(DEBUG, "a") as log:
+            log.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
 
 
 @dataclass
@@ -58,10 +67,16 @@ class Events:
 
     def _reader(self) -> None:
         assert self.process.stdout
-        for line in self.process.stdout:
-            event = parse_line(line)
-            if event is not None:
-                self.queue.put(event)
+        dlog(f"reader start pid={self.process.pid}")
+        try:
+            for line in self.process.stdout:
+                dlog(f"raw: {line.rstrip()[:120]}")
+                event = parse_line(line)
+                if event is not None:
+                    self.queue.put(event)
+        except Exception as exc:
+            dlog(f"reader died: {exc!r}")
+        dlog("reader exit")
 
     def close(self) -> None:
         if self.process.poll() is None:

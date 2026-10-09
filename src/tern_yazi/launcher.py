@@ -97,6 +97,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"tern-yazi: could not launch yazi: {exc}", file=sys.stderr)
             return 1
 
+    print(f"tern-yazi: watching yazi {yazi_id} (q to quit)")
+
     from .app import App
 
     return App(session, yazi_id).run()

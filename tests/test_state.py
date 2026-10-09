@@ -22,6 +22,34 @@ def test_cd_carries_files_and_resets_hovered():
     assert state.revision == revision
 
 
+def test_hover_carries_metadata_and_selection():
+    state = State()
+    state.event(
+        "tern-hover", {"url": "/tmp/sub", "dir": True, "size": None, "mtime": 1760000000, "selected": 2}
+    )
+    assert state.hovered_dir is True
+    assert state.hovered_mtime == 1760000000
+    assert state.selected == 2
+
+
+def test_state_pulse_updates_tasks_and_selection():
+    state = State()
+    state.event(
+        "tern-state",
+        {"selected": 3, "tasks": {"total": 2, "succ": 0, "fail": 0, "found": 100, "processed": 40}},
+    )
+    assert state.selected == 3
+    assert state.tasks.running == 2
+    assert state.tasks.ratio == 0.4
+    revision = state.revision
+    state.event(
+        "tern-state",
+        {"selected": 3, "tasks": {"total": 2, "succ": 0, "fail": 0, "found": 100, "processed": 40}},
+    )
+    assert state.revision == revision
+    assert state.dropped == 1
+
+
 def test_ack_history_is_capped():
     state = State()
     for i in range(8):
