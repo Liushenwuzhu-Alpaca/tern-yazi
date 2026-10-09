@@ -1,33 +1,35 @@
 # tern-yazi Development Plan
 
-Plan B ("companion panel"): a Tern-native side panel for yazi. yazi stays the fullscreen ANSI TUI; a Python companion process renders native Tern surfaces (hover preview/metadata, selection, task progress, action cards) driven by yazi events, and sends commands back. Zero yazi patches: integration goes only through yazi's Lua plugin API and DDS.
+Plan B ("companion panel"): a Tern-native companion pane for yazi. yazi stays the fullscreen ANSI TUI in its own pane; a Python companion process — foreground in its own pane — renders native Tern surfaces (hover preview/metadata, selection, task progress, action cards) driven by yazi events, and sends commands back. Zero yazi patches: integration goes only through yazi's Lua plugin API and DDS.
 
-Modeled on `hermes-for-tern`: external adapter process + structured protocol + pure reducer + pure views + single-threaded poll loop.
+Modeled on `hermes-for-tern`: adapter process + structured protocol + pure reducer + pure views + single-threaded poll loop.
 
 ## Architecture
 
+M0 settled the layout (see `docs/m0-findings.md`): an inline surface cannot share a pane with fullscreen yazi, and the companion must own its pane's tty. Hence two panes:
+
 ```
-┌─ Tern pane ───────────────────────────────────────────────────┐
-│ yazi (fullscreen ANSI TUI)                                    │
-│  └─ tern.yazi Lua plugin ── ps.pub_to / --local-events ──┐    │
-│                                                           ▼    │
-│ tern-yazi (Python companion, tern-sdk)              events     │
-│  ├─ dds.py    event ingestion + command channel (`ya emit-to`) │
-│  ├─ state.py  pure reducer over yazi events (SDK-free)         │
-│  ├─ views.py  pure view builder → Tern semantic tree           │
-│  └─ app.py    50 Hz poll loop, 30 Hz render on revision change │
-│                           │                                    │
-│                           ▼ inline surface (native components) │
-│              hover card · selection pill · tasks · actions     │
-└───────────────────────────────────────────────────────────────┘
+┌─ Tern window ─────────────────────────────────────────────┐
+│ pane A: yazi (fullscreen ANSI, pristine)                  │
+│  └─ tern.yazi Lua plugin ── ps.pub("tern-*", ...) ──┐     │
+│                                                      ▼     │
+│ pane B: tern-yazi companion (FOREGROUND, owns tty)  ya sub │
+│  ├─ dds.py    event ingestion (ya sub) + `ya emit-to` cmds │
+│  ├─ state.py  pure reducer over yazi events (SDK-free)     │
+│  ├─ views.py  pure view builder → Tern semantic tree       │
+│  └─ app.py    50 Hz poll loop, 30 Hz render on revision    │
+│                           │                                │
+│                           ▼ inline surface in pane B       │
+│              hover card · selection pill · tasks · actions │
+└────────────────────────────────────────────────────────────┘
 ```
 
 Data flow:
 
-1. Companion starts inside Tern (`tern_sdk.connect` detection, passthrough/abort outside), discovers or launches yazi.
-2. Lua plugin publishes hover/cd/select/task events over DDS; companion ingests them.
-3. Reducer folds events into `State`; `touch()` bumps `revision`; render throttled to 30 Hz.
-4. Surface actions (buttons/keys) translate to `ya emit-to <yazi-id> <command>`.
+1. Companion starts inside Tern (`tern_sdk.connect`; aborts outside), splits/launches yazi in an adjacent pane with a known `--client-id`.
+2. Lua plugin republishes yazi internals (hover/cd/selection/tasks) as custom DDS kinds; companion ingests via `ya sub` (fallback: `yazi --local-events` stdout when the companion launches yazi itself).
+3. Reducer folds events into `State` (coalescing floods — hover events repeat heavily); `touch()` bumps `revision`; render throttled to 30 Hz.
+4. Surface actions (buttons/keys) translate to `ya emit-to <yazi-id> <command>` (confirmed working in M0).
 
 ## Components
 
@@ -42,20 +44,18 @@ Data flow:
 
 ## Milestones
 
-### M0 — Spikes (go/no-go)
+### M0 — Spikes (DONE 2026-10-09, see `docs/m0-findings.md`)
 
-- **S1: Surface coexistence.** While yazi runs fullscreen in a Tern pane, a second process connects via tern-sdk and opens an `inline` surface.
-  - Acceptance: surface renders and updates while yazi stays interactive.
-  - On failure: fall back to summoned panels only (surface opened on demand, closed before returning to yazi), or pivot to `screen`-mode replacement (= plan C).
-- **S2: DDS granularity.** Verify which event kinds stream via `yazi --local-events` (hover, cd, select, tasks), that a Lua plugin can publish custom kinds (`ps.pub`/`ps.pub_to`), and that `ya emit-to` drives yazi (reveal, cd, rename).
-  - Acceptance: documented list of usable events + command round-trip demo. Record results in `docs/m0-findings.md`.
+- **S1: Surface coexistence.** Same-pane inline surface is invisible while yazi is fullscreen; companion must be foreground in its own pane → split-pane (B2) layout. Open question parked for M3: overlay-kind/`flow`-mode surfaces over a running program (summon panels).
+- **S2: DDS granularity.** `--local-events` streams `kind,receiver,sender,{json}` (flood-heavy, coalesce in reducer); custom kinds need plugin-declared abilities (yazi 26.9); `ya emit-to` drives yazi remotely (confirmed `cd /tmp`).
 
 ### M1 — Transport & launcher
 
-- Companion launches yazi as a child with `--local-events <kinds>` (mirrors `hermes-for-tern` Backend: subprocess + reader thread + `queue.Queue`), or attaches to a running instance via DDS.
-- Command channel: `ya emit-to` subprocess wrapper with timeouts; never blocks the UI thread.
-- Ship `yazi-plugin/tern.yazi/main.lua` publishing custom kinds for what `--local-events` does not cover (check yazi plugin docs; do not guess the API).
-- `--doctor` reports: Tern SDK protocol version, yazi/ya paths and versions, DDS reachability.
+- Launcher: companion takes pane foreground, splits a pane for yazi via the `tern` CLI (`tern split ... -- yazi --client-id <id>`), or attaches to an existing instance.
+- Event channel (primary): `yazi-plugin/tern.yazi/main.lua` subscribes to local events (`ps.sub`) and republishes them as custom `tern-*` kinds, declaring the abilities yazi 26.9 requires; companion ingests via `ya sub tern-hover,tern-cd,...` (reader thread + `queue.Queue`, mirrors `hermes-for-tern` Backend). Check yazi plugin docs for exact `ps` API; do not guess.
+- Event channel (fallback): when the companion launches yazi itself, `yazi --local-events=hover,cd` stdout parsing; tolerate polluted lines (openers writing to stdout).
+- Command channel: `ya emit-to <id>` subprocess wrapper with timeouts; never blocks the UI thread.
+- `--doctor` additionally reports DDS reachability (round-trip a builtin kind against a running instance).
 
 ### M2 — State & views
 
@@ -76,8 +76,8 @@ Data flow:
 
 ## Risks
 
-- **Coexistence unknown** (S1) is the project-killer; run it before writing M1 code.
-- **DDS is BETA** upstream: pin supported yazi version in README, feature-detect at runtime, degrade gracefully.
+- ~~Coexistence unknown~~ — resolved in M0: split-pane layout; summon/overlay model untested (M3).
+- **DDS is BETA** upstream: pin supported yazi version (developed against 26.9.1) in README, feature-detect at runtime, degrade gracefully. yazi 26.9 enforces receiver abilities for custom kinds.
 - **Event flood** on rapid navigation: coalesce per-kind in the reducer, keep latest only.
 - **Pane ownership**: Tern allows one inline transcript; the companion must not fight yazi over focus — surface interactions are keyboard-driven only when summoned (M3).
 
@@ -88,4 +88,4 @@ Data flow:
 - `state.py` is a pure reducer decoupled from tern-sdk; every mutation calls `touch()`.
 - Never block the UI thread: no `sleep`, no blocking `.result()`; threads only at the subprocess boundary.
 - Tern edit events use UTF-16 code units — translate, never slice raw.
-- Verify before claiming done: `uv run pytest -q && uv run ruff check src tests && uv run ruff format --check src tests`.
+- Verify before claiming done: `uv run pytest -q && uv run ruff check src tests scripts && uv run ruff format --check src tests scripts`.
