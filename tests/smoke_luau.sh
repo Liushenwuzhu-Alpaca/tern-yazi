@@ -9,6 +9,7 @@ export TERN_CONFIG_DIR="$IT/config"
 
 cleanup() {
 	"$TERN" plugin unlink tern-yazi >/dev/null 2>&1 || true
+	rm -f "${XDG_RUNTIME_DIR:-/tmp}/tern-yazi/state-9999.json"
 	rm -rf "$IT"
 }
 trap cleanup EXIT

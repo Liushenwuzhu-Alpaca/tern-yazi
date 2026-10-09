@@ -26,6 +26,15 @@ local function selected_count()
 	return #cx.active.selected
 end
 
+local function selected_urls()
+	local urls = {}
+	for _, file in pairs(cx.active.selected) do
+		urls[#urls + 1] = tostring(file.url)
+	end
+	table.sort(urls)
+	return urls
+end
+
 local function read_hovered()
 	local h = cx.active.current.hovered
 	if not h then
@@ -51,6 +60,22 @@ local function read_folder()
 	end
 	return { url = tostring(cur.cwd), files = names, selected = selected_count() }
 end
+local function read_parent()
+	local p = cx.active.parent
+	if not p or not p.cwd then
+		return nil
+	end
+	local names = {}
+	for i = 1, math.min(30, #(p.files or {})) do
+		local url = p.files[i].url
+		names[i] = url.name or tostring(url):match("([^/]+)$") or tostring(url)
+	end
+	return {
+		cwd = tostring(p.cwd),
+		files = names,
+	}
+end
+
 
 -- yazi fires hover on every redraw, not just on moves; dedupe at the source.
 local last_hover = nil
@@ -148,6 +173,7 @@ local function dump_state()
 	local ok_p, pulse_data = pcall(read_pulse)
 	local tasks_data = ok_p and pulse_data.tasks or { total = 0, succ = 0, fail = 0, found = 0, processed = 0 }
 	local selected = ok_p and pulse_data.selected or selected_count()
+	local selected_paths = selected_urls()
 
 	local key = table.concat({
 		folder.url,
@@ -159,6 +185,7 @@ local function dump_state()
 		tasks_data.fail,
 		tasks_data.found,
 		tasks_data.processed,
+		ya.json_encode(selected_paths),
 	}, ";")
 
 	if key == last_dump_key then
@@ -166,17 +193,18 @@ local function dump_state()
 	end
 	last_dump_key = key
 	state_seq = state_seq + 1
-
 	local sdir = state_dir()
-	os.execute("mkdir -p " .. sdir)
-
-	local cid = get_client_id()
+	local cid = tostring(get_client_id())
+	local cur_time = (ya.time and ya.time()) or os.time()
 	local payload = {
+		ts = cur_time,
 		seq = state_seq,
-		client_id = tonumber(cid) or cid,
+		client_id = cid,
+		parent = read_parent(),
 		cwd = folder.url,
 		files = folder.files,
 		selected = selected,
+		selected_urls = selected_paths,
 		hovered = hovered.url and hovered or nil,
 		tasks = tasks_data,
 	}
@@ -197,6 +225,7 @@ local function dump_state()
 end
 
 function M:setup()
+	pcall(os.execute, "mkdir -p " .. state_dir())
 	-- Builtin local event bodies carry only { tab }; snapshot `cx` instead.
 	ps.sub("hover", function()
 		publish_hover()

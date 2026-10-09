@@ -71,9 +71,6 @@ local function state_dir(): string
 end
 
 local function poke(cx)
-	if not companion_alive(cx) then
-		return
-	end
 	local sdir = state_dir()
 	if not tern.fs.exists(sdir) then
 		return
@@ -83,27 +80,35 @@ local function poke(cx)
 		return
 	end
 
-	local newest_seq = -1
+	local newest_score = -1
 	for _, fname in ipairs(entries) do
 		if fname:match("^state%-.+%.json$") then
-			local ok_read, content = pcall(tern.fs.read, sdir .. "/" .. fname, 4096)
+			local ok_read, content = pcall(tern.fs.read, sdir .. "/" .. fname, 256 * 1024)
 			if ok_read and content then
-				local seq = content:match('"seq"%s*:%s*(%d+)')
-				local num = tonumber(seq)
-				if num and num > newest_seq then
-					newest_seq = num
+				local ts = content:match('"ts"%s*:%s*([%d%.]+)')
+				local num = tonumber(ts) or tonumber(content:match('"seq"%s*:%s*(%d+)'))
+				if num and num > newest_score then
+					newest_score = num
 				end
 			end
 		end
 	end
 
-	if newest_seq > companion.seq then
-		companion.seq = newest_seq
-		cx.session:event(companion.pane, { ev = "action", id = "main.poll", act = "poll" })
+	if newest_score > companion.seq then
+		companion.seq = newest_score
+		if companion_alive(cx) then
+			cx.session:event(companion.pane, { ev = "action", id = "main.poll", act = "poll" })
+		else
+			open_companion(cx)
+		end
 	end
 end
 
 -- ---------------------------------------------------------------- events
+
+tern.on("window_start", function(cx)
+	poke(cx)
+end)
 
 tern.on("pane_closed", function(ev, cx)
 	if companion.pane and ev.pane == companion.pane then
@@ -112,7 +117,7 @@ tern.on("pane_closed", function(ev, cx)
 end)
 
 local function arm_timer()
-	tern.timer(200, function(cx)
+	tern.timer(100, function(cx)
 		if cx then
 			pcall(poke, cx)
 		end
@@ -131,5 +136,6 @@ tern.command({
 		toggle(cx)
 	end,
 })
-
-tern.bind("ctrl+alt+y", "plugin.tern-yazi.toggle")
+tern.bind("ctrl+alt+y", function(cx)
+	toggle(cx)
+end)

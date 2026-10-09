@@ -1,5 +1,28 @@
 # tern-yazi Development Plan
 
+## Native companion implementation
+
+The active companion is the Luau File Inbox implementation in `host.luau` and
+`window.luau`; the DDS/Python architecture below records the earlier milestones.
+`plugin.toml` loads `companion.css` for pane-bounded Miller columns: parent/current/
+preview widths are 20/45/35 percent of the width after gaps. Columns share the
+remaining main-region height; directory lists and document previews scroll locally.
+Raster and SVG previews preserve their aspect ratio within the preview column.
+
+Native list selection uses item node IDs, not row numbers. Single-click selects,
+updates the preview and reveals the path in Yazi; a parent/child-column click also
+moves the current directory to that entry's containing directory. Double-click enters
+a directory or opens the revealed file through Yazi. File rows expose full-path
+tooltips. External Yazi cursor changes update the companion selection; task-only
+snapshots do not discard pending optimistic input. The window poller accepts the
+same 256 KiB snapshot limit as the host, so large directories still refresh.
+
+Verification uses isolated `tern serve` fixtures and a sandboxed Yazi instance,
+without switching or capturing the user's virtual desktops. Exercise more than 200
+entries (native virtualization), all three column clicks, directory activation,
+wide/tall raster and SVG previews, and a compact pane. Inspect both renderer
+geometry and Yazi's exported `cwd`/`hovered` acknowledgement.
+
 Direction (2026-10-09): **C' first, B2 as fallback.** C' = hidden yazi core + native Tern frontend: yazi runs in a background tab with the `tern.yazi` plugin exporting full state (`ya.sync` + `cx`) over DDS and receiving commands (`ps.sub_remote`); the companion renders the whole file-manager UI natively in its own pane. B2 keeps yazi visible and the companion as a side panel — same plugin, same transport, smaller UI scope. Decide C' vs B2 after the state channel proves out in M1.
 
 Plan B lineage ("companion panel"): yazi stays the fullscreen ANSI TUI; a Python companion process — foreground in its own pane — renders native Tern surfaces driven by yazi events, and sends commands back. Zero yazi patches: integration goes only through yazi's Lua plugin API and DDS.
@@ -90,4 +113,4 @@ Data flow:
 - `state.py` is a pure reducer decoupled from tern-sdk; every mutation calls `touch()`.
 - Never block the UI thread: no `sleep`, no blocking `.result()`; threads only at the subprocess boundary.
 - Tern edit events use UTF-16 code units — translate, never slice raw.
-- Verify before claiming done: `uv run pytest -q && uv run ruff check src tests scripts && uv run ruff format --check src tests scripts`.
+- Verify native changes with `./tests/smoke_luau.sh` plus the isolated renderer/Yazi scenarios above. The Python commands from earlier milestones are historical: this checkout currently has no Python tests or `scripts/` directory.

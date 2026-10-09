@@ -1,0 +1,120 @@
+/* The pane owns the height; only the directory lists and preview scroll. */
+.sf-main[data-surface="plugin.tern-yazi.companion"] {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.browser"] {
+    flex: 1 1 0;
+    min-height: 0;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.browser"] > * {
+    flex-shrink: 0;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.columns"] {
+    display: grid;
+    grid-template-columns: minmax(0, 4fr) minmax(0, 9fr) minmax(0, 7fr);
+    grid-template-rows: minmax(0, 1fr);
+    gap: 6px;
+    align-items: stretch;
+    flex: 1 1 0;
+    min-height: 0;
+    min-width: 0;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.column."] {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.column."] > .sf-card-head {
+    flex-shrink: 0;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.column."] > .sf-card-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    min-height: 0;
+    min-width: 0;
+    padding: 0 8px 8px;
+    overflow: hidden;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.column."] .sf-list {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    min-height: 0;
+    min-width: 0;
+}
+
+/* Native list internals: retain selected-row reveal and contained wheel scrolling. */
+[data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.column."] .sf-list-scroll.max {
+    flex: 1 1 0;
+    min-height: 0;
+    max-height: 100% !important;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.preview"] {
+    flex: 1 1 0;
+    min-height: 0;
+    min-width: 0;
+    overflow: auto;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.preview-actions"] {
+    flex-shrink: 0;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.image-preview"] {
+    height: 100%;
+    min-height: 0;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.image-preview"] > .sf-text {
+    flex-shrink: 0;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.image"] {
+    flex: 1 1 0;
+    min-height: 0;
+    min-width: 0;
+    max-height: 100% !important;
+    overflow: hidden;
+}
+
+/* Natural dimensions are inline; contain both raster and SVG in the allotted box. */
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.image"] > .sf-img-frame,
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.image"] > .sf-img-svg {
+    width: 100% !important;
+    height: 100% !important;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.status"] {
+    min-width: 0;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.status"] > * {
+    flex-shrink: 0;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.status-name"] {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
