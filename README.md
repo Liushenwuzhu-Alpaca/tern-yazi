@@ -142,7 +142,7 @@ The host selects the snapshot with the largest positive `ts`, falling back to `s
 | `tern.d.luau` | Generated Tern API definitions for IDE tooling |
 | `tests/smoke_luau.sh` | Plugin load/reload registration smoke check |
 
-Refresh type definitions with `tern plugin types .`. The native plugin has no Python test suite in this checkout; the Python/DDS plans in `PLAN.md` and `docs/m0-findings.md` are historical, not a supported Python entry point.
+Refresh type definitions with `tern plugin types .`. The native plugin has no Python test suite in this checkout and does not provide a supported Python entry point.
 
 The registration smoke script links/reloads/unlinks the plugin and writes a fixture named `state-9999.json`. It does **not** open the block, exercise Yazi, or verify rendered pixels. Its default inbox can collide with a real Yazi client, and `TERN_CONFIG_DIR` alone does not guarantee daemon/window isolation. Run it with a disposable runtime directory and a disposable Tern environment, not against your working session:
 
@@ -241,7 +241,7 @@ Yazi 插件在目录、悬停及状态栏重绘时原子写入 JSON；Tern 窗�
 
 ### 开发与验证
 
-各文件职责见上方 [Development and verification](#development-and-verification)。执行 `tern plugin types .` 可更新 IDE 类型定义。当前工作副本没有 Python 测试套件；`PLAN.md` 与 `docs/m0-findings.md` 中的 Python/DDS 架构为历史材料，不是当前支持的 Python 运行入口。
+各文件职责见上方 [Development and verification](#development-and-verification)。执行 `tern plugin types .` 可更新 IDE 类型定义。当前工作副本没有 Python 测试套件，也不提供受支持的 Python 运行入口。
 
 `tests/smoke_luau.sh` 只验证插件链接、加载、重载和注册状态，不启动 Yazi、不打开 UI，也不验证像素或鼠标行为。它会写入并删除 `state-9999.json`；默认运行可能影响真实客户端，仅隔离 `TERN_CONFIG_DIR` 也不等于隔离 daemon/window。请使用上方临时 runtime 示例，并在可丢弃的 Tern 环境运行；检查后仅清理自己创建的临时目录。
 
