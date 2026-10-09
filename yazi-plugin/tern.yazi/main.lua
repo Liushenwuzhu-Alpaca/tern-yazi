@@ -117,15 +117,96 @@ local function pulse()
 	end
 end
 
+-- State inbox writer for native Tern companion plugin (Option A).
+local state_seq = 0
+local last_dump_key = nil
+
+local function state_dir()
+	local base = os.getenv("XDG_RUNTIME_DIR")
+	if not base or base == "" then
+		base = "/tmp"
+	end
+	return base .. "/tern-yazi"
+end
+
+local function get_client_id()
+	local env_id = os.getenv("YAZI_ID")
+	if env_id and env_id ~= "" then
+		return env_id
+	end
+	return "default"
+end
+
+local function dump_state()
+	local active = cx.active
+	if not active or not active.current then
+		return
+	end
+
+	local folder = read_folder()
+	local hovered = read_hovered()
+	local ok_p, pulse_data = pcall(read_pulse)
+	local tasks_data = ok_p and pulse_data.tasks or { total = 0, succ = 0, fail = 0, found = 0, processed = 0 }
+	local selected = ok_p and pulse_data.selected or selected_count()
+
+	local key = table.concat({
+		folder.url,
+		#folder.files,
+		hovered.url or "",
+		selected,
+		tasks_data.total,
+		tasks_data.succ,
+		tasks_data.fail,
+		tasks_data.found,
+		tasks_data.processed,
+	}, ";")
+
+	if key == last_dump_key then
+		return
+	end
+	last_dump_key = key
+	state_seq = state_seq + 1
+
+	local sdir = state_dir()
+	os.execute("mkdir -p " .. sdir)
+
+	local cid = get_client_id()
+	local payload = {
+		seq = state_seq,
+		client_id = tonumber(cid) or cid,
+		cwd = folder.url,
+		files = folder.files,
+		selected = selected,
+		hovered = hovered.url and hovered or nil,
+		tasks = tasks_data,
+	}
+
+	local ok_enc, encoded = pcall(ya.json_encode, payload)
+	if not ok_enc or not encoded then
+		return
+	end
+
+	local tmp_file = string.format("%s/state-%s.tmp", sdir, cid)
+	local dest_file = string.format("%s/state-%s.json", sdir, cid)
+	local f = io.open(tmp_file, "w")
+	if f then
+		f:write(encoded)
+		f:close()
+		os.rename(tmp_file, dest_file)
+	end
+end
+
 function M:setup()
 	-- Builtin local event bodies carry only { tab }; snapshot `cx` instead.
 	ps.sub("hover", function()
 		publish_hover()
 		pulse()
+		dump_state()
 	end)
 	ps.sub("cd", function()
 		publish_folder()
 		pulse()
+		dump_state()
 	end)
 
 	-- Companion command channel.
@@ -144,6 +225,7 @@ function M:setup()
 	-- redraw together with the built-in progress gauge: pulse from there.
 	Status:children_add(function()
 		pulse()
+		dump_state()
 		return ui.Line("")
 	end, 1000, Status.RIGHT)
 end
