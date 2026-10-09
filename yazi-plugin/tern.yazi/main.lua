@@ -341,7 +341,10 @@ function M:entry(job)
 				return
 			end
 		end
-		if req.op == "trash_prepare" then
+		if req.op == "ping" then
+			snapshot()
+			reply(req, { ok = true })
+		elseif req.op == "trash_prepare" then
 			reply(req, { ok = true, paths = targets(req.target) })
 		elseif req.op == "trash_commit" or req.op == "yank" then
 			if req.op == "yank" then req.paths = targets(req.target) end

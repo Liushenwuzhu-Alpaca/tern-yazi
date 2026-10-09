@@ -5,6 +5,9 @@
 -- and robust keyboard navigation mapped to Yazi.
 
 local ui = tern.ui
+local running = {}
+local launch_contexts = {}
+local launches = {}
 
 local LIST_IDS = {
 	parent_list = "main.browser.columns.parent.parent_list",
@@ -210,41 +213,138 @@ local function file_icon(fname: string, is_dir: boolean): (string, string)
 	return "", "muted"
 end
 
-local function read_latest_state(): YaziState?
+local function read_json(path: string): any?
+	local ok, text = pcall(tern.fs.read, path, 256 * 1024)
+	if not ok then return nil end
+	local decoded, value = pcall(tern.json.decode, text)
+	return decoded and type(value) == "table" and value or nil
+end
+
+-- Shell effects wake the owning window; window timers alone can sleep while idle.
+tern.on("command_started", function(ev, cx) launch_contexts[ev.pane] = cx end)
+tern.on("pane_exited", function(ev) launch_contexts[ev.pane] = nil end)
+
+local function discover_launches()
+	local dir = state_dir()
+	if not tern.fs.exists(dir) then return end
+	local seen = {}
+	for _, fname in ipairs(tern.fs.list(dir)) do
+		local cid = fname:match("^managed%-(%d+)%.json$")
+		if not cid then continue end
+		local health = read_json(dir .. "/" .. fname)
+		if not health or health.client_id ~= cid or type(health.token) ~= "string"
+			or not health.token:match("^[%w-]+$") or type(health.owner_pane) ~= "number"
+			or type(health.seq) ~= "number" or type(health.cwd) ~= "string" then continue end
+		seen[cid] = true
+		local record = launches[cid]
+		if not record or record.token ~= health.token then
+			record = { token = health.token, seq = health.seq }
+			launches[cid] = record
+		elseif not record.opened and record.seq ~= health.seq then
+			local cx = launch_contexts[health.owner_pane]
+			if cx then
+				-- A progressing supervisor, not an old snapshot, authorizes startup.
+				cx:open(dir .. "/" .. fname)
+				record.opened = true
+			end
+		end
+		record.seq = health.seq
+	end
+	for cid in pairs(launches) do if not seen[cid] then launches[cid] = nil end end
+end
+
+local function poll_launches()
+	local ok, err = pcall(discover_launches)
+	if not ok then tern.log.warn("Yazi startup discovery failed", tostring(err)) end
+	tern.timer(500, poll_launches)
+end
+tern.timer(500, poll_launches)
+
+local function refresh_live(state: any): boolean
+	local live = false
+	if not state.closing and state.token and state.cid then
+		local health = read_json(state_dir() .. "/managed-" .. state.cid .. ".json")
+		if health and health.client_id == state.cid and health.token == state.token
+			and type(health.seq) == "number" and health.owner_pane == state.owner_pane then
+			if health.seq ~= state.health_seq then
+				if state.health_seq ~= nil then state.health_seen = tern.now() end
+				state.health_seq = health.seq
+			end
+			live = state.health_seen ~= nil and tern.now() - state.health_seen < 3000
+		end
+	elseif not state.closing then
+		-- Idle snapshots have no expiry. Only an actor acknowledgement proves life.
+		live = state.last_ack ~= nil and tern.now() - state.last_ack < 3000
+	end
+	state.live = live
+	if not live then
+		state.trash = nil
+		state.active_file = nil
+		state.optimistic_cwd = nil
+	end
+	return live
+end
+
+local function read_latest_state(state: any): YaziState?
 	local sdir = state_dir()
-	if not tern.fs.exists(sdir) then
-		return nil
+	refresh_live(state)
+	if state.cid then
+		local parsed = read_json(sdir .. "/state-" .. state.cid .. ".json")
+		if parsed then parsed.client_id = state.cid end
+		return parsed
 	end
-	local ok_list, entries = pcall(tern.fs.list, sdir)
-	if not ok_list or not entries then
-		return nil
-	end
-
-	local newest_content = nil
-	local newest_score = -1
-
+	if not tern.fs.exists(sdir) then return nil end
+	local ok, entries = pcall(tern.fs.list, sdir)
+	if not ok then return nil end
+	local newest, score = nil, -1
 	for _, fname in ipairs(entries) do
-		if fname:match("^state%-.+%.json$") then
-			local full_path = sdir .. "/" .. fname
-			local ok_read, content = pcall(tern.fs.read, full_path, 256 * 1024)
-			if ok_read and content then
-				local ok_json, parsed = pcall(tern.json.decode, content)
-				if ok_json and type(parsed) == "table" then
-					local file_cid = fname:match("^state%-(.+)%.json$")
-					if file_cid then
-						parsed.client_id = file_cid
-					end
-					local ts = parsed.ts or 0
-					local score = (ts > 0 and ts) or (parsed.seq or 0)
-					if score > newest_score then
-						newest_score = score
-						newest_content = parsed
-					end
+		local cid = fname:match("^state%-(%d+)%.json$")
+		if cid and not tern.fs.exists(sdir .. "/managed-" .. cid .. ".json") then
+			local parsed = read_json(sdir .. "/" .. fname)
+			if parsed then
+				local candidate = tonumber(parsed.ts) or tonumber(parsed.seq) or 0
+				if candidate > score then
+					parsed.client_id = cid
+					newest, score = parsed, candidate
 				end
 			end
 		end
 	end
-	return newest_content
+	if newest then state.cid = newest.client_id end
+	return newest
+end
+
+local function stop_backend(state: any)
+	if state.cid and state.token then
+		local stem = state_dir() .. "/managed-" .. state.cid
+		local health = read_json(stem .. ".json")
+		if health and health.client_id == state.cid and health.token == state.token then
+			pcall(tern.fs.write, stem .. ".stop", state.token .. "\n")
+			local ok, lease = pcall(tern.fs.read, stem .. ".lease", 4096)
+			if ok and lease:match("^(%S+)") == state.token then pcall(tern.fs.write, stem .. ".lease", "") end
+		end
+	end
+end
+
+local function close_companion(state: any, cx: any)
+	state.closing = true
+	state.live = false
+	state.requests = {}
+	if state.timer then state.timer:cancel(); state.timer = nil end
+	running[cx.pane] = nil
+	stop_backend(state)
+	cx:exit(0)
+end
+
+local function managed_poll(state: any, ev: any, cx: any)
+	-- PaneInfo has no launch args. This token-bound nonce ACK proves the hinted
+	-- pane is this client, even after a reload or pane-id reuse.
+	if ev.cid ~= state.cid or ev.token ~= state.token or type(ev.nonce) ~= "string"
+		or not ev.nonce:match("^[%w-]+$") or not refresh_live(state) then return end
+	state.lease_nonce = ev.nonce
+	local lease = string.format("%s %d %d %d %s\n", state.token, cx.pane,
+		math.max(1, cx.rows), math.max(1, cx.cols), ev.nonce)
+	pcall(tern.fs.write, state_dir() .. "/managed-" .. state.cid .. ".lease", lease)
 end
 
 local function fetch_archive_contents(full_url: string, ext: string, state: any)
@@ -513,6 +613,11 @@ local pump
 
 local function request(state: any, yz: any, cx: any, body: any, done: any?)
 	local cid = safe_cid(yz and yz.client_id)
+	if state.closing or (body.op ~= "ping" and not refresh_live(state)) then
+		cx:toast("error", "Yazi is offline", "Reconnect before using file actions")
+		return
+	end
+	if state.cid and cid ~= state.cid then cx:toast("error", "Yazi client mismatch", nil); return end
 	if not cid then cx:toast("error", "No Yazi client", nil); return end
 	if body.args then
 		local positional, options = {}, {}
@@ -523,7 +628,8 @@ local function request(state: any, yz: any, cx: any, body: any, done: any?)
 		body.args = { positional = positional, options = options }
 	end
 	request_seq += 1
-	body.id = request_epoch .. "-" .. tostring(cx.pane) .. "-" .. tostring(request_seq)
+	local prefix = state.token and (cid .. "-" .. state.token .. "-") or ""
+	body.id = prefix .. request_epoch .. "-" .. tostring(cx.pane) .. "-" .. tostring(request_seq)
 	state.requests = state.requests or {}
 	table.insert(state.requests, { cid = cid, body = body, done = done })
 	pump(state, cx)
@@ -533,19 +639,33 @@ pump = function(state: any, cx: any)
 	if state.sending or not state.requests or #state.requests == 0 then return end
 	state.sending = true
 	local job = state.requests[1]
+	if state.closing or job.cid ~= state.cid or (job.body.op ~= "ping" and not refresh_live(state)) then
+		state.sending = false
+		state.requests = {}
+		return
+	end
 	local body = job.body
 	local path = state_dir() .. "/reply-" .. body.id .. ".json"
 	local finished = false
 	local function finish(reply: any)
 		if finished then return end
 		finished = true
+		if reply.ok and state.token and not refresh_live(state) then
+			reply = { ok = false, error = "Yazi backend stopped; the last operation's outcome may be unknown" }
+		end
+		if reply.ok and not state.token then state.last_ack = tern.now(); state.live = true end
 		state.sending = false
 		table.remove(state.requests, 1)
 		if not reply.ok then
+			local was_live = state.live
+			state.last_ack = nil
+			state.live = false
 			state.requests = {}
 			state.active_file = nil
 			state.optimistic_cwd = nil
-			cx:toast("error", "Yazi request failed", reply.error or "No acknowledgement")
+			if body.op ~= "ping" or was_live then
+				cx:toast("error", "Yazi request failed", reply.error or "No acknowledgement")
+			end
 		end
 		if job.done then job.done(reply) end
 		cx:render()
@@ -575,7 +695,7 @@ pump = function(state: any, cx: any)
 					end
 				end
 				attempts += 1
-				if attempts >= 200 then
+				if attempts >= (body.op == "ping" and 60 or 200) then
 					finish({ ok = false, error = "Timed out waiting for Yazi; outcome unknown, do not retry destructive actions blindly" })
 				else tern.timer(50, poll) end
 			end
@@ -727,7 +847,7 @@ end
 handle_key = function(state: any, key: any, cx: any): boolean
 	local raw = key.name or ""
 	local k = raw:lower()
-	local yz = read_latest_state()
+	local yz = read_latest_state(state)
 	sync_hover(state, yz)
 	local cwd = state.optimistic_cwd or (yz and yz.cwd) or "/"
 	local files = yz and compute_file_list(state, yz, cwd) or {}
@@ -735,6 +855,12 @@ handle_key = function(state: any, key: any, cx: any): boolean
 	local target = name and join_path(cwd, name)
 	local escape = k == "escape" or k == "esc"
 	local enter = k == "enter" or k == "return"
+	if not state.live then
+		if (k == "q" or escape) and not key.ctrl and not key.alt and not key.meta then
+			close_companion(state, cx)
+		else cx:toast("error", "Yazi is offline", "Reconnect before using file actions") end
+		return true
+	end
 	if state.trash then
 		if escape then trash_decision(state, cx, false)
 		elseif enter then trash_decision(state, cx, true) end
@@ -848,14 +974,66 @@ handle_key = function(state: any, key: any, cx: any): boolean
 			cx:toast(res.status == 0 and "success" or "error", res.status == 0 and "Extracted archive" or "Extraction failed", res.stderr)
 		end) end)
 		if not ok then cx:toast("error", "Extraction failed", tostring(err)) end
-	elseif k == "q" or escape then cx:exit(0)
+	elseif k == "q" or escape then close_companion(state, cx)
 	else return false end
 	return true
 end
 
+-- Host timers keep idle daemon-owned panes alive independently of window frames.
+local function poll_block(state)
+	state.timer = tern.timer(500, function()
+		local cx = state.cx
+		state.timer = nil
+		if state.closing or running[cx.pane] ~= state then return end
+		local pane_alive, owner_alive = false, state.owner_pane == nil
+		for _, info in ipairs(tern.pane.list()) do
+			if info.pane == cx.pane then pane_alive = true end
+			if info.pane == state.owner_pane then owner_alive = true end
+		end
+		if not pane_alive or not owner_alive then
+			state.closing = true
+			running[cx.pane] = nil
+			stop_backend(state)
+			return
+		end
+		local yz = read_latest_state(state)
+		if state.token and state.lease_nonce then
+			managed_poll(state, { cid = state.cid, token = state.token, nonce = state.lease_nonce }, cx)
+		elseif not state.token and yz and not state.sending and tern.now() >= (state.next_probe or 0) then
+			state.next_probe = tern.now() + 2000
+			request(state, yz, cx, { op = "ping" })
+		end
+		local seq = yz and (yz.ts or yz.seq)
+		local config_ok, config = pcall(function() return tern.json.encode(tern.kv.get("preview_limits")) end)
+		local config_stamp = tostring(config_ok) .. tostring(config)
+		if seq ~= state.render_seq or state.live ~= state.render_live or config_stamp ~= state.render_config then
+			state.render_seq, state.render_live, state.render_config = seq, state.live, config_stamp
+			cx:render()
+		end
+		poll_block(state)
+	end)
+end
+
 tern.block.define("companion", {
 	init = function(cx, args, saved)
-		return {
+		args = args or {}
+		saved = type(saved) == "table" and saved or {}
+		local cid = safe_cid(args[1] or saved.cid)
+		if cid and not cid:match("^%d+$") then cid = nil end
+		local token = args[2] or saved.token
+		if type(token) ~= "string" or not token:match("^[%w-]+$") then token = nil end
+		local nonce = args[5] or saved.lease_nonce
+		if type(nonce) ~= "string" or not nonce:match("^[%w-]+$") then nonce = nil end
+		local previous = running[cx.pane]
+		if previous and previous.timer then previous.timer:cancel() end
+		local state = {
+			cx = cx,
+			cid = cid,
+			token = token,
+			lease_nonce = nonce,
+			owner_pane = tonumber(args[3]) or saved.owner_pane,
+			source_cwd = args[4] or saved.source_cwd,
+			live = false,
 			active_file = nil,
 			optimistic_cwd = nil,
 			filter_mode = false,
@@ -865,21 +1043,23 @@ tern.block.define("companion", {
 			cmd_kind = "command",
 			archive_cache = {},
 		}
+		running[cx.pane] = state
+		poll_block(state)
+		return state
 	end,
 
 	view = function(state, cx)
-		local yz = read_latest_state()
-		if not yz then
+		state.cx = cx
+		local yz = read_latest_state(state)
+		if not yz or not state.live then
 			return {
 				main = ui.card(
-					{ ui.span("Waiting for Yazi...", "muted") },
+					{ ui.span(yz and "Yazi is offline" or "Connect to Yazi", "warn") },
 					{
-						ui.text("No active Yazi instance detected."),
-						ui.text({
-							ui.span("Launch "),
-							ui.span("yazi", "strong"),
-							ui.span(" in any terminal with tern.yazi plugin enabled."),
-						}),
+						ui.text(state.token and "The managed backend stopped or is not responding. File actions are disabled."
+							or "Explicit attach requires a running Yazi with the tern.yazi plugin; checking actor acknowledgement."),
+						ui.text(state.cid and ("Client " .. state.cid) or "No Yazi snapshot is available."),
+						ui.text("Press q or Esc to close this panel."),
 					}
 				),
 				dock = ui.row({
@@ -1101,7 +1281,7 @@ tern.block.define("companion", {
 	end,
 
 	title = function(state)
-		local yz = read_latest_state()
+		local yz = read_latest_state(state)
 		if yz and yz.cwd then
 			return "Companion (" .. basename(yz.cwd) .. ")"
 		end
@@ -1111,11 +1291,23 @@ tern.block.define("companion", {
 	event = function(state, ev, cx)
 		local act = ev.act
 		local val = ev.value
-		local yz = read_latest_state()
+		local yz = read_latest_state(state)
 		sync_hover(state, yz)
 		local cid = safe_cid(yz and yz.client_id)
 		local cwd = yz and yz.cwd or ""
 		if act == "shortcut" and type(ev.key) == "table" then handle_key(state, ev.key, cx); return end
+		if act == "managed_poll" then managed_poll(state, ev, cx); return end
+		if act == "poll" then
+			if not state.token and yz and not state.sending and tern.now() >= (state.next_probe or 0) then
+				state.next_probe = tern.now() + 2000
+				request(state, yz, cx, { op = "ping" })
+			end
+			return
+		end
+		if not state.live then
+			cx:toast("error", "Yazi is offline", "Reconnect before using file actions")
+			return
+		end
 		if state.trash then
 			if act == "trash_confirm" then trash_decision(state, cx, true)
 			elseif act == "trash_cancel" then trash_decision(state, cx, false) end
@@ -1218,6 +1410,7 @@ tern.block.define("companion", {
 	end,
 
 	save = function(state)
-		return nil
+		return { cid = state.cid, token = state.token, owner_pane = state.owner_pane,
+			source_cwd = state.source_cwd, lease_nonce = state.lease_nonce }
 	end,
 })

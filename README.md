@@ -2,7 +2,7 @@
 
 [中文](README.zh-CN.md)
 
-Native Tern companion for Yazi.
+Native Tern file browser powered by Yazi.
 
 ![Native Yazi companion preview](assets/preview.png)
 
@@ -10,6 +10,7 @@ Native Tern companion for Yazi.
 
 - Linux · Tern 0.7.0 · Yazi + Ya 26.9.1
 - `tern`, `yazi`, `ya` on `PATH`; Tern and Yazi share the same machine and `XDG_RUNTIME_DIR`
+- Rust and Cargo for the installer build
 - Nerd Font for file icons
 
 ## Install
@@ -18,17 +19,25 @@ Native Tern companion for Yazi.
 git clone https://github.com/Liushenwuzhu-Alpaca/tern-yazi.git
 cd tern-yazi
 tern plugin link "$PWD"
+sh install.sh --real /usr/bin/yazi
+export PATH="$HOME/.local/bin:$PATH"
 mkdir -p "$HOME/.config/yazi/plugins"
 ln -s "$PWD/yazi-plugin/tern.yazi" "$HOME/.config/yazi/plugins/tern.yazi"
 ```
 
-Add to your Yazi `init.lua`, then restart Yazi:
+Add to your Yazi `init.lua`:
 
 ```lua
 require("tern"):setup()
 ```
 
-Open with **Ctrl+Alt+Y** or **Yazi: Toggle Companion Panel**.
+Run `yazi` inside Tern to open a native block beside the launching shell, with Yazi running in an invisible PTY. Outside Tern, `yazi` runs the original executable with your arguments.
+
+Each managed block stays pinned to its client across plugin reloads. `q` closes it and stops its backend; Esc first cancels input or Trash confirmation, clears a filter, or leaves visual selection, then closes. Closing the managed pane or launching shell pane also stops the backend. Managed sessions persist in Tern's daemon when their window closes.
+
+Use **Ctrl+Alt+Y** or **Yazi: Toggle Companion Panel** to attach to an ordinary running Yazi or switch the panel layout. Closing an attached panel leaves that Yazi running.
+
+The installer defaults to `~/.local`; `--prefix DIR` selects another location. Place its `bin` first on `PATH`. `sh install.sh --uninstall` removes the owned wrapper and helper while preserving the original Yazi; use the same `--prefix` for a custom installation.
 
 ## Features
 
@@ -45,7 +54,7 @@ Open with **Ctrl+Alt+Y** or **Yazi: Toggle Companion Panel**.
 
 - Ctrl+D/U/F/B and Shift+PageUp/Down routing in Tern
 - Dedicated create, rename, paste, search and tab shortcuts
-- Client picker and connection-health status
+- Client picker
 - PDF, audio and video previews
 
 [Development guide](DEVELOPMENT.md)
