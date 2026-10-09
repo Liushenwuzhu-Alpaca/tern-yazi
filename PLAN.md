@@ -1,6 +1,8 @@
 # tern-yazi Development Plan
 
-Plan B ("companion panel"): a Tern-native companion pane for yazi. yazi stays the fullscreen ANSI TUI in its own pane; a Python companion process — foreground in its own pane — renders native Tern surfaces (hover preview/metadata, selection, task progress, action cards) driven by yazi events, and sends commands back. Zero yazi patches: integration goes only through yazi's Lua plugin API and DDS.
+Direction (2026-10-09): **C' first, B2 as fallback.** C' = hidden yazi core + native Tern frontend: yazi runs in a background tab with the `tern.yazi` plugin exporting full state (`ya.sync` + `cx`) over DDS and receiving commands (`ps.sub_remote`); the companion renders the whole file-manager UI natively in its own pane. B2 keeps yazi visible and the companion as a side panel — same plugin, same transport, smaller UI scope. Decide C' vs B2 after the state channel proves out in M1.
+
+Plan B lineage ("companion panel"): yazi stays the fullscreen ANSI TUI; a Python companion process — foreground in its own pane — renders native Tern surfaces driven by yazi events, and sends commands back. Zero yazi patches: integration goes only through yazi's Lua plugin API and DDS.
 
 Modeled on `hermes-for-tern`: adapter process + structured protocol + pure reducer + pure views + single-threaded poll loop.
 
@@ -52,7 +54,7 @@ Data flow:
 ### M1 — Transport & launcher
 
 - Launcher: companion takes pane foreground, splits a pane for yazi via the `tern` CLI (`tern split ... -- yazi --client-id <id>`), or attaches to an existing instance.
-- Event channel (primary): `yazi-plugin/tern.yazi/main.lua` subscribes to local events (`ps.sub`) and republishes them as custom `tern-*` kinds, declaring the abilities yazi 26.9 requires; companion ingests via `ya sub tern-hover,tern-cd,...` (reader thread + `queue.Queue`, mirrors `hermes-for-tern` Backend). Check yazi plugin docs for exact `ps` API; do not guess.
+- Event channel (primary): `yazi-plugin/tern.yazi/main.lua` subscribes to local events (`ps.sub`) and republishes them as custom `tern-*` kinds, declaring the abilities yazi 26.9 requires; companion ingests via `ya sub tern-hover,tern-cd,...` (reader thread + `queue.Queue`, mirrors `hermes-for-tern` Backend). **Round-trip proven 2026-10-09**: `ps.sub("hover")` + `cx` read → `ps.pub_to(0, ...)` → `ya sub` receives; `ya pub-to <id> tern-cmd` → `ps.sub_remote` receives → broadcast ack received. Known caveat: the hover callback can observe the pre-update `cx` (three rapid `j` moves reported the same URL) — defer the read or verify sequencing in M2.
 - Event channel (fallback): when the companion launches yazi itself, `yazi --local-events=hover,cd` stdout parsing; tolerate polluted lines (openers writing to stdout).
 - Command channel: `ya emit-to <id>` subprocess wrapper with timeouts; never blocks the UI thread.
 - `--doctor` additionally reports DDS reachability (round-trip a builtin kind against a running instance).
