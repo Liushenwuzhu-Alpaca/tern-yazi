@@ -1,0 +1,31 @@
+[project]
+name = "tern-yazi"
+version = "0.1.0"
+description = "A native Tern companion panel for yazi."
+readme = "PLAN.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = ["tern-sdk==0.1.0"]
+
+[project.scripts]
+tern-yazi = "tern_yazi.launcher:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<9", "ruff>=0.15,<0.16"]
+
+[tool.uv.sources]
+tern-sdk = { git = "https://github.com/stencil-hq/tern-sdk", rev = "46bd7df153d3135d84a0b5658dfb4705d0bddb81", subdirectory = "python" }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tern_yazi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
