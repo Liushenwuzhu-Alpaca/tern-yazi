@@ -5,19 +5,20 @@ def test_hover_sets_hovered_once():
     state = State()
     state.event("tern-hover", {"url": "/tmp/a.txt"})
     assert state.hovered == "/tmp/a.txt"
+    assert state.hovered_name == "a.txt"
     revision = state.revision
     state.event("tern-hover", {"url": "/tmp/a.txt"})
     assert state.revision == revision
     assert state.dropped == 1
 
 
-def test_cd_resets_hovered_and_counts_files():
+def test_cd_carries_files_and_resets_hovered():
     state = State()
     state.event("tern-hover", {"url": "/tmp/a.txt"})
-    state.event("tern-cd", {"url": "/tmp", "files": 3})
-    assert (state.cwd, state.file_count, state.hovered) == ("/tmp", 3, None)
+    state.event("tern-cd", {"url": "/tmp", "files": ["a.txt", "b.md"]})
+    assert (state.cwd, state.files, state.hovered) == ("/tmp", ["a.txt", "b.md"], None)
     revision = state.revision
-    state.event("tern-cd", {"url": "/tmp", "files": 3})
+    state.event("tern-cd", {"url": "/tmp", "files": ["a.txt", "b.md"]})
     assert state.revision == revision
 
 

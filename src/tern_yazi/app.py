@@ -48,6 +48,8 @@ class App:
         ):
             last_render, revision = 0.0, -1
             try:
+                # Ask the plugin for a full snapshot (works on fresh and attached yazi).
+                self.commander.publish("tern-cmd", {"op": "hello"})
                 while not self.exit and not self.session.closed and not surface.closed:
                     self.read_events()
                     item = self.session.poll(0.02)

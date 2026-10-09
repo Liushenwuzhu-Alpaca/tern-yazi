@@ -6,34 +6,35 @@ from tern_sdk import ui
 
 from .state import State
 
+CLIP = 40  # max file rows rendered; yazi pane is the real browser
 
-def hovered_card(state: State):
-    if state.hovered is None:
-        body = ui.text("Move in yazi to see the hovered entry here.")
-        head = "nothing hovered"
-    else:
-        body = ui.text(state.hovered, wrap="word")
-        head = state.hovered.rstrip("/").rsplit("/", 1)[-1]
-    return ui.card(body, head=head, key="hovered")
+
+def file_list(state: State):
+    if not state.files:
+        return ui.text("waiting for yazi…" if state.cwd is None else "empty directory", key="files-empty")
+    hovered = state.hovered_name
+    rows = []
+    for name in state.files[:CLIP]:
+        if name == hovered:
+            rows.append(ui.text(f"❯ {name}", tone="accent", key=f"f-{name}"))
+        else:
+            rows.append(ui.text(f"  {name}", key=f"f-{name}"))
+    if len(state.files) > CLIP:
+        rows.append(ui.text(f"  … {len(state.files) - CLIP} more", key="files-more"))
+    return ui.col(*rows, key="files")
 
 
 def view(state: State):
     return {
         "main": ui.col(
-            ui.row(ui.badge("yazi"), ui.text(state.cwd or "waiting for yazi…", key="cwd"), key="head"),
+            ui.row(ui.badge("yazi"), ui.text(state.cwd or "not connected", key="cwd"), key="head"),
             ui.rule(),
-            hovered_card(state),
-            ui.kv(
-                [
-                    ("files", str(state.file_count) if state.file_count is not None else "—"),
-                    ("events", str(state.received)),
-                    ("dropped", str(state.dropped)),
-                ],
-                key="stats",
-            ),
+            file_list(state),
             ui.status(
                 ui.seg("tern-yazi"),
-                ui.seg(f"rev {state.revision}", side="right"),
+                ui.seg(
+                    f"{len(state.files)} files · {state.received} events · rev {state.revision}", side="right"
+                ),
                 key="bar",
                 transparent=True,
             ),
