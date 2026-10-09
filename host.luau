@@ -284,6 +284,35 @@ local function fetch_archive_contents(full_url: string, ext: string, state: any)
 	end)
 end
 -- ---------------------------------------------------------------- rich preview builder
+-- Plugin-scoped byte limits; bounded reads reject whole oversized files, not prefixes.
+local PREVIEW_LIMITS = {
+	image_bytes = { default = 16 * 1024 * 1024, max = 16 * 1024 * 1024 },
+	markdown_bytes = { default = 1024 * 1024, max = 4 * 1024 * 1024 },
+	code_bytes = { default = 1024 * 1024, max = 4 * 1024 * 1024 },
+	mermaid_bytes = { default = 256 * 1024, max = 1024 * 1024 },
+}
+
+local function read_preview(path: string, kind: string): (string?, Node?)
+	local spec = PREVIEW_LIMITS[kind]
+	local ok_config, config = pcall(tern.kv.get, "preview_limits")
+	if not ok_config then
+		return nil, ui.text({ ui.span("Preview settings unavailable: " .. tostring(config), "warn") })
+	end
+	local value = type(config) == "table" and config[kind] or nil
+	local limit = spec.default
+	if type(value) == "number" and value > 0 and value < math.huge and value % 1 == 0 then
+		limit = math.min(value, spec.max)
+	end
+	local ok_read, content = pcall(tern.fs.read, path, limit)
+	if not ok_read then
+		return nil, ui.col({
+			ui.text({ ui.span("Preview unavailable (" .. fmt_size(limit) .. " limit)", "warn") }),
+			ui.text({ ui.span(tostring(content), "muted") }),
+		})
+	end
+	return content, nil
+end
+
 
 -- Rich native preview: Markdown, SVG, Mermaid, Images, Syntax-highlighted code, directory tree
 local function build_rich_preview(full_url: string, is_dir: boolean, active_name: string, state: any, cx: any): Node
@@ -338,58 +367,59 @@ local function build_rich_preview(full_url: string, is_dir: boolean, active_name
 		end
 	end
 
+	local kind = "code_bytes"
+	if img_mime then
+		kind = "image_bytes"
+	elseif ext == "mermaid" or ext == "mmd" then
+		kind = "mermaid_bytes"
+	elseif ext == "md" or ext == "markdown" then
+		kind = "markdown_bytes"
+	end
+	local content, read_error = read_preview(full_url, kind)
+	if not content then
+		return read_error
+	end
+
 	-- 1. SVG and Image Native Preview (via cx:blob + ui.node("image", ...))
 	if img_mime then
-		local ok_bytes, bytes = pcall(tern.fs.read, full_url, 8 * 1024 * 1024)
-		if ok_bytes and bytes and #bytes > 0 then
-			local ok_blob, blob_id = pcall(function()
-				return cx:blob(bytes, img_mime)
-			end)
-			if ok_blob and blob_id then
-				return ui.node("col", { role = "yazi.image-preview", gap = "sm" }, {
-					ui.node("image", {
-						blob = blob_id,
-						alt = active_name,
-						role = "yazi.image",
-						max = { w = 1, h = tostring(math.max(1, (cx.rows or 24) - 12)) .. "lines" },
-					}),
-					ui.text({ ui.span(string.format("Image (%s, %s)", ext:upper(), fmt_size(#bytes)), "muted") }),
-				})
-			end
+		if #content == 0 then
+			return ui.text({ ui.span("Image file is empty", "muted") })
 		end
+		local ok_blob, blob_id = pcall(function()
+			return cx:blob(content, img_mime)
+		end)
+		if not ok_blob or not blob_id then
+			return ui.text({ ui.span("Image preview unavailable: " .. tostring(blob_id), "warn") })
+		end
+		return ui.node("col", { role = "yazi.image-preview", gap = "sm" }, {
+			ui.node("image", {
+				blob = blob_id,
+				alt = active_name,
+				role = "yazi.image",
+				max = { w = 1, h = tostring(math.max(1, (cx.rows or 24) - 12)) .. "lines" },
+			}),
+			ui.text({ ui.span(string.format("Image (%s, %s)", ext:upper(), fmt_size(#content)), "muted") }),
+		})
 	end
 
 	-- 2. Mermaid diagram preview (.mermaid / .mmd)
 	if ext == "mermaid" or ext == "mmd" then
-		local ok_read, content = pcall(tern.fs.read, full_url, 32 * 1024)
-		if ok_read and content then
-			local md_wrapper = "```mermaid\n" .. content .. "\n```"
-			return ui.md(md_wrapper)
-		end
+		return ui.md("```mermaid\n" .. content .. "\n```")
 	end
 
 	-- 3. Markdown rich formatted document preview (.md / .markdown)
 	if ext == "md" or ext == "markdown" then
-		local ok_read, content = pcall(tern.fs.read, full_url, 32 * 1024)
-		if ok_read and content then
-			return ui.md(content)
-		end
+		return ui.md(content)
 	end
 
 	-- 4. Code / Text syntax highlighting preview
-	local ok_read, content = pcall(tern.fs.read, full_url, 16 * 1024)
-	if ok_read and content then
-		if content:find("\0") then
-			return ui.col({
-				ui.text({ ui.span("Binary file (preview suppressed)", "muted") }),
-				ui.text({ ui.span("Size: " .. fmt_size(#content), "strong") }),
-			})
-		end
-		local lang = detect_lang(ext)
-		return ui.code(content, lang)
-	else
-		return ui.text({ ui.span("File unavailable or empty", "muted") })
+	if content:find("\0") then
+		return ui.col({
+			ui.text({ ui.span("Binary file (preview suppressed)", "muted") }),
+			ui.text({ ui.span("Size: " .. fmt_size(#content), "strong") }),
+		})
 	end
+	return ui.code(content, detect_lang(ext))
 end
 
 -- Keep native selection reveal enabled; CSS fits the scroller to the column's
@@ -484,6 +514,14 @@ local pump
 local function request(state: any, yz: any, cx: any, body: any, done: any?)
 	local cid = safe_cid(yz and yz.client_id)
 	if not cid then cx:toast("error", "No Yazi client", nil); return end
+	if body.args then
+		local positional, options = {}, {}
+		for i, value in ipairs(body.args) do positional[i] = value end
+		for key, value in pairs(body.args) do
+			if type(key) == "string" then options[key] = value end
+		end
+		body.args = { positional = positional, options = options }
+	end
 	request_seq += 1
 	body.id = request_epoch .. "-" .. tostring(cx.pane) .. "-" .. tostring(request_seq)
 	state.requests = state.requests or {}
@@ -706,6 +744,16 @@ handle_key = function(state: any, key: any, cx: any): boolean
 		if escape then state.cmd_mode = false; state.cmd_query = ""
 		elseif enter then
 			local query = state.cmd_query or ""
+			if state.cmd_kind == "shell" then
+				if query == "" then state.cmd_mode = false; return true end
+				request(state, yz, cx, { op = "command", action = "shell", args = { query, cwd = cwd } }, function(reply)
+					if reply.ok then
+						if state.cmd_query == query then state.cmd_mode = false; state.cmd_query = "" end
+						cx:toast("info", "Yazi accepted shell command", "Execution is asynchronous; inspect the task result")
+					end
+				end)
+				return true
+			end
 			local words, err = command_words(query)
 			if err then cx:toast("error", "Invalid command", err)
 			elseif words and #words > 0 then
@@ -791,7 +839,9 @@ handle_key = function(state: any, key: any, cx: any): boolean
 			elseif reply.ok then cx:toast("info", "Nothing to trash", nil) end
 		end)
 	elseif k == "/" then state.filter_mode = true
-	elseif k == ":" or k == "colon" or (k == ";" and key.shift) then state.cmd_mode = true; state.cmd_query = ""
+	elseif k == ";" and not key.shift then state.cmd_mode = true; state.cmd_kind = "shell"; state.cmd_query = ""
+	elseif k == ":" or k == "colon" or (k == ";" and key.shift) then state.cmd_mode = true; state.cmd_kind = "command"; state.cmd_query = ""
+	elseif k == "." or k == "period" then action(state, yz, cx, "hidden", { state = "toggle" })
 	elseif k == "x" and target and is_archive(file_ext(target)) then
 		local argv = file_ext(target) == "zip" and { "unzip", "-o", target, "-d", cwd } or { "tar", "-xf", target, "-C", cwd }
 		local ok, err = pcall(function() tern.process.run(argv, function(res)
@@ -812,6 +862,7 @@ tern.block.define("companion", {
 			filter_query = "",
 			cmd_mode = false,
 			cmd_query = "",
+			cmd_kind = "command",
 			archive_cache = {},
 		}
 	end,
@@ -874,9 +925,9 @@ tern.block.define("companion", {
 		-- 1.2 Command Bar (when command active)
 		if state.cmd_mode or (state.cmd_query and state.cmd_query ~= "") then
 			local c_bar = ui.row({
-				ui.badge("Command [:]", "warn"),
+				ui.badge(state.cmd_kind == "shell" and "Shell [;]" or "Command [:]", "warn"),
 				ui.text({
-					ui.span(" :" .. (state.cmd_query or ""), "strong"),
+					ui.span(" " .. (state.cmd_kind == "shell" and ";" or ":") .. (state.cmd_query or ""), "strong"),
 					ui.span(state.cmd_mode and " ▎" or "", "warn"),
 				}),
 				clickable(ui.badge("Cancel [Esc]", "muted"), "clear_cmd"),

@@ -69,8 +69,25 @@ local function state_dir(): string
 	end
 	return "/tmp/tern-yazi"
 end
+-- Watch the plugin store independently of Yazi snapshots so saved limits apply live.
+local preview_config_stamp = nil
+local function poke_preview_config(cx)
+	local ok, stamp = pcall(function()
+		return tern.json.encode(tern.kv.get("preview_limits") or tern.json.null)
+	end)
+	stamp = (ok and "ok:" or "error:") .. tostring(stamp)
+	if stamp == preview_config_stamp then
+		return
+	end
+	preview_config_stamp = stamp
+	if companion_alive(cx) or adopt_companion(cx) then
+		cx.session:event(companion.pane, { ev = "action", id = "main.poll", act = "poll" })
+	end
+end
+
 
 local function poke(cx)
+	poke_preview_config(cx)
 	local sdir = state_dir()
 	if not tern.fs.exists(sdir) then
 		return
@@ -139,3 +156,37 @@ tern.command({
 tern.bind("ctrl+alt+y", function(cx)
 	toggle(cx)
 end)
+
+tern.command({
+	id = "preview_limits",
+	title = "Yazi: Configure Preview Limits",
+	group = "Yazi",
+	run = function(cx)
+		local ok, err = pcall(function()
+			local defaults = {
+				image_bytes = 16 * 1024 * 1024,
+				markdown_bytes = 1024 * 1024,
+				code_bytes = 1024 * 1024,
+				mermaid_bytes = 256 * 1024,
+			}
+			local config = tern.kv.get("preview_limits")
+			if config == nil then
+				tern.kv.set("preview_limits", defaults)
+			elseif type(config) == "table" then
+				local changed = false
+				for name, value in pairs(defaults) do
+					if config[name] == nil then
+						config[name] = value
+						changed = true
+					end
+				end
+				if changed then tern.kv.set("preview_limits", config) end
+			end
+		end)
+		if not ok then
+			cx:toast("error", "Cannot initialize preview limits", tostring(err))
+		end
+		cx:open(tern.plugin.data .. "/kv.json")
+		cx:toast("info", "Edit preview_limits and save to apply", "Positive integer bytes; caps: image 16 MiB, Markdown/code 4 MiB, Mermaid 1 MiB")
+	end,
+})

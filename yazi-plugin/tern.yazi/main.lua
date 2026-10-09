@@ -313,6 +313,12 @@ function M:entry(job)
 	local req = assert(ya.json_decode(stage))
 	assert(type(req.id) == "string" and req.id:match("^[%w-]+$"), "Invalid request id")
 	local ok, err = pcall(function()
+		if req.args then
+			local args = {}
+			for i, value in ipairs(req.args.positional or {}) do args[i] = value end
+			for key, value in pairs(req.args.options or {}) do args[key] = value end
+			req.args = args
+		end
 		if req.op == "command" then
 			assert(command_actors[req.action] or req.action == "remove", "Unknown or unsupported manager command: " .. tostring(req.action))
 			assert(not req.args.interactive, "Local command input does not open another interactive Yazi prompt")
@@ -362,7 +368,7 @@ function M:entry(job)
 			snapshot()
 			reply(req, { ok = true })
 		elseif req.op == "action" then
-			assert(req.action == "arrow" or req.action == "cd" or req.action == "reveal" or req.action == "visual_mode" or req.action == "escape", "Unsupported companion action")
+			assert(req.action == "arrow" or req.action == "cd" or req.action == "reveal" or req.action == "visual_mode" or req.action == "escape" or req.action == "hidden", "Unsupported companion action")
 			ya.exec(req.action, req.args or {})
 			snapshot()
 			reply(req, { ok = true, queued = true })
