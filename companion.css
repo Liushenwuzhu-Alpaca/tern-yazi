@@ -118,3 +118,20 @@
     white-space: nowrap;
     text-overflow: ellipsis;
 }
+
+/* Confirmation must obscure the underlying file rows without restyling them. */
+.sf-layer[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.trash-confirm"] {
+    background: rgb(from var(--card) r g b / 100%);
+    color: var(--t1);
+    border: 1px solid var(--l3);
+    border-radius: var(--r-card);
+    padding: 12px;
+    pointer-events: auto;
+}
+
+.sf-layer[data-surface="plugin.tern-yazi.companion"] [data-id="layer.trash.controls"] {
+    gap: 12px;
+    margin-top: 12px;
+    padding-top: 8px;
+    border-top: 1px solid var(--l2);
+}

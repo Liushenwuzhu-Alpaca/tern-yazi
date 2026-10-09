@@ -174,10 +174,16 @@ local function dump_state()
 	local tasks_data = ok_p and pulse_data.tasks or { total = 0, succ = 0, fail = 0, found = 0, processed = 0 }
 	local selected = ok_p and pulse_data.selected or selected_count()
 	local selected_paths = selected_urls()
+	local marked = {}
+	for i = 1, #active.current.files do
+		local file = active.current.files[i]
+		if file:is_marked() ~= 0 then marked[#marked + 1] = tostring(file.url) end
+	end
+	local mode = active.mode.is_normal and "normal" or (active.mode.is_select and "select" or "unset")
 
 	local key = table.concat({
 		folder.url,
-		#folder.files,
+		ya.json_encode(folder.files),
 		hovered.url or "",
 		selected,
 		tasks_data.total,
@@ -186,6 +192,8 @@ local function dump_state()
 		tasks_data.found,
 		tasks_data.processed,
 		ya.json_encode(selected_paths),
+		mode,
+		ya.json_encode(marked),
 	}, ";")
 
 	if key == last_dump_key then
@@ -205,6 +213,8 @@ local function dump_state()
 		files = folder.files,
 		selected = selected,
 		selected_urls = selected_paths,
+		mode = mode,
+		marked_urls = marked,
 		hovered = hovered.url and hovered or nil,
 		tasks = tasks_data,
 	}
@@ -222,6 +232,145 @@ local function dump_state()
 		f:close()
 		os.rename(tmp_file, dest_file)
 	end
+end
+
+-- A DDS send is not an actor acknowledgement. Every request has its own reply.
+local function reply(req, value)
+	value.id = req.id
+	local path = state_dir() .. "/reply-" .. req.id .. ".json"
+	local f = assert(io.open(path .. ".tmp", "w"))
+	f:write(assert(ya.json_encode(value)))
+	f:close()
+	assert(os.rename(path .. ".tmp", path))
+end
+
+local snapshot = ya.sync(function()
+	last_dump_key = nil
+	dump_state()
+end)
+
+local targets = ya.sync(function(_, target)
+	local paths = {}
+	for _, file in pairs(cx.active.selected) do paths[tostring(file.url)] = true end
+	for i = 1, #cx.active.current.files do
+		local f = cx.active.current.files[i]
+		local marked = f:is_marked()
+		if marked == 1 then paths[tostring(f.url)] = true
+		elseif marked == 2 then paths[tostring(f.url)] = nil end
+	end
+	local result = {}
+	for path in pairs(paths) do result[#result + 1] = path end
+	if #result == 0 and target then result[1] = target end
+	table.sort(result)
+	return result
+end)
+
+-- Sync emits preempt the normal queue. The FIFO guard runs after the toggles
+-- and before the actor; an unrelated reveal cannot change the approved set.
+local commit = ya.sync(function(self, req, files)
+	assert(not self.pending, "Another target operation is pending")
+	self.pending = req
+	ya.emit("escape", { visual = true, select = true })
+	for _, file in ipairs(files) do ya.emit("toggle", { file, state = "on" }) end
+	ya.emit("plugin", { "tern", "finalize", mode = "sync" })
+end)
+
+-- Only actor names present in the 26.9.1 manager executor are accepted.
+local command_actors = {}
+for name in ("cd arrow leave enter back forward reveal follow stash open yank unyank toggle toggle_all visual_arrow visual_mode escape copy shell hidden linemode filter filter_do sort refresh quit close suspend seek"):gmatch("%S+") do
+	command_actors[name] = true
+end
+
+function M:entry(job)
+	local stage = job.args[1]
+	if stage == "finalize" then
+		local req = assert(self.pending, "Missing pending target request")
+		local actual = selected_urls()
+		local expected = req.paths
+		local matches = cx.active.mode.is_normal and #actual == #expected
+		for i, path in ipairs(expected) do matches = matches and actual[i] == path end
+		if not matches then
+			self.pending = nil
+			reply(req, { ok = false, error = "Target selection changed; operation refused" })
+			return
+		end
+		if req.op == "trash_commit" then
+			ya.emit("remove", { force = true }) -- Trash only; Tern confirmed these paths.
+		else
+			ya.emit("yank", {})
+		end
+		ya.emit("plugin", { "tern", "settled", mode = "sync" })
+		return
+	elseif stage == "settled" then
+		local req = assert(self.pending)
+		self.pending = nil
+		last_dump_key = nil
+		dump_state()
+		reply(req, { ok = true, paths = req.paths, queued = req.op == "trash_commit" })
+		return
+	end
+
+	local req = assert(ya.json_decode(stage))
+	assert(type(req.id) == "string" and req.id:match("^[%w-]+$"), "Invalid request id")
+	local ok, err = pcall(function()
+		if req.op == "command" then
+			assert(command_actors[req.action] or req.action == "remove", "Unknown or unsupported manager command: " .. tostring(req.action))
+			assert(not req.args.interactive, "Local command input does not open another interactive Yazi prompt")
+			if req.action == "remove" then
+				assert(not req.args.permanently and not req.args.force, "Use plain d for confirmed trash; force/permanent removal is disabled")
+				reply(req, { ok = true, paths = targets(req.target), confirm_trash = true })
+				return
+			elseif req.action == "yank" then
+				assert(not req.args.cut, "Cut is not a companion shortcut; x remains extraction")
+				req.op = "yank"
+			elseif req.action == "toggle" then req.op = "toggle"
+			elseif req.action == "open" and #req.args == 0 then req.op = "open"
+			elseif req.action == "filter" or req.action == "filter_do" then
+				req.op = "filter"
+				req.query = req.args[1] or ""
+			else
+				ya.exec(req.action, req.args)
+				snapshot()
+				reply(req, { ok = true, queued = true })
+				return
+			end
+		end
+		if req.op == "trash_prepare" then
+			reply(req, { ok = true, paths = targets(req.target) })
+		elseif req.op == "trash_commit" or req.op == "yank" then
+			if req.op == "yank" then req.paths = targets(req.target) end
+			assert(type(req.paths) == "table" and #req.paths > 0, "No targets")
+			table.sort(req.paths)
+			local files = {}
+			for _, path in ipairs(req.paths) do
+				local file, e = fs.file(Url(path))
+				assert(file, tostring(e))
+				files[#files + 1] = file
+			end
+			commit(req, files)
+		elseif req.op == "toggle" then
+			local file, e = fs.file(Url(assert(req.target)))
+			assert(file, tostring(e))
+			ya.exec("toggle", { file })
+			snapshot()
+			reply(req, { ok = true })
+		elseif req.op == "open" then
+			ya.exec("open", { Url(assert(req.target)), cwd = Url(req.cwd) })
+			reply(req, { ok = true, queued = true })
+		elseif req.op == "filter" then
+			ya.exec("filter_do", { req.query or "", insensitive = true, done = true })
+			snapshot()
+			reply(req, { ok = true })
+		elseif req.op == "action" then
+			assert(req.action == "arrow" or req.action == "cd" or req.action == "reveal" or req.action == "visual_mode" or req.action == "escape", "Unsupported companion action")
+			ya.exec(req.action, req.args or {})
+			snapshot()
+			reply(req, { ok = true, queued = true })
+		else
+			error("Unknown companion operation")
+		end
+	end)
+	if not ok then reply(req, { ok = false, error = tostring(err) }) end
 end
 
 function M:setup()

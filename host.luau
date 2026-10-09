@@ -41,6 +41,8 @@ type YaziState = {
 	files: { string },
 	selected: number,
 	selected_urls: { string }?,
+	mode: string?,
+	marked_urls: { string }?,
 	hovered: HoverInfo?,
 	tasks: TaskInfo?,
 }
@@ -455,26 +457,11 @@ local function compute_parent(yz: YaziState?, cur_cwd: string): ({ string }?, st
 	return parent_files, parent_cwd
 end
 
--- Current directory entries (optimistic cwd override + filter query applied).
+-- Current rows come from Yazi's filtered and sorted entries, never a local filter.
 local function compute_file_list(state: any, yz: YaziState, cur_cwd: string): { string }
-	local file_list = yz.files or {}
-	if state.optimistic_cwd then
-		local ok_fs, flist = pcall(tern.fs.list, cur_cwd)
-		if ok_fs and flist then
-			file_list = flist
-		end
-	end
-	if state.filter_query and state.filter_query ~= "" then
-		local q = state.filter_query:lower()
-		local matched = {}
-		for _, fname in ipairs(file_list) do
-			if fname:lower():find(q, 1, true) then
-				table.insert(matched, fname)
-			end
-		end
-		file_list = matched
-	end
-	return file_list
+	if cur_cwd == yz.cwd then return yz.files or {} end
+	local ok, names = pcall(tern.fs.list, cur_cwd)
+	return ok and names or {}
 end
 
 -- Persistent Yazi selection is distinct from the native cursor highlight.
@@ -489,6 +476,136 @@ end
 local function selection_mark(paths: { [string]: boolean }, path: string): any
 	return ui.span(paths[path] and "✓ " or "  ", paths[path] and "success" or "muted")
 end
+
+local request_seq = 0
+local request_epoch = tostring(math.floor(tern.now() * 1000))
+local pump
+
+local function request(state: any, yz: any, cx: any, body: any, done: any?)
+	local cid = safe_cid(yz and yz.client_id)
+	if not cid then cx:toast("error", "No Yazi client", nil); return end
+	request_seq += 1
+	body.id = request_epoch .. "-" .. tostring(cx.pane) .. "-" .. tostring(request_seq)
+	state.requests = state.requests or {}
+	table.insert(state.requests, { cid = cid, body = body, done = done })
+	pump(state, cx)
+end
+
+pump = function(state: any, cx: any)
+	if state.sending or not state.requests or #state.requests == 0 then return end
+	state.sending = true
+	local job = state.requests[1]
+	local body = job.body
+	local path = state_dir() .. "/reply-" .. body.id .. ".json"
+	local finished = false
+	local function finish(reply: any)
+		if finished then return end
+		finished = true
+		state.sending = false
+		table.remove(state.requests, 1)
+		if not reply.ok then
+			state.requests = {}
+			state.active_file = nil
+			state.optimistic_cwd = nil
+			cx:toast("error", "Yazi request failed", reply.error or "No acknowledgement")
+		end
+		if job.done then job.done(reply) end
+		cx:render()
+		pump(state, cx)
+	end
+	-- Plugin args have a second shell-style parse inside Yazi; quote the JSON
+	-- as one positional argument, independently of the process argv boundary.
+	local encoded = tern.json.encode(body)
+	local quoted = "'" .. encoded:gsub("'", "'\\''") .. "'"
+	local ok, err = pcall(function()
+		tern.process.run({ "ya", "emit-to", job.cid, "plugin", "tern", quoted }, function(res)
+			if not res or res.status ~= 0 then
+				finish({ ok = false, error = res and res.stderr or "Missing send result" })
+				return
+			end
+			local attempts = 0
+			local poll
+			poll = function()
+				if finished then return end
+				local read_ok, text = pcall(tern.fs.read, path, 256 * 1024)
+				if read_ok then
+					local decode_ok, reply = pcall(tern.json.decode, text)
+					if decode_ok and reply.id == body.id then
+						pcall(tern.fs.remove, path)
+						finish(reply)
+						return
+					end
+				end
+				attempts += 1
+				if attempts >= 200 then
+					finish({ ok = false, error = "Timed out waiting for Yazi; outcome unknown, do not retry destructive actions blindly" })
+				else tern.timer(50, poll) end
+			end
+			poll()
+		end)
+	end)
+	if not ok then finish({ ok = false, error = tostring(err) }) end
+end
+
+local function action(state: any, yz: any, cx: any, name: string, args: any)
+	request(state, yz, cx, { op = "action", action = name, args = args })
+end
+
+local function clear_filter(state: any, yz: any, cx: any)
+	state.filter_mode = false
+	state.filter_query = ""
+	request(state, yz, cx, { op = "filter", query = "" })
+end
+
+local function erase_codepoint(text: string): string
+	if text == "" then return text end
+	local i = #text
+	while i > 1 and text:byte(i) >= 128 and text:byte(i) < 192 do i -= 1 end
+	return text:sub(1, i - 1)
+end
+
+local function typed_text(key: any): string?
+	if key.name == "paste" then return key.text end
+	if key.ctrl or key.meta or key.alt then return nil end
+	if key.text and key.text ~= "" then return key.text end
+	if key.name == "space" then return " " end
+	if #(key.name or "") == 1 then
+		return key.shift and key.name:upper() or key.name
+	end
+	return nil
+end
+
+-- Argument quoting, not shell execution: no substitutions, pipes or globbing.
+local function command_words(query: string): (any?, string?)
+	local words, buffer = {}, {}
+	local quote, escaped, started = nil, false, false
+	for i = 1, #query do
+		local c = query:sub(i, i)
+		if escaped then table.insert(buffer, c); escaped = false; started = true
+		elseif c == "\\" and quote ~= "'" then escaped = true; started = true
+		elseif quote then
+			if c == quote then quote = nil else table.insert(buffer, c) end
+		elseif c == "'" or c == '"' then quote = c; started = true
+		elseif c:match("%s") then
+			if started then table.insert(words, table.concat(buffer)); buffer = {}; started = false end
+		else table.insert(buffer, c); started = true end
+	end
+	if quote or escaped then return nil, "Unclosed quote or trailing escape" end
+	if started then table.insert(words, table.concat(buffer)) end
+	return words, nil
+end
+
+local function trash_decision(state: any, cx: any, confirm: boolean)
+	local pending = state.trash
+	state.trash = nil
+	if confirm and pending then
+		request(state, { client_id = pending.cid }, cx, { op = "trash_commit", paths = pending.paths }, function(reply)
+			if reply.ok then cx:toast("info", "Trash queued in Yazi", "Completion is reported by Yazi tasks") end
+		end)
+	end
+end
+
+local handle_key
 
 -- ---------------------------------------------------------------- Miller columns builders
 
@@ -568,6 +685,123 @@ local function render_child_directory_preview(full_url: string, dir_name: string
 end
 
 -- ---------------------------------------------------------------- block definition
+
+handle_key = function(state: any, key: any, cx: any): boolean
+	local raw = key.name or ""
+	local k = raw:lower()
+	local yz = read_latest_state()
+	sync_hover(state, yz)
+	local cwd = state.optimistic_cwd or (yz and yz.cwd) or "/"
+	local files = yz and compute_file_list(state, yz, cwd) or {}
+	local name = state.active_file or (yz and yz.cwd == cwd and yz.hovered and basename(yz.hovered.url)) or files[1]
+	local target = name and join_path(cwd, name)
+	local escape = k == "escape" or k == "esc"
+	local enter = k == "enter" or k == "return"
+	if state.trash then
+		if escape then trash_decision(state, cx, false)
+		elseif enter then trash_decision(state, cx, true) end
+		return true
+	end
+	if state.cmd_mode then
+		if escape then state.cmd_mode = false; state.cmd_query = ""
+		elseif enter then
+			local query = state.cmd_query or ""
+			local words, err = command_words(query)
+			if err then cx:toast("error", "Invalid command", err)
+			elseif words and #words > 0 then
+				local args = {}
+				for i = 2, #words do
+					local option = words[i]:match("^%-%-(.+)$")
+					if option then
+						local field, value = option:match("^([^=]+)=(.*)$")
+						args[(field or option):gsub("-", "_")] = value or true
+					else table.insert(args, words[i]) end
+				end
+				request(state, yz, cx, { op = "command", action = words[1], args = args, target = target, cwd = cwd }, function(reply)
+					if reply.ok then
+						if state.cmd_query == query then state.cmd_mode = false; state.cmd_query = "" end
+						if reply.confirm_trash and reply.paths and #reply.paths > 0 then state.trash = { cid = safe_cid(yz.client_id), paths = reply.paths } end
+						cx:toast("info", "Yazi accepted command", "Actor accepted; asynchronous work may still be pending")
+					end
+				end)
+			else state.cmd_mode = false; state.cmd_query = "" end
+		elseif k == "backspace" then state.cmd_query = erase_codepoint(state.cmd_query or "")
+		else
+			local text = typed_text(key)
+			if text then state.cmd_query = (state.cmd_query or "") .. text end
+		end
+		return true
+	end
+	if state.filter_mode then
+		if escape then clear_filter(state, yz, cx)
+		elseif enter then state.filter_mode = false
+		else
+			local query = state.filter_query or ""
+			if k == "backspace" then query = erase_codepoint(query)
+			else local text = typed_text(key); if not text then return true end; query ..= text end
+			state.filter_query = query
+			state.active_file = nil
+			request(state, yz, cx, { op = "filter", query = query })
+		end
+		return true
+	end
+	if key.alt or key.meta then return false end
+	if key.ctrl then
+		if k == "r" then return true end
+		if k ~= "d" and k ~= "u" and k ~= "f" and k ~= "b" then return false end
+	end
+	if escape and state.filter_query and state.filter_query ~= "" then clear_filter(state, yz, cx); return true end
+	if escape and yz and yz.mode and yz.mode ~= "normal" then action(state, yz, cx, "escape", { visual = true }); return true end
+	local upper = key.shift or raw == "G"
+	local page_down = k == "page_down" or k == "pagedown" or (key.ctrl and (k == "d" or k == "f"))
+	local page_up = k == "page_up" or k == "pageup" or (key.ctrl and (k == "u" or k == "b"))
+	if page_down or page_up then
+		local half = (key.ctrl and (k == "d" or k == "u")) or (not key.ctrl and key.shift)
+		action(state, yz, cx, "arrow", { (page_up and "-" or "") .. (half and "50%" or "100%") })
+		return true
+	end
+	if key.ctrl then return false end
+	if k == "end" or (k == "g" and upper) then action(state, yz, cx, "arrow", { "bot" }); return true end
+	if k == "home" or k == "g" then action(state, yz, cx, "arrow", { "top" }); return true end
+	if (key.shift or raw ~= k) and k:match("^[a-z]$") then return false end
+	if k == "j" or k == "down" or k == "arrowdown" or k == "arrow_down" or k == "k" or k == "up" or k == "arrowup" or k == "arrow_up" then
+		local step = (k == "j" or k == "down" or k == "arrowdown" or k == "arrow_down") and 1 or -1
+		action(state, yz, cx, "arrow", { tostring(step) })
+	elseif k == "h" or k == "left" or k == "arrowleft" or k == "arrow_left" or k == "backspace" then
+		local parent = cwd:match("(.+)/[^/]+$") or "/"
+		state.optimistic_cwd = parent; state.active_file = basename(cwd)
+		action(state, yz, cx, "cd", { parent })
+	elseif k == "l" or k == "right" or k == "arrowright" or k == "arrow_right" or enter then
+		if target and pcall(tern.fs.list, target) then
+			state.optimistic_cwd = target; state.active_file = nil
+			action(state, yz, cx, "cd", { target })
+		elseif enter and target then request(state, yz, cx, { op = "open", target = target, cwd = cwd }) end
+	elseif k == "space" or k == " " then
+		if target then request(state, yz, cx, { op = "toggle", target = target }) end
+	elseif k == "v" then action(state, yz, cx, "visual_mode", {})
+	elseif k == "y" then
+		if target then request(state, yz, cx, { op = "yank", target = target }, function(reply)
+			if reply.ok then cx:copy(table.concat(reply.paths or {}, "\n")); cx:toast("info", "Yazi yank accepted", "Copied the same target paths") end
+		end) end
+	elseif k == "o" then if target then cx:open(target) end
+	elseif k == "d" then
+		request(state, yz, cx, { op = "trash_prepare", target = target }, function(reply)
+			if reply.ok and reply.paths and #reply.paths > 0 then
+				state.trash = { cid = safe_cid(yz.client_id), paths = reply.paths }
+			elseif reply.ok then cx:toast("info", "Nothing to trash", nil) end
+		end)
+	elseif k == "/" then state.filter_mode = true
+	elseif k == ":" or k == "colon" or (k == ";" and key.shift) then state.cmd_mode = true; state.cmd_query = ""
+	elseif k == "x" and target and is_archive(file_ext(target)) then
+		local argv = file_ext(target) == "zip" and { "unzip", "-o", target, "-d", cwd } or { "tar", "-xf", target, "-C", cwd }
+		local ok, err = pcall(function() tern.process.run(argv, function(res)
+			cx:toast(res.status == 0 and "success" or "error", res.status == 0 and "Extracted archive" or "Extraction failed", res.stderr)
+		end) end)
+		if not ok then cx:toast("error", "Extraction failed", tostring(err)) end
+	elseif k == "q" or escape then cx:exit(0)
+	else return false end
+	return true
+end
 
 tern.block.define("companion", {
 	init = function(cx, args, saved)
@@ -668,6 +902,8 @@ tern.block.define("companion", {
 		-- 3. File List (scrollable viewport; the list widget owns scrolling)
 		local file_list = compute_file_list(state, yz, cur_cwd)
 		local selected_paths = selection_paths(yz)
+		local marked_paths = {}
+		for _, path in ipairs(yz.marked_urls or {}) do marked_paths[path] = true end
 
 		local hovered_url = yz.cwd == cur_cwd and yz.hovered and yz.hovered.url
 		local hovered_name = hovered_url and basename(hovered_url) or nil
@@ -715,7 +951,7 @@ tern.block.define("companion", {
 			table.insert(middle_items, {
 				name = fname,
 				url = item_path,
-				label = { selection_mark(selected_paths, item_path), ui.span(sym .. " ", tone), fname },
+				label = { selection_mark(selected_paths, item_path), ui.span(marked_paths[item_path] and (yz.mode == "unset" and "- " or "+ ") or "", "warn"), ui.span(sym .. " ", tone), fname },
 				tone = is_active and "accent" or nil,
 			})
 		end
@@ -772,8 +1008,8 @@ tern.block.define("companion", {
 		table.insert(top_rows, miller_columns)
 
 		-- ---------------- Bottom Status Bar (Yazi-style Pill Status Bar)
-		local mode_str = state.cmd_mode and "CMD" or (state.filter_mode and "FILTER" or "NOR")
-		local mode_tone = state.cmd_mode and "warn" or (state.filter_mode and "accent" or "accent")
+		local mode_str = state.cmd_mode and "CMD" or (state.filter_mode and "FILTER" or (yz.mode == "select" and "VIS" or (yz.mode == "unset" and "UNSET" or "NOR")))
+		local mode_tone = (state.cmd_mode or (yz.mode and yz.mode ~= "normal")) and "warn" or "accent"
 
 		local perm_str = is_active_dir and "drwxrwxrwx" or "-rw-r--r--"
 		local pct_num = (#file_list > 0) and math.floor((cur_idx / #file_list) * 100) or 0
@@ -788,11 +1024,28 @@ tern.block.define("companion", {
 			ui.text({ ui.span(" " .. pct_str .. " ", "muted") }),
 			ui.badge(pos_str, "accent"),
 		})
+		local trash_layer = nil
+		if state.trash then
+			local rows = {}
+			for i, path in ipairs(state.trash.paths) do rows[i] = { name = tostring(i), label = tern.json.encode(path) } end
+			local list = ui.list(rows)
+			list.p = list.p or {}
+			list.p.key = "paths"
+			list.p.max = { lines = math.max(4, (cx.rows or 24) - 8) }
+			trash_layer = ui.col({ ui.node("card", { key = "trash", role = "yazi.trash-confirm" }, {
+				ui.text("Move these exact paths to Trash? Cancel changes nothing."), list,
+				ui.node("row", { key = "controls" }, {
+					clickable(ui.el("button", { key = "cancel" }, { ui.text("Cancel [Esc]") }), "trash_cancel"),
+					clickable(ui.el("button", { key = "confirm", tone = "warn" }, { ui.text("Move to Trash [Enter]") }), "trash_confirm"),
+				}),
+			}) })
+		end
 
 		return {
 			main = ui.col({ ui.node("col", { role = "yazi.browser", key = "browser", gap = "sm" }, top_rows) }),
 			-- Region roots are stripped; preserve the row as a child of the dock.
 			dock = ui.col({ status_bar }),
+			layer = trash_layer,
 		}
 	end,
 
@@ -811,6 +1064,12 @@ tern.block.define("companion", {
 		sync_hover(state, yz)
 		local cid = safe_cid(yz and yz.client_id)
 		local cwd = yz and yz.cwd or ""
+		if act == "shortcut" and type(ev.key) == "table" then handle_key(state, ev.key, cx); return end
+		if state.trash then
+			if act == "trash_confirm" then trash_decision(state, cx, true)
+			elseif act == "trash_cancel" then trash_decision(state, cx, false) end
+			return
+		end
 
 		if ev.ev == "select" or ev.ev == "activate" then
 			local name = list_event_name(ev)
@@ -839,23 +1098,15 @@ tern.block.define("companion", {
 			if ev.ev == "activate" and is_dir then
 				state.optimistic_cwd = target
 				state.active_file = nil
-				if cid then
-					tern.process.run({ "ya", "emit-to", cid, "cd", target }, function() end)
-				end
-				cx:toast("info", "Navigating: " .. name, target)
+				action(state, yz, cx, "cd", { target })
 			else
 				if base ~= cwd then
 					state.optimistic_cwd = base
 				end
 				state.active_file = name
-				if cid then
-					tern.process.run({ "ya", "emit-to", cid, "reveal", target }, function(result)
-						if ev.ev == "activate" and result and result.status == 0 then
-							tern.process.run({ "ya", "emit-to", cid, "open" }, function() end)
-						end
-					end)
-				end
-				cx:toast("info", "Selected: " .. name, target)
+				if ev.ev == "activate" then
+					request(state, yz, cx, { op = "open", target = target, cwd = base })
+				else action(state, yz, cx, "reveal", { target, no_dummy = true }) end
 			end
 			return
 		end
@@ -865,25 +1116,14 @@ tern.block.define("companion", {
 			cx:toast("success", "Path copied to clipboard", val)
 		elseif act == "reveal" and val then
 			state.active_file = val
-			if cid then
-				local target = join_path(cwd, val)
-				pcall(function()
-					tern.process.run({ "ya", "emit-to", cid, "reveal", target }, function() end)
-				end)
-			end
-			cx:toast("info", "Selected: " .. val, nil)
+			action(state, yz, cx, "reveal", { join_path(state.optimistic_cwd or cwd, val), no_dummy = true })
 		elseif act == "enter_dir" and val then
 			state.optimistic_cwd = val
 			state.active_file = nil
-			if cid then
-				pcall(function()
-					tern.process.run({ "ya", "emit-to", cid, "cd", val }, function() end)
-				end)
-			end
-			cx:toast("info", "Navigating: " .. basename(val), nil)
+			action(state, yz, cx, "cd", { val })
 		elseif act == "open_file" and val then
 			cx:open(val)
-			cx:toast("info", "Opening file in editor", val)
+			cx:toast("info", "Opening through Tern", val)
 		elseif act == "terminal_here" and val then
 			cx:toast("info", "Opening terminal in " .. val, nil)
 			pcall(function()
@@ -894,19 +1134,9 @@ tern.block.define("companion", {
 			local parent_dir = cur_cwd:match("(.+)/[^/]+$") or "/"
 			state.optimistic_cwd = parent_dir
 			state.active_file = basename(cur_cwd)
-			if cid then
-				pcall(function()
-					tern.process.run({ "ya", "emit-to", cid, "leave" }, function() end)
-				end)
-			end
+			action(state, yz, cx, "cd", { parent_dir })
 		elseif act == "clear_filter" then
-			state.filter_mode = false
-			state.filter_query = ""
-			if cid then
-				pcall(function()
-					tern.process.run({ "ya", "emit-to", cid, "filter" }, function() end)
-				end)
-			end
+			clear_filter(state, yz, cx)
 		elseif act == "clear_cmd" then
 			state.cmd_mode = false
 			state.cmd_query = ""
@@ -932,304 +1162,8 @@ tern.block.define("companion", {
 		end
 	end,
 
-	-- Full Yazi keyboard navigation mapping with robust key name matching
 	key = function(state, key, cx)
-		local raw_k = (key.name or ""):lower()
-		local yz = read_latest_state()
-		sync_hover(state, yz)
-		local cid = safe_cid(yz and yz.client_id)
-		local cur_cwd = state.optimistic_cwd or (yz and yz.cwd) or "/"
-		local files = yz and compute_file_list(state, yz, cur_cwd) or {}
-
-		local current_name = state.active_file or (yz and yz.hovered and basename(yz.hovered.url)) or files[1]
-		local cur_idx = 1
-		for idx, fname in ipairs(files) do
-			if fname == current_name then
-				cur_idx = idx
-				break
-			end
-		end
-		-- Normalized key conditions
-		local is_colon = (raw_k == ":" or raw_k == "colon" or (raw_k == ";" and key.shift))
-
-		-- Command mode active: redirect single keystrokes to command query
-		if state.cmd_mode then
-			if raw_k == "escape" then
-				state.cmd_mode = false
-				state.cmd_query = ""
-				return true
-			elseif raw_k == "enter" or raw_k == "return" then
-				local q = state.cmd_query or ""
-				state.cmd_mode = false
-				state.cmd_query = ""
-				if #q > 0 and cid then
-					local parts = {}
-					for p in q:gmatch("%S+") do
-						table.insert(parts, p)
-					end
-					if #parts > 0 then
-						local cmd_args = { "ya", "emit-to", cid }
-						for _, p in ipairs(parts) do
-							table.insert(cmd_args, p)
-						end
-						pcall(function()
-							tern.process.run(cmd_args, function() end)
-						end)
-						cx:toast("success", "Sent command to Yazi", q)
-					end
-				end
-				return true
-			elseif raw_k == "backspace" then
-				if #(state.cmd_query or "") > 0 then
-					state.cmd_query = state.cmd_query:sub(1, -2)
-				else
-					state.cmd_mode = false
-				end
-				return true
-			elseif #raw_k == 1 then
-				state.cmd_query = (state.cmd_query or "") .. raw_k
-				return true
-			end
-			return true
-		end
-
-		-- Filter mode active: redirect single keystrokes to search query
-		if state.filter_mode then
-			if raw_k == "escape" then
-				state.filter_mode = false
-				state.filter_query = ""
-				if cid then
-					pcall(function()
-						tern.process.run({ "ya", "emit-to", cid, "filter" }, function() end)
-					end)
-				end
-				return true
-			elseif raw_k == "enter" or raw_k == "return" then
-				state.filter_mode = false
-				return true
-			elseif raw_k == "backspace" then
-				if #(state.filter_query or "") > 0 then
-					state.filter_query = state.filter_query:sub(1, -2)
-					if cid then
-						pcall(function()
-							tern.process.run({ "ya", "emit-to", cid, "filter", state.filter_query }, function() end)
-						end)
-					end
-				else
-					state.filter_mode = false
-					if cid then
-						pcall(function()
-							tern.process.run({ "ya", "emit-to", cid, "filter" }, function() end)
-						end)
-					end
-				end
-				return true
-			elseif #raw_k == 1 then
-				state.filter_query = (state.filter_query or "") .. raw_k
-				if cid then
-					pcall(function()
-						tern.process.run({ "ya", "emit-to", cid, "filter", state.filter_query }, function() end)
-					end)
-				end
-				return true
-			end
-			return true
-		end
-
-		if raw_k == "/" then
-			state.filter_mode = true
-			state.filter_query = ""
-			return true
-		elseif is_colon then
-			state.cmd_mode = true
-			state.cmd_query = ""
-			if cid then
-				pcall(function()
-					tern.process.run({ "ya", "emit-to", cid, "shell", "--interactive" }, function() end)
-				end)
-			end
-			cx:toast("info", "Command mode active (type & Enter)", nil)
-			return true
-		elseif raw_k == "x" then
-			if current_name and is_archive(file_ext(current_name)) then
-				local full_path = join_path(cur_cwd, current_name)
-				local cmd
-				if file_ext(current_name) == "zip" then
-					cmd = { "unzip", "-o", full_path, "-d", cur_cwd }
-				else
-					cmd = { "tar", "-xf", full_path, "-C", cur_cwd }
-				end
-				pcall(function()
-					tern.process.run(cmd, function(res)
-						if res and res.status == 0 then
-							cx:toast("success", "Extracted archive", current_name)
-						else
-							cx:toast("error", "Extraction failed", current_name)
-						end
-					end)
-				end)
-				return true
-			end
-		end
-
-		local is_down = (raw_k == "j" or raw_k == "down" or raw_k == "arrowdown" or raw_k == "arrow_down" or raw_k:find("down") ~= nil)
-		local is_up = (raw_k == "k" or raw_k == "up" or raw_k == "arrowup" or raw_k == "arrow_up" or (raw_k:find("up") ~= nil and not raw_k:find("page")))
-		local is_left = (raw_k == "h" or raw_k == "left" or raw_k == "arrowleft" or raw_k == "arrow_left" or raw_k == "backspace")
-		local is_right = (raw_k == "l" or raw_k == "right" or raw_k == "arrowright" or raw_k == "arrow_right")
-		local is_enter = (raw_k == "enter" or raw_k == "return")
-		local is_space = (raw_k == "space" or raw_k == " ")
-		local is_quit = (raw_k == "q" or raw_k == "escape" or raw_k == "esc")
-		local is_pagedown = (raw_k == "pagedown" or (raw_k == "d" and key.ctrl) or (raw_k == "f" and key.ctrl))
-		local is_pageup = (raw_k == "pageup" or (raw_k == "u" and key.ctrl) or (raw_k == "b" and key.ctrl))
-		local is_home = (raw_k == "home" or raw_k == "g")
-		local is_end = (raw_k == "end" or raw_k == "G")
-
-		if is_down then
-			if cur_idx < #files then
-				local next_file = files[cur_idx + 1]
-				state.active_file = next_file
-				if cid then
-					pcall(function()
-						tern.process.run({ "ya", "emit-to", cid, "arrow", "1" }, function() end)
-					end)
-				end
-				return true
-			end
-		elseif is_up then
-			if cur_idx > 1 then
-				local prev_file = files[cur_idx - 1]
-				state.active_file = prev_file
-				if cid then
-					pcall(function()
-						tern.process.run({ "ya", "emit-to", cid, "arrow", "-1" }, function() end)
-					end)
-				end
-				return true
-			end
-		elseif is_pagedown then
-			local step = math.max(1, math.floor(((cx.rows or 22) - 8) / 2))
-			local next_idx = math.min(#files, cur_idx + step)
-			if next_idx ~= cur_idx and files[next_idx] then
-				state.active_file = files[next_idx]
-				if cid then
-					pcall(function()
-						tern.process.run({ "ya", "emit-to", cid, "arrow", tostring(next_idx - cur_idx) }, function() end)
-					end)
-				end
-			end
-			return true
-		elseif is_pageup then
-			local step = math.max(1, math.floor(((cx.rows or 22) - 8) / 2))
-			local prev_idx = math.max(1, cur_idx - step)
-			if prev_idx ~= cur_idx and files[prev_idx] then
-				state.active_file = files[prev_idx]
-				if cid then
-					pcall(function()
-						tern.process.run({ "ya", "emit-to", cid, "arrow", tostring(prev_idx - cur_idx) }, function() end)
-					end)
-				end
-			end
-			return true
-		elseif is_home then
-			if #files > 0 and cur_idx > 1 then
-				state.active_file = files[1]
-				if cid then
-					pcall(function()
-						tern.process.run({ "ya", "emit-to", cid, "arrow", tostring(1 - cur_idx) }, function() end)
-					end)
-				end
-			end
-			return true
-		elseif is_end then
-			if #files > 0 and cur_idx < #files then
-				state.active_file = files[#files]
-				if cid then
-					pcall(function()
-						tern.process.run({ "ya", "emit-to", cid, "arrow", tostring(#files - cur_idx) }, function() end)
-					end)
-				end
-			end
-			return true
-		elseif is_left then
-			local parent_dir = cur_cwd:match("(.+)/[^/]+$") or "/"
-			state.optimistic_cwd = parent_dir
-			state.active_file = basename(cur_cwd)
-			if cid then
-				pcall(function()
-					tern.process.run({ "ya", "emit-to", cid, "leave" }, function() end)
-				end)
-			end
-			return true
-		elseif is_right or is_enter then
-			if current_name and cur_cwd then
-				local full_path = join_path(cur_cwd, current_name)
-				local ok_dir = pcall(tern.fs.list, full_path)
-				if ok_dir then
-					state.optimistic_cwd = full_path
-					state.active_file = nil
-					if cid then
-						pcall(function()
-							tern.process.run({ "ya", "emit-to", cid, "cd", full_path }, function() end)
-						end)
-					end
-					return true
-				end
-			end
-			if is_enter then
-				if cid then
-					pcall(function()
-						tern.process.run({ "ya", "emit-to", cid, "open" }, function() end)
-					end)
-				end
-			else
-				if cid then
-					pcall(function()
-						tern.process.run({ "ya", "emit-to", cid, "enter" }, function() end)
-					end)
-				end
-			end
-			return true
-		elseif is_space then
-			if cid then
-				pcall(function()
-					tern.process.run({ "ya", "emit-to", cid, "toggle" }, function() end)
-				end)
-			end
-			return true
-		elseif raw_k == "v" then
-			if cid then
-				pcall(function()
-					tern.process.run({ "ya", "emit-to", cid, "visual_mode" }, function() end)
-				end)
-			end
-			return true
-		elseif raw_k == "y" then
-			if current_name and yz and yz.cwd then
-				local full_path = join_path(yz.cwd, current_name)
-				cx:copy(full_path)
-				cx:toast("success", "Yanked path", full_path)
-			end
-			if cid then
-				pcall(function()
-					tern.process.run({ "ya", "emit-to", cid, "yank" }, function() end)
-				end)
-			end
-			return true
-		elseif raw_k == "o" then
-			if current_name and yz and yz.cwd then
-				local full_path = yz.cwd .. "/" .. current_name
-				cx:open(full_path)
-				cx:toast("info", "Opening file in editor", full_path)
-			end
-			return true
-		elseif is_quit then
-			cx:exit(0)
-			return true
-		elseif raw_k == "r" and key.ctrl then
-			return true
-		end
-
-		return false
+		return handle_key(state, key, cx)
 	end,
 
 	save = function(state)

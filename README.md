@@ -81,16 +81,25 @@ Basic keyboard mappings in the companion:
 | --- | --- |
 | `j` / `k`, arrow up/down | Move the cursor |
 | `h`, arrow left, Backspace | Go to the parent directory |
-| `l`, arrow right, Enter | Enter a directory or open the current file |
-| Space | Toggle Yazi selection |
-| `v` | Request Yazi visual mode |
-| `y` | Copy the path and request Yazi yank |
-| `o` | Open the file through Tern |
-| `/` | Enter a substring filter; Enter keeps it, Esc clears it |
+| `l`, arrow right | Enter the visible directory (no file open) |
+| Enter | Enter a directory or request an explicit-path Yazi open |
+| Space | Toggle the visible path in Yazi; green `✓` remains authoritative |
+| `v` / Esc in visual mode | Start visual selection / commit and leave visual mode; amber `+`/`-` range marks are separate from persistent selection |
+| `y` | Yazi yank selected-or-visible paths and copy the same paths to the clipboard |
+| `o` | Open the visible path through Tern |
+| `d` | Prepare selected-or-visible targets and show an exact-path native confirmation; Enter confirms, Esc cancels without effects |
+| `g` / Home, `G` / End | First / last item |
+| PageDown/Up | Full Yazi viewport down / up |
+| `/` | Enter a Yazi regex filter (case-insensitive); Enter retains it, Esc clears it before closing the block |
 | Ctrl+R | Re-render from the available snapshot |
-| `q` / Esc outside input modes | Exit the companion block |
+| `x` | Extract the visible archive, not cut |
+| `q` / Esc without input, filter or visual mode | Exit the companion block |
 
-Keyboard parity with Yazi is incomplete. Command input (`:`) splits arguments on whitespace and does not implement shell quoting; do not treat it as a general-purpose shell.
+Keyboard parity with Yazi is incomplete. `:` accepts a manager action and arguments, with single/double quotes and backslash escapes; it is not a shell (no expansion, pipes, globbing or substitution). For example, `cd '/absolute/path/Mixed Case'`. Typing and pasting preserve case, spaces and Unicode; Backspace removes one Unicode codepoint, not a grapheme cluster. Enter executes the submitted action without opening an extra Yazi shell prompt; Esc cancels locally. Invalid quoting, unknown actions, spawn/send failures and missing acknowledgements are errors, not success. An actor acknowledgement is not proof that asynchronous open, shell or trash work completed. Destructive force/permanent removal is disabled in command input; `remove` uses the same native confirmation as `d`. Plain `D` is deliberately unsupported.
+
+On Tern 0.7.0, default scoped view bindings intercept Ctrl+D/U/F/B before a plugin block receives them; Shift+PageUp/Down also does not reach the block in the observed runtime. Plugin binds for preset-owned chords are rejected, and scoped actions cannot use the built-in command override API. The host implements half/full-page semantics when delivered, but these physical shortcuts remain unavailable without a Tern input-routing change. The plugin does not silently rewrite persistent user keybindings.
+
+Local commands deliberately exclude other plugins, interactive flags and prompt-based create/rename/search/find/tab/bulk operations. Supported action names are `cd`, `arrow`, `leave`, `enter`, `back`, `forward`, `reveal`, `follow`, `stash`, `open`, `yank`, `unyank`, `toggle`, `toggle_all`, `visual_arrow`, `visual_mode`, `escape`, `copy`, `shell` (non-interactive), `hidden`, `linemode`, `filter`, `filter_do`, `sort`, `refresh`, `quit`, `close`, `suspend`, `seek`, and confirmed `remove`. This is a local manager-command interface, not a safe shell sandbox.
 
 ### Architecture
 
@@ -102,12 +111,12 @@ $XDG_RUNTIME_DIR/tern-yazi/state-<client-id>.json
   |  window.luau checks for newer state every 100 ms
   v
 Tern companion block: host.luau + companion.css
-  |  ya emit-to <client-id> <action> ...
+  |  serialized ya emit-to <client-id> plugin tern <quoted-request-json>
   v
 Yazi
 ```
 
-The inbox falls back to `/tmp/tern-yazi` when `XDG_RUNTIME_DIR` is unset or empty. Yazi writes a temporary file and renames it to the JSON filename. Snapshots include the current directory, filenames, hover metadata, selection count, sorted absolute `selected_urls`, task counters, and a limited parent listing. The selected path set is what keeps a Space mark attached to a file after cursor movement.
+The inbox falls back to `/tmp/tern-yazi` when `XDG_RUNTIME_DIR` is unset or empty. Yazi atomically exports current filtered/sorted filenames, hover metadata, sorted absolute `selected_urls`, mode and `marked_urls`, tasks and a limited parent listing. Each command has a unique request ID and atomic `reply-<id>.json`; Tern removes consumed replies and waits for actor acknowledgement before sending the next request. Native trash confirmation freezes the originating client and all exact paths; changing Yazi's cursor/selection afterwards cannot retarget confirmation. Cancel sends no mutation. Confirmation dispatch validates every file, constructs the exact authoritative selection in a priority FIFO sync stage, checks the resulting set, and calls Yazi's non-permanent trash actor. Filesystem work still completes asynchronously through Yazi tasks.
 
 The host selects the snapshot with the largest positive `ts`, falling back to `seq`; it does not use filesystem modification time or the focused Tern pane. The client ID is taken from the snapshot filename. DDS telemetry remains in the Yazi plugin, but native UI state ingestion uses files, not a DDS subscriber.
 
@@ -116,8 +125,8 @@ The host selects the snapshot with the largest positive `ts`, falling back to `s
 - Both native readers allow **256 KiB per snapshot**. Very large directories can exceed this limit. Parent snapshots contain at most 30 entries.
 - Preview reads are limited to **8 MiB for images**, **32 KiB for Markdown/Mermaid**, and **16 KiB for general text/code**. Larger files are not guaranteed to preview completely. There is no dedicated PDF, audio, or video viewer.
 - There is no client picker, client pinning, snapshot expiry, or Yazi-process liveness check. Stale snapshots can remain after Yazi exits. Closing the companion does not prevent the next newer snapshot from opening it again.
-- Snapshot deduplication does not track every filename or metadata change. A same-count rename or metadata-only update may not refresh immediately.
-- The `Synced` badge is currently a presentation label, not a verified connection-health indicator. Permission-like strings in the footer are placeholders based on file type, not actual filesystem permissions.
+- Snapshot deduplication tracks filenames, persistent selection and visual range; metadata-only updates may not refresh immediately.
+- The `Synced` badge is a presentation label, not a verified connection-health indicator. Permission-like strings in the footer are placeholders based on file type, not actual filesystem permissions. Missing replies time out with an unknown-outcome error: do not blindly retry a destructive request. Late unconsumed replies can remain in the runtime inbox.
 - The inbox contains local paths and metadata in plaintext. Use a trusted, user-private runtime directory shared by both processes. The `/tmp` fallback is not an authenticated or sandboxed channel; the plugin does not enforce ownership or private permissions. Use a conventional runtime path without spaces or shell metacharacters: the Yazi setup currently constructs its directory-creation command without shell quoting.
 - Archive extraction writes into the current directory without confirmation or undo. ZIP extraction uses `unzip -o` and can overwrite existing files. Do not extract untrusted archives through the companion. Other archive formats depend on external tools and are not uniformly supported.
 
@@ -194,21 +203,29 @@ Yazi 和 Tern 必须运行在同一机器，并读取相同的 runtime inbox。
 | --- | --- |
 | `j` / `k`、上下箭头 | 移动光标 |
 | `h`、左箭头、Backspace | 返回父目录 |
-| `l`、右箭头、Enter | 进入目录或打开当前文件 |
-| Space / `v` | 切换选择 / 请求 Yazi 可视选择模式 |
-| `y` | 复制路径并请求 Yazi yank |
-| `o` | 通过 Tern 打开文件 |
-| `/` | 子串过滤；Enter 保留、Esc 清除 |
-| Ctrl+R | 从现有快照重新渲染 |
-| `q` / 非输入模式下的 Esc | 退出伴随块 |
+| `l`、右箭头 | 进入当前可见目录；不打开普通文件 |
+| Enter | 进入目录或按明确路径请求 Yazi 打开 |
+| Space / `v` | 切换当前可见路径的持久选择 / 开启可视范围；绿色 `✓` 与黄色 `+`/`-` 范围、光标高亮互不混用 |
+| 可视模式 Esc | 提交范围并退出可视模式 |
+| `y` / `o` | Yazi yank 所选集合或可见路径并复制同一集合 / 通过 Tern 打开可见路径 |
+| `d` | 冻结所选集合或可见路径，在原生面板逐项确认；Enter 移到回收站，Esc 取消且不改变选择或文件 |
+| `g` / Home、`G` / End | 首项 / 末项 |
+| PageDown/Up | Yazi 整个视口向下 / 向上 |
+| `/` | Yazi 正则过滤，不区分大小写；Enter 保留，Esc 先清除，不关闭面板 |
+| Ctrl+R / `x` | 从现有快照重绘 / 解压归档（不是剪切） |
+| `q` / 无输入、过滤和可视模式时的 Esc | 退出伴随块 |
 
-快捷键并未完全对齐 Yazi。实验性 `:` 命令输入仅按空白拆分参数，不支持完整 shell 引号规则，不应作为通用 shell 使用。
+快捷键并未完全对齐 Yazi。`:` 接受 manager action 与参数，支持单/双引号和反斜杠转义，不执行 shell 展开、管道、通配符或替换，例如 `cd '/absolute/path/Mixed Case'`。输入和粘贴保留大小写、空格和 Unicode，Backspace 删除一个码点（不是整个字素）。Enter 直接提交，不额外打开 Yazi shell 输入框；Esc 仅取消本地输入。引号错误、未知动作、启动/发送失败或缺少回执会报错，绝不伪报成功。actor 接受不等于异步打开、shell 或回收站任务完成。命令中禁止 force/permanent 删除；`remove` 与 `d` 使用相同原生确认，普通 `D` 不实现。
+
+Tern 0.7.0 的默认 scoped view 绑定在 block 之前截获 Ctrl+D/U/F/B，实测 Shift+PageUp/Down 也没有到达 block。插件注册 preset 占用按键会被拒绝，scoped action 不能使用内建 command override。host 已实现收到这些键时的半/整页语义，但实体快捷键仍需要 Tern 输入路由修复；插件不会暗中修改用户持久快捷键设置。
+
+本地命令明确拒绝其他插件、interactive 参数和 create/rename/search/find/tab/bulk 等额外输入提示操作。支持的动作名单见英文段落；`shell` 只支持非交互提交，`remove` 必须走原生确认。这是本地 manager 命令接口，不是安全 shell 沙箱。
 
 ### 数据流
 
-Yazi 插件在目录、悬停及状态栏重绘时，将 JSON 写入临时文件后原子重命名；Tern 窗口侧每 100 ms 检查新状态，host 读取快照和本地文件生成 UI，再用 `ya emit-to` 回传操作。
+Yazi 插件在目录、悬停及状态栏重绘时原子写入 JSON；Tern 窗口每 100 ms 检查，host 使用 Yazi 的已过滤/排序列表和本地预览。请求通过 `ya emit-to ... plugin tern` 串行发送，等待对应 actor 回执，不把 DDS 发送成功当作操作完成。
 
-默认路径为 `$XDG_RUNTIME_DIR/tern-yazi/state-<client-id>.json`，环境变量为空或未设置时退回 `/tmp/tern-yazi`。快照包含目录、文件名、悬停元数据、选择数量、排序后的绝对路径数组 `selected_urls`、任务计数和有限的父目录列表。这个路径集合使 Space 标记在移动光标后仍附着于文件。
+默认 `$XDG_RUNTIME_DIR/tern-yazi/state-<client-id>.json`，为空时退回 `/tmp/tern-yazi`。快照导出目录、文件名、悬停、`selected_urls`、mode、`marked_urls` 和任务。每请求有唯一 ID 与原子 `reply-<id>.json`，消费后删除。删除确认冻结原客户端和完整路径，之后移动 Yazi 光标或改变选择不会改掉目标；取消不发送任何选择或文件变更。确认后逐文件验证，通过优先 FIFO 同步阶段设置并核对精确选择集合，然后调用 Yazi 非永久回收站 actor；实际文件任务仍是异步的。
 
 多实例时按快照最大正 `ts` 选择客户端，没有正时间戳则使用 `seq`；不是按文件修改时间或当前聚焦窗格选择。客户端 ID 来自快照文件名。Yazi 侧保留 DDS 遥测，但原生 UI 通过文件接收状态。
 
@@ -217,8 +234,8 @@ Yazi 插件在目录、悬停及状态栏重绘时，将 JSON 写入临时文件
 - 快照读取上限为 **256 KiB**，超大目录可能无法正常导入；父目录快照最多包含 30 项。
 - 图片读取上限 **8 MiB**，Markdown/Mermaid **32 KiB**，通用文本/代码 **16 KiB**，大文件不保证完整预览；没有专用 PDF、音频或视频查看器。
 - 没有客户端选择/固定、快照过期或 Yazi 进程存活检查；Yazi 退出后旧快照可能仍被显示。
-- 去重不覆盖所有文件名和元数据变化；数量不变的重命名或仅元数据变化可能不会立即刷新。
-- `Synced` 目前是展示标签，不代表已验证的连接健康状态。底栏权限样式字符串按文件类型生成，并非真实权限。
+- 去重覆盖文件名、持久选择与可视范围；仅元数据变化可能不立即刷新。
+- `Synced` 仍是展示标签，不代表连接健康；权限字符串不是实际权限。缺少回执会以结果未知报错，不要盲目重试破坏性操作；超时后迟到的回执可能残留在 runtime inbox。
 - inbox 明文包含本地路径和元数据，应使用双方共享的可信用户私有 runtime 目录。插件不强制校验属主或私有权限，`/tmp` 回退不是认证或沙箱通道。Yazi setup 的目录创建命令尚未进行 shell 引号处理，因此 runtime 路径应避免空格和 shell 元字符。
 - 解压直接写入当前目录，没有确认或撤销；ZIP 使用 `unzip -o`，可能覆盖现有文件。不要通过面板解压不可信归档。其他归档格式依赖外部工具，支持并不一致。
 
