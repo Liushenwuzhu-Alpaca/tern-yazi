@@ -51,29 +51,36 @@ local function read_hovered()
 	}
 end
 
+-- Reuse Yazi's sorted/filtered entries and their already-resolved attributes.
+local function read_entries(folder, limit)
+	local names, dirs = {}, {}
+	for i = 1, math.min(limit or #folder.files, #folder.files) do
+		local file = folder.files[i]
+		local name = file.url.name or tostring(file.url):match("([^/]+)$") or tostring(file.url)
+		names[i] = name
+		dirs[name] = file.cha.is_dir
+	end
+	return names, dirs
+end
+
 local function read_folder()
 	local cur = cx.active.current
-	local names = {}
-	for i = 1, #cur.files do
-		local url = cur.files[i].url
-		names[i] = url.name or tostring(url)
-	end
-	return { url = tostring(cur.cwd), files = names, selected = selected_count() }
+	local names, dirs = read_entries(cur)
+	return { url = tostring(cur.cwd), files = names, file_dirs = dirs, selected = selected_count() }
 end
+
 local function read_parent()
 	local p = cx.active.parent
-	if not p or not p.cwd then
-		return nil
-	end
-	local names = {}
-	for i = 1, math.min(30, #(p.files or {})) do
-		local url = p.files[i].url
-		names[i] = url.name or tostring(url):match("([^/]+)$") or tostring(url)
-	end
-	return {
-		cwd = tostring(p.cwd),
-		files = names,
-	}
+	if not p or not p.cwd then return nil end
+	local names, dirs = read_entries(p, 30)
+	return { cwd = tostring(p.cwd), files = names, file_dirs = dirs }
+end
+
+local function read_preview(hovered)
+	local p = cx.active.preview.folder
+	if not p or not hovered.dir or tostring(p.cwd) ~= hovered.url then return nil end
+	local names, dirs = read_entries(p, 30)
+	return { cwd = tostring(p.cwd), files = names, file_dirs = dirs }
 end
 
 
@@ -170,6 +177,8 @@ local function dump_state()
 
 	local folder = read_folder()
 	local hovered = read_hovered()
+	local parent = read_parent()
+	local preview = read_preview(hovered)
 	local ok_p, pulse_data = pcall(read_pulse)
 	local tasks_data = ok_p and pulse_data.tasks or { total = 0, succ = 0, fail = 0, found = 0, processed = 0 }
 	local selected = ok_p and pulse_data.selected or selected_count()
@@ -180,10 +189,24 @@ local function dump_state()
 		if file:is_marked() ~= 0 then marked[#marked + 1] = tostring(file.url) end
 	end
 	local mode = active.mode.is_normal and "normal" or (active.mode.is_select and "select" or "unset")
+	local ok_filter, filter = pcall(function()
+		local value = active.current.files.filter
+		return value and tostring(value) or false
+	end)
+	if not ok_filter then filter = nil end
+	local ok_finder, finder = pcall(function()
+		local value = active.finder
+		return value and tostring(value) or false
+	end)
+	if not ok_finder then finder = nil end
 
 	local key = table.concat({
 		folder.url,
 		ya.json_encode(folder.files),
+		ya.json_encode(folder.file_dirs),
+		ya.json_encode(parent),
+		ya.json_encode(preview),
+		ya.json_encode(hovered),
 		hovered.url or "",
 		selected,
 		tasks_data.total,
@@ -194,6 +217,8 @@ local function dump_state()
 		ya.json_encode(selected_paths),
 		mode,
 		ya.json_encode(marked),
+		ok_filter and tostring(filter) or "unknown-filter",
+		ok_finder and tostring(finder) or "unknown-finder",
 	}, ";")
 
 	if key == last_dump_key then
@@ -208,9 +233,13 @@ local function dump_state()
 		ts = cur_time,
 		seq = state_seq,
 		client_id = cid,
-		parent = read_parent(),
+		parent = parent,
+		preview = preview,
 		cwd = folder.url,
 		files = folder.files,
+		file_dirs = folder.file_dirs,
+		filter = filter,
+		finder = finder,
 		selected = selected,
 		selected_urls = selected_paths,
 		mode = mode,
@@ -260,7 +289,11 @@ local targets = ya.sync(function(_, target)
 	end
 	local result = {}
 	for path in pairs(paths) do result[#result + 1] = path end
-	if #result == 0 and target then result[1] = target end
+	if #result == 0 then
+		local hovered = cx.active.current.hovered
+		local path = target or (hovered and tostring(hovered.url))
+		if path then result[1] = path end
+	end
 	table.sort(result)
 	return result
 end)
@@ -275,71 +308,99 @@ local commit = ya.sync(function(self, req, files)
 	ya.emit("plugin", { "tern", "finalize", mode = "sync" })
 end)
 
--- Match the manager's legacy Splatter vector semantics before sh -c.
-local function shell_script(run, argv)
-	local function quote(value) return ya.quote(value or "", true) end
-	local function expand(pos, tab)
-		local symbol = run:sub(pos, pos)
-		if symbol == "" then return "", pos end
-		if symbol == "t" or symbol == "T" then
-			return expand(pos + 1, symbol == "t" and tab + 1 or math.max(0, tab - 1))
-		end
-		if symbol == "%" then return "%", pos + 1 end
-		if symbol == "h" or symbol == "H" then return quote(tab == 1 and argv[1] or ""), pos + 1 end
-		if symbol == "y" or symbol == "Y" then return "", pos + 1 end
-		local digits
-		if symbol:match("%d") then
-			digits = run:sub(pos):match("^%d+")
-			local index = tonumber(digits)
-			return quote(tab == 1 and argv[index + 1] or ""), pos + #digits
-		end
-		if symbol == "s" or symbol == "S" or symbol == "*" or symbol == "d" or symbol == "D" then
-			digits = run:sub(pos + 1):match("^%d+")
-			local index = digits and tonumber(digits)
-			local result = {}
-			if tab == 1 then
-				local first, last = index and index + 1 or 2, index and index + 1 or #argv
-				for i = first, math.min(last, #argv) do
-					local path = argv[i]
-					if symbol == "d" or symbol == "D" then
-						path = path:match("^(.*)/[^/]*$") or ""
-						if path == "" and argv[i]:sub(1, 1) == "/" then path = "/" end
-					end
-					result[#result + 1] = quote(path)
-				end
-			end
-			if #result == 0 and index then result[1] = quote("") end
-			return table.concat(result, " "), pos + 1 + (digits and #digits or 0)
-		end
-		return "%" .. symbol, pos + 1
-	end
-	local result, pos = {}, 1
-	while pos <= #run do
-		if run:sub(pos, pos) == "%" and pos < #run then
-			local value, next_pos = expand(pos + 1, 1)
-			result[#result + 1], pos = value, next_pos
-		else
-			result[#result + 1], pos = run:sub(pos, pos), pos + 1
-		end
-	end
-	return table.concat(result)
+-- Quote transport only; Yazi's shell actor owns all template/context semantics.
+local function shell_quote(value)
+	return "'" .. value:gsub("'", "'\\''") .. "'"
 end
 
-local prepare_shell = ya.sync(function(_, run, block)
-	local active = cx.active
-	local hovered = active.current.hovered
-	local argv = { hovered and tostring(hovered.url) or "" }
-	for _, file in pairs(active.selected) do argv[#argv + 1] = tostring(file.url) end
-	if #argv == 1 and hovered then argv[2] = argv[1] end
-	local command = { "sh", "-c", ya.quote(shell_script(run, argv), true) }
-	for _, path in ipairs(argv) do command[#command + 1] = ya.quote(path, true) end
-	return { command = table.concat(command, " "), cwd = tostring(active.current.cwd), block = block == true }
-end)
+local SHELL_PREP_LIMIT = 256 * 1024
 
--- Only actor names present in the 26.9.1 manager executor are accepted.
-local command_actors = {}
-for name in ("cd arrow leave enter back forward reveal follow stash open yank unyank toggle toggle_all visual_arrow visual_mode escape copy shell hidden linemode filter filter_do sort refresh quit close suspend seek"):gmatch("%S+") do
-	command_actors[name] = true
+local function read_shell_prep(path)
+	local f, err = io.open(path, "rb")
+	assert(f, tostring(err))
+	local ok, data = pcall(f.read, f, SHELL_PREP_LIMIT + 1)
+	f:close()
+	assert(ok, tostring(data))
+	data = data or ""
+	assert(#data <= SHELL_PREP_LIMIT, "Native shell preparation exceeds 256 KiB")
+	return data
+end
+
+local function prepare_shell(req, run)
+	local directory = state_dir() .. "/prep-" .. req.id
+	local created, create_err = fs.create("dir", Url(directory))
+	assert(created, "Native shell preparation failed: " .. tostring(create_err))
+	local ok, result = pcall(function()
+		-- A request-specific delimiter is never chosen from user script content.
+		-- This transport is not a sandbox against a malicious same-user filesystem.
+		local delimiter = "TERN_PREP_" .. ya.hash(req.id .. tostring(ya.time()) .. tostring(math.random()))
+		while run:find(delimiter, 1, true) do delimiter = delimiter .. "_" end
+		local function path(name)
+			-- The wrapper itself also passes through native percent expansion.
+			return (shell_quote(directory .. "/" .. name):gsub("%%", "%%%%"))
+		end
+		local wrapper = table.concat({
+			"umask 077",
+			"set -e",
+			"cat > " .. path("run") .. " <<'" .. delimiter .. "'",
+			run,
+			delimiter,
+			"printf '%%s\\0' \"$0\" \"$@\" > " .. path("args"),
+			"pwd > " .. path("cwd"),
+			"printf 'done' > " .. path("done"),
+		}, "\n")
+		-- Only the preparation script executes here, never the user's script.
+		-- The native actor performs visual escape and captures its own argv/cwd.
+		ya.exec("shell", { wrapper, block = false })
+		local deadline = ya.time() + 5
+		local ready = false
+		for _ = 1, 250 do
+			local marker = io.open(directory .. "/done", "rb")
+			if marker then
+				marker:close()
+				ready = true
+				break
+			end
+			if ya.time() >= deadline then break end
+			ya.sleep(0.02)
+		end
+		assert(ready, "Native shell preparation timed out; user script was not executed")
+		local expanded = read_shell_prep(directory .. "/run")
+		local argv = read_shell_prep(directory .. "/args")
+		local cwd = read_shell_prep(directory .. "/cwd")
+		assert(expanded:sub(-1) == "\n" and cwd:sub(-1) == "\n", "Incomplete native shell preparation")
+		-- Strip exactly the newline added by the heredoc/pwd, not script/path data.
+		expanded, cwd = expanded:sub(1, -2), cwd:sub(1, -2)
+		local command = { "sh", "-c", shell_quote(expanded) }
+		local pos = 1
+		while pos <= #argv do
+			local ending = assert(argv:find("\0", pos, true), "Incomplete native shell arguments")
+			command[#command + 1] = shell_quote(argv:sub(pos, ending - 1))
+			pos = ending + 1
+		end
+		assert(#command > 3 and cwd ~= "", "Missing native shell context")
+		return { command = table.concat(command, " "), cwd = cwd, block = true }
+	end)
+	-- Revoke the original pathname first: a delayed native task cannot recreate
+	-- staging after timeout, even if it already opened one of the removed files.
+	local retired = directory .. ".cleanup"
+	local renamed, rename_err = fs.rename(Url(directory), Url(retired))
+	if not renamed and rename_err and rename_err.kind == "NotFound" then
+		-- The companion may already have removed staging while closing.
+		assert(ok, "Native shell preparation failed: " .. tostring(result))
+		return result
+	end
+	local removed, remove_err = fs.remove("dir_all", Url(renamed and retired or directory))
+	assert(removed or (remove_err and remove_err.kind == "NotFound"),
+		"Native shell preparation cleanup failed: " .. tostring(remove_err))
+	assert(renamed, "Native shell preparation cleanup failed: " .. tostring(rename_err))
+	assert(ok, "Native shell preparation failed: " .. tostring(result))
+	return result
+end
+
+local companion_actors = {}
+for name in ("cd arrow leave enter back forward reveal yank toggle toggle_all visual_mode escape hidden find_arrow"):gmatch("%S+") do
+	companion_actors[name] = true
 end
 
 function M:entry(job)
@@ -355,11 +416,7 @@ function M:entry(job)
 			reply(req, { ok = false, error = "Target selection changed; operation refused" })
 			return
 		end
-		if req.op == "trash_commit" then
-			ya.emit("remove", { force = true }) -- Trash only; Tern confirmed these paths.
-		else
-			ya.emit("yank", {})
-		end
+		ya.emit("remove", { force = true }) -- Trash only; Tern confirmed these paths.
 		ya.emit("plugin", { "tern", "settled", mode = "sync" })
 		return
 	elseif stage == "settled" then
@@ -367,7 +424,7 @@ function M:entry(job)
 		self.pending = nil
 		last_dump_key = nil
 		dump_state()
-		reply(req, { ok = true, paths = req.paths, queued = req.op == "trash_commit" })
+		reply(req, { ok = true, paths = req.paths, queued = true })
 		return
 	end
 
@@ -381,49 +438,31 @@ function M:entry(job)
 			req.args = args
 		end
 		if req.op == "command" then
-			assert(command_actors[req.action] or req.action == "remove", "Unknown or unsupported manager command: " .. tostring(req.action))
+			assert(req.action == "shell", "Command input only accepts native shell scripts")
+			local run = req.args.run or req.args[1]
+			assert(type(run) == "string" and run ~= "", "Supply a shell script in the native command input")
 			assert(not req.args.interactive, "Local command input does not open another interactive Yazi prompt")
-			if req.action == "shell" then
-				local run = req.args.run or req.args[1]
-				assert(type(run) == "string" and run ~= "", "Supply a shell script in the native command input")
-				assert(not req.args.cwd, "Shell runs in Yazi's current directory; use cd first")
-				assert(req.args.block == nil or type(req.args.block) == "boolean", "--block is a boolean flag")
-				assert(req.args.orphan == nil or type(req.args.orphan) == "boolean", "--orphan is a boolean flag")
-				if req.args.orphan then
-					ya.exec("shell", req.args)
-					reply(req, { ok = true, queued = true, orphan = true })
-				else
-					ya.exec("escape", { visual = true })
-					reply(req, { ok = true, shell = prepare_shell(run, req.args.block) })
-				end
-				return
-			end
-			if req.action == "remove" then
-				assert(not req.args.permanently and not req.args.force, "Use plain d for confirmed trash; force/permanent removal is disabled")
-				reply(req, { ok = true, paths = targets(req.target), confirm_trash = true })
-				return
-			elseif req.action == "yank" then
-				assert(not req.args.cut, "Cut is not a companion shortcut; x remains extraction")
-				req.op = "yank"
-			elseif req.action == "toggle" then req.op = "toggle"
-			elseif req.action == "open" and #req.args == 0 then req.op = "open"
-			elseif req.action == "filter" or req.action == "filter_do" then
-				req.op = "filter"
-				req.query = req.args[1] or ""
+			assert(not req.args.cwd, "Shell runs in Yazi's current directory; use cd first")
+			assert(req.args.block == nil or type(req.args.block) == "boolean", "--block is a boolean flag")
+			assert(req.args.orphan == nil or type(req.args.orphan) == "boolean", "--orphan is a boolean flag")
+			if os.getenv("TERN_YAZI_BRIDGE") then
+				-- Acknowledgement is acceptance, not completion of the blocking actor.
+				reply(req, { ok = true, queued = true, orphan = req.args.orphan == true })
+				ya.exec("shell", req.args)
+			elseif req.args.orphan or not req.args.block then
+				ya.exec("shell", req.args)
+				reply(req, { ok = true, queued = true, orphan = req.args.orphan == true })
 			else
-				ya.exec(req.action, req.args)
-				snapshot()
-				reply(req, { ok = true, queued = true })
-				return
+				reply(req, { ok = true, shell = prepare_shell(req, run) })
 			end
+			return
 		end
 		if req.op == "ping" then
 			snapshot()
 			reply(req, { ok = true })
 		elseif req.op == "trash_prepare" then
 			reply(req, { ok = true, paths = targets(req.target) })
-		elseif req.op == "trash_commit" or req.op == "yank" then
-			if req.op == "yank" then req.paths = targets(req.target) end
+		elseif req.op == "trash_commit" then
 			assert(type(req.paths) == "table" and #req.paths > 0, "No targets")
 			table.sort(req.paths)
 			local files = {}
@@ -433,21 +472,39 @@ function M:entry(job)
 				files[#files + 1] = file
 			end
 			commit(req, files)
-		elseif req.op == "toggle" then
-			local file, e = fs.file(Url(assert(req.target)))
-			assert(file, tostring(e))
-			ya.exec("toggle", { file })
+		elseif req.op == "toggle_advance" then
+			-- Each exec awaits its actor before the next one is dispatched.
+			ya.exec("toggle", {})
+			ya.exec("arrow", { 1 })
 			snapshot()
 			reply(req, { ok = true })
-		elseif req.op == "open" then
-			ya.exec("open", { Url(assert(req.target)), cwd = Url(req.cwd) })
+		elseif req.op == "cd" then
+			assert(type(req.target) == "string" and req.target ~= "", "Missing directory path")
+			local target = Url(req.target)
+			local file, e = fs.file(target)
+			assert(file, tostring(e))
+			assert(file.cha.is_dir, "Target is not a directory")
+			ya.exec("cd", { target })
+			snapshot()
+			reply(req, { ok = true })
+		elseif req.op == "activate" then
+			assert(req.action == "enter", "Unsupported activation action")
+			ya.exec("reveal", { Url(assert(req.target)), no_dummy = true })
+			ya.exec(req.action, {})
+			snapshot()
 			reply(req, { ok = true, queued = true })
 		elseif req.op == "filter" then
-			ya.exec("filter_do", { req.query or "", insensitive = true, done = true })
+			ya.exec("filter_do", { req.query or "", smart = true, done = req.done ~= false })
+			snapshot()
+			reply(req, { ok = true })
+		elseif req.op == "find" then
+			assert(type(req.query) == "string", "Find requires a query")
+			assert(req.previous == nil or type(req.previous) == "boolean", "--previous is a boolean flag")
+			ya.exec("find_do", { req.query, smart = true, previous = req.previous == true })
 			snapshot()
 			reply(req, { ok = true })
 		elseif req.op == "action" then
-			assert(req.action == "arrow" or req.action == "cd" or req.action == "reveal" or req.action == "visual_mode" or req.action == "escape" or req.action == "hidden", "Unsupported companion action")
+			assert(companion_actors[req.action], "Unsupported companion action")
 			ya.exec(req.action, req.args or {})
 			snapshot()
 			reply(req, { ok = true, queued = true })

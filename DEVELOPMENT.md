@@ -1,6 +1,6 @@
 # Development Guide
 
-This document describes the native `tern-yazi` implementation: a Rust PTY supervisor, Tern Luau block/window plugins, and a Yazi Lua plugin. The installed `yazi` wrapper runs the original executable directly outside Tern. Inside a Tern pane it starts Yazi in an invisible PTY and opens a managed visual zoom overlay that preserves the owner shell and original split tree. Yazi owns file-manager state and manager actions; Tern owns layout, previews, input bars, and confirmation. Runtime execution uses the native helper, Tern, Yazi, and Ya, with no Python process.
+This document describes the native `tern-yazi` implementation: a Rust PTY supervisor, Tern Luau block/window plugins, and a Yazi Lua plugin. The installed `yazi` wrapper runs the original executable directly outside Tern. Inside a Tern pane it starts Yazi in an invisible PTY and opens a managed visual zoom overlay that preserves the owner shell and original split tree. Yazi owns file-manager state, directory navigation, selection, tasks, and shell execution; Tern owns layout, file opening (`cx:open`), rich previews, input bars, and confirmation. Runtime execution uses the native helper, Tern, Yazi, and Ya, with no Python process.
 
 ## 1. Environment and installation
 
@@ -10,8 +10,8 @@ The current Linux interactive verification environment uses:
 
 | Component | Observed version | Responsibility |
 | --- | --- | --- |
-| Tern | `0.7.0` (`9ca00e4`) | Host/window plugin VMs, native block UI, filesystem/process APIs, layout, input routing |
-| Yazi | `26.9.1` | Authoritative directory, cursor, selection, visual mode, and task state |
+| Tern | `0.7.0` (`9ca00e4`) | Host/window plugin VMs, native block UI, file opening (`cx:open`), rich file previews, layout, input routing |
+| Yazi | `26.9.1` | Authoritative directory navigation, cursor, selection, visual marks, tasks, and shell execution |
 | Ya | `26.9.1` | `ya emit-to` dispatch to the chosen Yazi client |
 
 These are observed versions, not a compatibility matrix. The generated declarations in [`tern.d.luau`](tern.d.luau) describe the Tern APIs used by this checkout. Both Yazi and the Tern host must run on the same machine and see the same runtime inbox. Keep `ya` and `tern` on the host process's `PATH`; Terminal Here invokes `tern` as a subprocess.
@@ -101,7 +101,7 @@ Configure `luau-lsp.types.definitionFiles` to include the resulting `tern.d.luau
 | [`launcher/Cargo.toml`](launcher/Cargo.toml), [`launcher/Cargo.lock`](launcher/Cargo.lock) | Locked native launcher build and dependencies |
 | [`install.sh`](install.sh) | Local owned wrapper/helper installation, original executable resolution, reversible uninstall |
 | [`tern.d.luau`](tern.d.luau) | Generated native Tern type and API contracts |
-| [`tests/smoke_luau.sh`](tests/smoke_luau.sh) | Plugin registration/reload smoke script with a synthetic snapshot |
+| [`tests/smoke_luau.sh`](tests/smoke_luau.sh), [`launcher/tests/interaction.rs`](launcher/tests/interaction.rs) | Real isolated Tern/Yazi interaction suite, native state/file outcomes, screenshots and process cleanup |
 
 There is no supported Python entry point or Python test suite in this checkout. Local bytecode or ignored development artifacts are not part of the native runtime. The root `DEVELOPMENT.md` is the published developer guide; the intentionally excluded `/AGENTS.md`, `/PLAN.md`, and `/docs/` remain local and are not installation prerequisites.
 
@@ -170,9 +170,18 @@ The host timer reads the latest `BlockCx` retained by `view`, rather than keepin
 
 An explicit ordinary attach initially chooses the highest timestamp/sequence score among numeric `state-*.json` files without a managed health file, pins that client, and probes it with the Yazi actor `ping`. The filename supplies the client ID. Polls attempt a probe every 2 seconds when the serialized request queue is idle. A successful actor reply establishes liveness; an acknowledgement older than 3 seconds is offline. Normal reply polling still has its approximately 10-second timeout. A client picker remains pending. The block keeps its chosen client across reload and does not follow whichever client later writes the newest snapshot.
 
-Ordinary Yazi snapshots have no age expiry and may remain after their producer exits. They are candidate state, not live evidence: they do not automatically open panels, and an old snapshot alone cannot enable file actions or render the live browser. This is distinct from the managed supervisor's cleanup of its own snapshots/control files. The `Synced` browser badge is shown only after managed heartbeat or ordinary actor-ack liveness succeeds. An absent/offline producer renders a connection/offline card with Check Again and close instructions. `Ctrl+R` re-renders available state; ordinary polling performs the live probe.
+Ordinary Yazi snapshots have no age expiry and may remain after their producer exits. They are candidate state, not live evidence: they do not automatically open panels, and an old snapshot alone cannot enable file actions or render the live browser. Managed heartbeat or ordinary actor acknowledgements gate actions without a redundant header badge. An absent/offline producer renders a connection/offline card with Check Again and close instructions. Ordinary polling performs the live probe; Ctrl+R invokes native selection inversion.
 
-Outside input/filter editing or Trash confirmation, `q` closes the block. Esc first cancels input or confirmation, clears a retained filter, or commits/leaves Yazi visual mode; a later Esc closes. Managed closure requests backend shutdown and returns control to the launching shell. Ordinary attached closure exits the block while leaving its independently launched Yazi running.
+Outside input editing or Trash confirmation, `q` closes the block. Esc cancels local path/shell input or confirmation; find/filter editing also clears its corresponding native state. In normal online operation Esc dispatches native `escape` to Yazi, preserving upstream ordering rather than unconditionally clearing the filter: visual mode exits before a retained filter, and an active find clears before a retained filter. Esc only closes the block when offline. Managed closure requests backend shutdown and returns control to the launching shell. Ordinary attached closure exits the block while leaving its independently launched Yazi running.
+
+### Breadcrumbs and directory editing
+
+The path header renders independent directory buttons with full-prefix tooltips and hover feedback. Home abbreviation applies only to the actual home directory or its descendants. Each click sends a pinned `cd` request; Yazi checks the target with `fs.file`, rejects non-directories without changing liveness, executes `cd`, and publishes the resulting snapshot before acknowledging.
+
+The distinct trailing hit target replaces the breadcrumbs with a native single-line input. Enter submits; Escape cancels without navigation. Entering path mode selects the current path once; pointer focus releases that initial select-all, so repeated clicks place/edit the caret instead of selecting the whole path again. Text edits use UTF-16 boundaries, preserving Unicode paths. Absolute paths, relative paths and `~/` are accepted; spaces are preserved and `..` is left to the filesystem so symbolic-link semantics remain intact.
+
+The width budget retains the current directory and folds older ancestors behind an ellipsis button. The ancestor layer has explicit hit testing and scroll containment; its directory buttons use the same exact-prefix targets and tooltips. Individual names truncate visually; labels and navigation targets retain their complete paths. The real interaction suite includes ancestor clicks, repeated-click caret editing, input/cancel, Unicode paths, narrow layouts, full-prefix tooltip assertions, directory-only rejection and recovery. Visual hover feedback requires inspection of the rendered breadcrumb screenshot as well as the node titles.
+
 
 ## 4. Inbox and wire protocol
 
@@ -201,7 +210,10 @@ A representative snapshot is:
   "client_id": "987654323",
   "cwd": "/tmp/example",
   "files": ["a.txt", "child"],
-  "parent": {"cwd": "/tmp", "files": ["example", "other"]},
+  "file_dirs": {"child": true},
+  "parent": {"cwd": "/tmp", "files": ["example", "other"], "file_dirs": {"example": true}},
+  "preview": {"cwd": "/tmp/example/child", "files": ["sub.txt"], "file_dirs": {}},
+  "filter": false,
   "selected": 1,
   "selected_urls": ["/tmp/example/a.txt"],
   "mode": "normal",
@@ -217,8 +229,7 @@ A representative snapshot is:
 }
 ```
 
-`files` preserves Yazi's filtered/sorted current listing; persistent `selected_urls` are sorted absolute paths. `mode` is `normal`, `select`, or `unset`. `marked_urls` carries visual-range marks, separate from persistent selection. Hover and parent objects can be absent; protected task reads fall back to zero counters on failure. The Yazi parent snapshot contains at most 30 entries. `client_id` comes from `YAZI_ID`, with `default` as fallback. Managed startup supplies its generated numeric ID; ordinary attach fixtures should use the original executable, for example `/usr/bin/yazi --client-id 987654323`, because the managed wrapper reserves that option. Host attach discovery accepts numeric filenames.
-
+`files` preserves Yazi's filtered/sorted current listing; `file_dirs` maps visible entry names to directory booleans without filesystem scanning. `parent` and `preview` provide bounded directory snapshots (at most 30 entries each). `filter` is an authoritative string when an active filter is applied, `false` when inactive, or `null` if unexposed; it is included in snapshot deduplication, and `sync_hover()` syncs `filter_query` when not actively editing in filter mode and no requests are queued. Persistent `selected_urls` are sorted absolute paths. `mode` is `normal`, `select`, or `unset`. `marked_urls` carries visual-range marks, separate from persistent selection. Hover and parent objects can be absent; protected task reads fall back to zero counters on failure. `client_id` comes from `YAZI_ID`, with `default` as fallback. Managed startup supplies its generated numeric ID; ordinary attach fixtures should use the original executable, for example `/usr/bin/yazi --client-id 987654323`, because the managed wrapper reserves that option. Host attach discovery accepts numeric filenames.
 ### Request serialization
 
 The host maintains a FIFO queue and sends one request at a time. Each request freezes its pinned destination client at enqueue time. IDs combine an epoch from `tern.now()`, the pane identifier, and an incrementing counter; managed requests additionally prefix the client ID and session token, allowing the supervisor to clean up its own replies. Enqueue/dispatch check client identity and liveness. The Yazi executor validates IDs against `^[%w-]+$` before constructing reply paths.
@@ -252,12 +263,12 @@ Empty argument collections may encode as empty objects; the decoder treats missi
 | `op` | Main fields | Executor behavior |
 | --- | --- | --- |
 | `ping` | Request ID | Forces a snapshot and returns an actor acknowledgement for ordinary attach liveness |
-| `action` | `action`, `args` | Allows `arrow`, `cd`, `reveal`, `visual_mode`, `escape`, `hidden`; executes actor and emits a forced snapshot |
-| `command` | `action`, `args`, optional `target`/`cwd` | Validates the manager actor and restrictions; dispatches normally or translates to a target-aware operation |
-| `open` | `target`, `cwd` | Opens an explicit `Url(target)` through Yazi with `Url(cwd)`; does not substitute Yazi's current selection |
-| `toggle` | `target` | Resolves the exact file, toggles it through Yazi, and snapshots |
-| `filter` | `query` | Calls `filter_do` with `insensitive=true`, `done=true`, and snapshots |
-| `yank` | `target` | Computes selected/marked-or-fallback targets, enters the guarded exact-selection pipeline, and returns the same paths |
+| `command` | `action`, `args`, optional `target`/`cwd` | Dispatches native `shell` commands (blocking visible PTY terminal or non-blocking background task) |
+| `action` | `action`, `args` | Dispatches native companion actors (`cd`, `arrow`, `leave`, `enter`, `back`, `forward`, `reveal`, `yank`, `toggle`, `toggle_all`, `visual_mode`, `escape`, `hidden`, `find_arrow`) via `ya.exec` and forces snapshot |
+| `activate` | `target`, `action` | Reveals exact directory `target` via `reveal` then executes native `enter` (`op = "activate", action = "enter"`) |
+| `toggle_advance` | None | Executes native `toggle` then `arrow 1` sequentially |
+| `filter` | `query`, `done` | Calls `filter_do` with `smart=true` and `done=req.done~=false` (in-flight typing or Enter commit) and forces snapshot |
+| `find` | `query`, optional boolean `previous` | Calls `find_do` with `smart=true` and `previous=req.previous==true`, moves the native cursor without filtering the listing, and forces snapshot |
 | `trash_prepare` | `target` | Returns authoritative target paths without mutating Yazi or the filesystem |
 | `trash_commit` | `paths` | Validates each file and runs the guarded confirmed-trash pipeline |
 
@@ -269,32 +280,25 @@ A successful `ya` exit only proves transport dispatch. After it exits successful
 
 An `ok` reply acknowledges actor acceptance or the target pipeline's settled dispatch, not completion of an opener, shell process, trash job, or filesystem task. Inspect Yazi task results and fixture files for end-to-end outcomes. Timeout explicitly means the outcome is unknown; do not blindly retry a destructive request. Late/unconsumed replies can remain in the inbox.
 
-### Host-tracked shell handoff and terminal lifecycle
+### Native shell interception and terminal lifecycle
 
-When Yazi prepares a visible shell command from raw `;` input or `: shell` without `--orphan`, it returns `{ ok = true, shell = { command = ..., cwd = ... }, id = <reply-id> }`. The host writes a tracked handoff file `shell-<id>.json` containing `{ version = 1, id = reply.id, cid = state.cid, token = state.token, pane = cx.pane, owner_pane = state.owner_pane, shell = shell }`, and calls `cx:open(path)`.
+Managed shell commands execute through a private `PATH` shim directory (`shim-<cid>-<token>`) created by the supervisor and placed at the head of Yazi's `PATH`. When Yazi dispatches a blocking shell execution, the shim script executes `tern-yazi-launch --native-shell [args]`:
 
-The window's `tern.route.open` claims `shell-<id>.json` and verifies `id`, `pane`, `cid`, `token`, `owner_pane`, and the active lease. It generates a window nonce challenge `nonce = nonce_epoch .. "-shell-" .. tostring(nonce_seq)`, records the pending handoff, and sends a challenge action to the companion block:
+1. **Request creation**: `--native-shell` reads `managed-<cid>.json` and the active lease to verify the supervisor binding. It creates `native-shell-<id>.json` in the runtime inbox, where `id = <cid>-<token>-<pid>`, containing `{ version = 1, id = id, cid = cid, token = token, pane = pane, owner_pane = owner_pane, cwd = cwd, argv = argv }`.
+2. **Routing and verification**: `window.luau` (`tern.route.open`) claims the request path, verifying `id`, `pane`, `cid`, `token`, `owner_pane`, and the active lease. `host.luau` also monitors pending requests via `poll_native_shells` to ensure timely routing if the window route is delayed.
+3. **Terminal launch**: Upon verification, the window splits the companion pane to the right (`cx.layout:split`) running `tern-yazi-launch --native-terminal <id> <path>` in a real PTY terminal, and zooms the terminal pane.
+4. **Execution and synchronization**:
+   - When the terminal opens, it creates `native-shell-<id>.started` containing the request ID.
+   - The terminal runs the command with full stdout, stderr, and interactive stdin.
+   - Upon command exit, it atomically writes `native-shell-<id>.result` containing `{"id": id, "status": status}`.
+   - The waiting `--native-shell` shim reads `native-shell-<id>.started` and `native-shell-<id>.result`, reaps the exit status, cleans up protocol files, and exits with the command's actual exit status back to Yazi.
+5. **Terminal completion**: The terminal displays the printed exit status (`[exit %s] Press Enter to return to Yazi...`). When the user presses Enter, the terminal pane exits and closes. On `pane_closed`, the window restores the prior zoom state to the companion or owner pane.
 
-```text
-{ ev = "action", id = "main.poll", act = "shell_handoff_check", request_id = body.id, cid = body.cid, token = body.token, pane = body.pane, nonce = nonce }
-```
+**Fallback**: In ordinary attach mode without a managed supervisor, or if managed request creation encounters an unattached session, `--native-shell` falls back to direct `/bin/sh` execution without terminal handoff.
 
-Here `request_id` identifies the pending handoff and is distinct from the action event ID `main.poll`. The companion block verifies the identifiers and writes `shell-<id>.json.ack` (`ACK.json.ack`) containing `{ id = ev.request_id, nonce = ev.nonce, cid = ev.cid, token = ev.token, pane = ev.pane }`. The window validates the ACK file. Both `shell-<id>.json` and `shell-<id>.json.ack` are consumed and removed upon terminal launch or launch failure; the companion also clears handoffs on close or shutdown.
+Non-blocking shell commands submitted via raw `;` input (`shell { run, block = false, orphan = false }`) directly queue native Yazi background tasks without invoking the blocking terminal wrapper, returning `{ ok = true, queued = true, orphan = false }` and displaying an informational toast while keeping the browser active.
 
-Upon verified handoff, the window splits the pane to the right with `cx.layout:split(body.pane, "right", ...)` running a PTY wrapper script:
-
-```sh
-sh -c "<command>\nstatus=$?\nprintf \"\\n[exit %s] Press Enter to return to Yazi...\" \"$status\"\nIFS= read -r answer\nexit 0"
-```
-
-The window zooms the terminal pane (`zoom_pane(cx, terminal, true)`), opening a real visible PTY terminal with stdout, stderr, and interactive stdin. The host tracks session return mappings and original zoom intent in `tern.kv`:
-- `managed_overlays` stores `{ owner_pane = record.owner_pane, was_zoomed = record.was_zoomed }` keyed by `cid-token`.
-- `shell_terminals` stores `{ pane = body.pane, owner_pane = body.owner_pane }` keyed by `tostring(terminal)`.
-
-When the user views the printed exit code and presses Enter, the wrapper exits 0 and the terminal pane closes. On `pane_closed`, the window reads the saved mapping from `shell_terminals`, removes the KV entry, restores zoom to the target companion pane or owner pane (`zoom_pane(cx, target, true)`), and sends `main.poll` to resume companion rendering.
-
-Explicit `--orphan` bypasses terminal handoff: Yazi executes via `ya.exec("shell", args)` in the background without opening a terminal pane, returning an immediate acknowledgement and triggering an informational toast.
-
+The shell execution environment for launched commands preserves the user's original `PATH`, removes internal bridge and Tern pane identifier variables, and restores the actual controlling terminal description (`TERM` and PTY modes). The execution environment maintains the caller's umask and process group boundaries without exposing or publishing plaintext values of sensitive environment variables.
 ### DDS telemetry is a separate interface
 
 The Yazi plugin still publishes `tern-hover`, `tern-cd`, and deduplicated `tern-state` telemetry via `ps.pub_to(0, ...)`. It registers `ps.sub_remote("tern-cmd", ...)`: `{"op":"hello"}` republishes folder/hover telemetry, while other bodies produce a `tern-ack` echo, followed by a pulse. This capability is necessary for inbound custom DDS kinds in Yazi 26.9.
@@ -313,7 +317,7 @@ Yazi snapshots own the current directory listing, cursor, persistent selection, 
 
 `sync_hover()` clears optimistic state when the source client, cwd, or hovered URL changes. A task-only or selection-only snapshot with those three values unchanged must not discard a click that is still being dispatched. This distinction is important for the click-then-keyboard regression: a click requests an actual Yazi `reveal`, and later `j`/`k` moves from that real cursor, not from a Tern-only highlight.
 
-Current-column names come directly from `yz.files` when rendering the authoritative cwd. Only an optimistic different cwd uses a local directory listing. Filtering is performed by Yazi; the companion does not maintain a second local regex filter. Parent data uses the snapshot when available, otherwise a live listing; child contents use a live sorted `tern.fs.list`. Those live columns need not share Yazi's active filtering policy.
+Current, parent, and preview child columns render directly from authoritative Yazi snapshots (`yz.files`, `yz.parent.files`, `yz.preview.files`) and their companion `file_dirs` mapping. The companion performs no recursive filesystem enumeration (`tern.fs.list`) for type probes or directory previews. Bounded snapshot limits remain unchanged: state JSON payload is capped at 256 KiB, and parent and preview directory entries are bounded to a maximum of 30 items. Filtering is performed natively by Yazi; the companion does not maintain a second local regex filter.
 
 ### List identifiers and events
 
@@ -331,24 +335,23 @@ Rows use filenames as stable keys and full paths as `title` tooltips. Native lis
 | --- | --- |
 | Current-column `select` (single click) | Set provisional filename and send `reveal(target, no_dummy=true)` to Yazi |
 | Parent/child `select` | Provisional cwd becomes the selected entry's containing directory; reveal the exact entry in Yazi |
-| Any list `activate` on a directory | Provisional cwd becomes the target; send `cd(target)` |
-| Any list `activate` on a file | Send explicit-path `open(target, cwd=base)` to Yazi |
+| Any list `activate` on a directory (double click) | Reveal exact target then execute native `enter` (`op = "activate", action = "enter"`) |
+| Any list `activate` on a file (double click) | Open target file directly through Tern (`cx:open`) |
 
-The handler accepts both `select` and `activate` using the item's semantic ID. It must not interpret a native item string as a numeric index or activate whichever file Yazi happened to hover before the click.
-
+The handler accepts both `select` and `activate` using the item's semantic ID. Directory navigation (`enter`, `leave`, `cd`) is handled natively by Yazi. File opening and previews are owned entirely by Tern: pressing `o` or `Enter` on files expands all authoritative selected paths (`selected_urls`) directly through Tern (`cx:open`), or opens the hovered file if none are selected; double-clicking a file opens the exact clicked file directly through Tern (`cx:open`) without invoking a native actor; pressing `Enter` on an unselected directory remains native `enter` in Yazi. File previews render natively in Tern.
 Green check marks represent persistent selected paths. The native selected-row capsule represents cursor position. Amber `+`/`-` marks represent the visual range (`select`/`unset`); these are not persistent selection marks. Counts remain based on Yazi's snapshot while the cursor moves.
 
 ### Regions, layout, and actions
 
 The block returns `main`, `dock`, and `layer` regions. Region roots are stripped by Tern, so the footer row is wrapped as a child of a `ui.col` in `dock`. The confirmation lives in `layer` with its own opaque card and pointer-enabled controls.
 
-The top path display uses a dedicated path card (`yazi.path-header`) with single-line truncation and full-path tooltip via `card.p.title = cur_cwd`. Status badges (`yazi.path-status`) are rendered in a separate row below the path card, ensuring badges cannot squeeze the path into vertical text. Column card headers (`data-role^="yazi.column." > .sf-card-head`) are constrained to a single line with ellipsis truncation.
+The top path display uses a dedicated path card (`yazi.path-header`) with single-line truncation and a full-path tooltip. The following row is reserved for input: blank in normal mode, occupied by shell, find or filter editing. Selection counts remain in the docked footer. Column card headings are single-line and truncate with ellipsis.
 
 CSS assigns parent/current/preview shares of `4fr / 9fr / 7fr`, each with `minmax(0, ...)`. Pane height is inherited through flex/grid containers with `min-height: 0`; only native list scrollers and the preview region scroll. Lists retain `max.lines` and full selected node IDs for native selected-row reveal. Do not pad lists to terminal rows or remove the native selection-reveal property. Image wrappers constrain natural raster/SVG dimensions and use `object-fit: contain`.
 
-Clickable controls use action strings such as `open_file=<path>`, `copy_path=<path>`, and `terminal_here=<cwd>`, delivered to the handler as `ev.act`/`ev.value`. `event()` also accepts a structured `shortcut` action carrying `ev.key`; both that route and the block's `key()` call the same `handle_key()` implementation.
+Clickable controls use action strings such as `open_file=<path>` (opens file directly through Tern via `cx:open`), `enter_dir=<path>` (requests native `activate` enter), `copy_path=<path>`, and `terminal_here=<cwd>`, delivered to the handler as `ev.act`/`ev.value`. `event()` also accepts a structured `shortcut` action carrying `ev.key`; both that route and the block's `key()` call the same `handle_key()` implementation.
 
-File-preview buttons open through Tern, copy the visible path directly, launch `tern split down --cwd <cwd>`, or extract the visible archive. The keyboard `y` shortcut instead performs authoritative Yazi yank and copies its returned target set; the Copy Path button copies only its visible path.
+Preview column action buttons offer quick actions: "Open in Tern" opens the target file directly through Tern (`cx:open`), "Copy Path" copies the target path to the system clipboard, and "Terminal Here" launches a new terminal pane split via Tern with explicit source pane tracking and launch error reporting. Custom archive extraction mutations and extraction buttons are removed; archive preview listings remain strictly read-only. Status display presents actual metadata without hardcoded permission strings. Keyboard shortcuts dispatch native Yazi actions: `y` dispatches native yank (copy) and `x` dispatches native yank with `cut = true`, where Yazi clears the selection automatically.
 ## 6. Keyboard and local command semantics
 
 ### Normal mode
@@ -356,59 +359,60 @@ File-preview buttons open through Tern, copy the visible path directly, launch `
 | Key | Behavior |
 | --- | --- |
 | `j` / Down, `k` / Up | Yazi `arrow` by `1` / `-1` |
-| `h` / Left / Backspace | `cd` to the visible cwd's parent |
-| `l` / Right | Enter a visible directory; no file open |
-| Enter | Enter a directory or request explicit-path file open through Yazi |
-| Space | Toggle the visible exact path in Yazi's persistent selection |
-| `v` | Yazi `visual_mode` |
-| `y` | Yank authoritative selected/visual-or-visible targets; copy those paths to the clipboard |
-| `o` | Open the visible path through Tern |
-| `d` | Prepare target paths and show native trash confirmation |
-| `g` / Home | `arrow top` |
-| `G` / End | `arrow bot` |
-| PageDown / PageUp | `arrow 100%` / `-100%` (Yazi viewport units) |
-| Shift+PageDown / Shift+PageUp | Half-page semantic handler, subject to Tern routing below |
-| Ctrl+D / Ctrl+U | Half-page semantic handler, subject to Tern routing below |
-| Ctrl+F / Ctrl+B | Full-page semantic handler, subject to Tern routing below |
-| `/` | Edit a live case-insensitive Yazi regex filter |
-| `;` | Edit a raw shell command locally; launches a visible PTY terminal with stdout/stderr/stdin until Enter returns to Yazi |
-| `:` / Shift+`;` | Edit a manager action locally; `: shell quoted-run --block` launches a visible PTY terminal, while `--orphan` runs detached |
+| `h` / Left | Native `leave` (parent directory; Backspace does not leave) |
+| `l` / Right | Native `enter` (enter hovered directory) |
+| `H` | Native `back` (history back) |
+| `L` | Native `forward` (history forward) |
+| `o` | Open authoritative selected file(s) or visible hovered file directly through Tern (`cx:open`) |
+| Enter | Enter directory via native `enter`, or open authoritative selected/hovered file(s) directly through Tern (`cx:open`) |
+| Space | Native `toggle_advance` (composite sequence: executes `toggle` then `arrow 1`) |
+| `v` | Native `visual_mode` |
+| `V` | Native `visual_mode` with `unset = true` |
+| `y` | Native `yank` (copy; Yazi clears selection itself) |
+| `x` | Native `yank` with `cut = true` (cut; Yazi clears selection itself; not archive extraction) |
+| `d` | Prepare target paths via `trash_prepare` and show native trash confirmation |
+| `gg` / Home | Native `arrow top` (`g` acts as leader key; second `g` jumps to top; state resets on other key/Esc or cwd change) |
+| `G` / End | Native `arrow bot` |
+| PageDown / PageUp | Native `arrow 100%` / `-100%` (Yazi viewport units) |
+| Shift+PageDown / Shift+PageUp | Half-page semantic handler (`arrow -50%` / `50%`), subject to Tern routing below |
+| Ctrl+D / Ctrl+U | Half-page semantic handler (`arrow 50%` / `-50%`), subject to Tern routing below |
+| Ctrl+F / Ctrl+B | Full-page semantic handler (`arrow 100%` / `-100%`), subject to Tern routing below |
+| `f` | Edit live native smart filter (`filter` requests dispatched with `smart=true` as text changes) |
+| `/` / `?` | Edit native smart find forward/backward (`find_do` with `smart=true`, boolean `previous`); moves the cursor without hiding entries |
+| `n` / `N` | Native `find_arrow` next/previous match (`previous=false` / `true`) |
+| `;` | Edit a raw non-blocking shell command locally (`shell --interactive`); submits native Yazi background task returning browser promptly (not orphan, no terminal) |
+| `:` / Shift+`;` | Edit a raw blocking shell command locally (`shell --block --interactive`); launches a visible PTY terminal with stdout/stderr/stdin until Enter returns to Yazi |
 | `.` | Yazi `hidden` with `state="toggle"` |
-| Ctrl+R | Re-render from the available snapshot |
-| `x` | Extract the visible archive into the visible cwd; not Yazi cut |
+| Ctrl+A | Native `toggle_all` with `state="on"` |
+| Ctrl+R | Native `toggle_all` (toggle all, replacing former refresh) |
+| Esc | Sends native Yazi `escape` when online (visual mode and find clear before a retained filter; selection follows upstream handling); cancels local input/trash and clears the corresponding native find/filter while editing; closes companion only when offline |
 | `q` | Close outside local editing/confirmation; restore owner shell in its prior zoom state, or leave ordinary attached Yazi running |
-
-Shifted letters other than `G` are not silently treated as their unshifted actions. Normal-mode Alt/Meta chords are not claimed by the handler.
+Shifted letters have explicit actions for `G`, `H`, `L`, `N` and `V`; other shifted letters are not silently treated as their unshifted actions. Normal-mode Alt/Meta chords are not claimed by the handler.
 
 ### Input editing
 
-Both input bars accept printable key text, Space, paste, and Unicode. Backspace removes one UTF-8 codepoint, not an entire grapheme cluster. Enter submits the current text; Esc cancels locally. The command bar remains available after a submission error. A successful reply clears the bar only if its text still matches the submitted text.
+Find (`/`/`?`), filter (`f`) and shell (`;`/`:`) input bars accept printable key text, Space, paste, and Unicode. Backspace removes one UTF-8 codepoint, not an entire grapheme cluster. Enter submits the current text; a successful submission leaves editing, while the command bar remains available after a submission error.
 
-Filter editing sends `filter` requests as the text changes. Enter leaves editing while retaining the filter. Esc/clear sends an empty query and clears local filter state before a later Esc can exit the block.
+Find editing sends native `find` requests as text changes and again on Enter, retaining Yazi's find state for `n/N` after the prompt closes. `/` searches forward; `?` searches backward via the boolean `previous` flag. Smart matching delegates case handling to Yazi. Find moves hover through the existing listing, including an already filtered listing; it is not a filter alias. Esc while editing closes the prompt and sends `escape` with `find=true`, leaving an existing filter intact.
 
-The `;` raw shell input and `: shell quoted-run --block` open a real visible PTY terminal pane in a zoom overlay. The command executes with stdout, stderr, and interactive stdin in Yazi's working directory. Upon process exit, the printed exit code is displayed (`[exit %s] Press Enter to return to Yazi...`). Pressing Enter terminates the terminal wrapper and returns to the same live Yazi session in the zoom overlay. Explicit `--orphan` executes native detached commands inside Yazi with notification feedback and no terminal pane.
+Filter editing (`f`) sends `filter` requests with `smart=true` and `done=false` as text changes. Enter sends `done=true` and leaves editing while retaining the filter. Lowercase smart-filter queries match either case; uppercase queries are case-sensitive. Esc while editing clears the filter query and native filter. Active filter state is reported via `yz.filter` in snapshots (`string` when active, `false` when cleared). In normal mode, native Esc first leaves an active visual mode without removing the retained filter; another Esc clears that filter. With an active find over a retained filter, the first Esc clears find and leaves the filtered rows intact; the following Esc clears the filter. Shell/path input and Trash confirmation cancel locally without navigation or a Trash mutation.
 
-The `;` bar sends the raw string as the shell actor's first positional argument with the visible cwd as an option. It does not parse shell words, rewrite quoting, or open an extra Yazi shell prompt. Shell syntax, substitutions, and side effects belong to the shell/Yazi execution environment; this is not a safe shell sandbox.
+### Unsupported actions and keys
 
-The `:` bar is a manager-command parser, not a shell. It supports whitespace-separated words, single/double quotes, and backslash escapes outside single quotes. Unclosed quotes and trailing escapes fail locally. It performs no glob expansion, variable expansion, substitution, or piping. `--name` becomes boolean `true`; `--name=value` becomes a string option; hyphens in option names become underscores. Other words remain positional strings. For example:
+The companion aligns strictly with implemented upstream Yazi actions. Specific unsupported inputs include:
+- Key combinations such as `cc`, `p` (paste), and `r` are not implemented and are not emulated by synthetic frontend actions.
+- Backspace in normal mode does not execute `leave` (it only erases text during input bar editing).
+### Shell execution semantics
 
-```text
-:cd '/absolute/path/with spaces'
-:hidden --state=toggle
-:shell 'printf "marker\n" > result.txt' --orphan
-```
+Shell keybindings adhere directly to upstream Yazi semantics as defined in primary documentation ([Quick Start](https://yazi-rs.github.io/docs/quick-start)) and shipped configuration ([`preset/keymap-default.toml`](https://github.com/sxyazi/yazi/blob/shipped/yazi-config/preset/keymap-default.toml)):
 
-In the last example, only Yazi's shell actor interprets the quoted shell program. The manager parser itself does not interpret the redirection. Raw `;` commands are the simpler route when submitting shell syntax.
-Accepted manager action names are:
+- **Non-blocking background shell (`;`)**:
+  Mapped to `run = "shell --interactive"`. The `--interactive` flag opens the input prompt bar in the footer. Submitting a command dispatches `shell { run, block = false, orphan = false }` as a native Yazi background task. No terminal pane is opened and the browser returns promptly; task progress and completion are reported natively by Yazi tasks. This is a tracked background task, not an unmonitored orphan process.
 
-```text
-cd arrow leave enter back forward reveal follow stash open yank unyank
- toggle toggle_all visual_arrow visual_mode escape copy shell hidden
- linemode filter filter_do sort refresh quit close suspend seek remove
-```
+- **Blocking visible shell (`:`)**:
+  Mapped to `run = "shell --block --interactive"`. The `--interactive` flag opens the input prompt bar in the footer. Submitting a command dispatches `shell { run, block = true }`, initiating a host-tracked terminal handoff. This opens a real visible PTY terminal pane in a zoom overlay, executing the command in Yazi's working directory with stdout, stderr, and interactive stdin. Upon process exit, the terminal displays the exit code (`[exit %s] Press Enter to return to Yazi...`). Pressing Enter closes the terminal pane and returns directly to the live Yazi browser session in the zoom overlay.
 
-The allowlist is tied to the Yazi 26.9.1 manager executor. It is not arbitrary plugin execution. Interactive options are rejected to avoid opening a second Yazi prompt. `remove` is translated into native confirmation and rejects `--force`/`--permanently`; `yank --cut` is rejected. `toggle`, argument-free `open`, `yank`, and filter actions use the companion's target-aware paths. Other supported actions pass reconstructed arguments to `ya.exec`.
-
+Neither mode requires or accepts a `shell` command prefix—users type the raw shell script directly. The prior custom manager-command parser has been removed in favor of direct upstream shell routing. Raw user text is passed without frontend flag parsing (e.g. typing `--orphan` is treated as literal shell script arguments, not an actor option). All variable and macro expansion (such as `%y`, `%t`, `$0`, `$@`) is delegated directly to Yazi rather than simulated by a frontend template or list parser. Shell syntax, quoting, expansions, and side effects belong to the shell execution environment, running in the active working directory without wrapper modifications.
 ### Tern 0.7.0 input-routing boundary
 
 The host implements full/half-page semantics when those events are delivered. In the observed Tern `0.7.0` runtime, default scoped preset actions intercept Ctrl+D/U/F/B before plugin key callbacks, and Shift+PageDown/Up do not reach this block. Plugin bindings for preset-owned chords are rejected, and attempts to override the scoped action IDs return `unknown command`. These public plugin APIs therefore do not provide a working route for the intercepted physical keys.
@@ -443,30 +447,29 @@ Edit the `preview_limits` member and save the file. Preserve other store keys:
 | `code_bytes` | 1 MiB | 4 MiB | Other file content passed to text/code preview |
 | `mermaid_bytes` | 256 KiB | 1 MiB | `.mermaid`, `.mmd` |
 
-Values are positive, finite integer byte counts. Missing/invalid fields use their category defaults; values above the category maximum are clamped. A missing store is empty. Invalid JSON or an unreadable store raises a settings error instead of silently applying a different configuration.
+Values are positive, finite integer byte counts. Missing/invalid fields use their category defaults; values above the category maximum are clamped. A missing store is empty. Invalid JSON or an unreadable store displays the concise warning `Preview settings unavailable` instead of silently applying a different configuration.
 
 `tern.kv.get` rereads the file when it changes on disk, shared across the plugin's host/window VMs. The window's 500 ms configuration-stamp check sends a normal `poll` event to existing blocks when the encoded store value or error changes. Each block's own 500 ms timer also checks its configuration stamp, snapshot timestamp/sequence, and live state, rendering when those values change independently of window frames. The host resolves limits on each preview build, so saving a corrected configuration retries the read without needing a Yazi cursor move or source reload. These are plugin-private settings, not global Tern preferences.
 
-`tern.fs.read(path, limit)` rejects a whole oversized file before allocating/reading its content. Its API requires a regular non-symlink target, bounds raced growth, and avoids blocking opens of nonregular targets. It does not return a truncated prefix. Read failures show the active limit and actual filesystem error; settings failures show a settings error. Preview byte caps do not modify image geometry or guarantee bounded rendered DOM complexity.
+`tern.fs.read(path, limit)` rejects a whole oversized file before allocating/reading its content. Its API requires a regular non-symlink target, bounds raced growth, and avoids blocking opens of nonregular targets. It does not return a truncated prefix. A bounded-read failure displays `Preview unavailable (<active limit> limit)` in `yazi.preview-unavailable`; settings and image-blob failures display concise unavailable warnings. Preview status never renders the raw runtime exception, traceback, `max_bytes` diagnostic, or internal source location. Preview byte caps do not modify image geometry or guarantee bounded rendered DOM complexity.
 
 The image cap matches Tern's documented [16 MiB single-blob limit](https://docs.stencil.so/tern/protocol/operations.html#security-and-limits). Successful bounded reads and blob creation do not guarantee that an image decoder accepts the content. In the observed runtime, a 10,837,739-byte PNG decoded into native image/zoom UI, and a 183-byte SVG decoded; a roughly 9 MiB SVG dominated by an XML comment remained a missing-image placeholder. Treat that SVG case as a renderer boundary rather than a plugin read-limit failure. Image byte settings cannot override native decoder/parser limits.
 
 Rendering dispatch is extension-based:
 
-- Images/SVG use bounded raw bytes, `cx:blob(content, mime)`, and a native `image` node. Empty images and blob failures get explicit messages.
+- Images/SVG use bounded raw bytes, `cx:blob(content, mime)`, and a native `image` node. Empty images show an empty-file message; blob failures show `Image preview unavailable` without raw exception details.
 - Mermaid is wrapped in a Mermaid Markdown fence and passed to `ui.md`.
 - Markdown uses `ui.md(content)`.
 - Other files with NUL bytes show a binary-file message; otherwise `ui.code(content, language)` applies the extension language map, falling back to `text`.
-- A hovered directory uses a child-column list from the local filesystem, not a byte preview.
+- A hovered directory uses the authoritative child preview snapshot from Yazi (`yz.preview`, capped at 30 entries) and `file_dirs`, without local filesystem enumeration.
 - Archives use asynchronous external listing rather than `read_preview`: ZIP uses `unzip -Z1`; tar-like formats use `tar -tf`; `.7z` uses `7z l -ba -slt`; other recognized archive extensions fall back to tar. At most 50 output lines are cached and at most 18 displayed. This is a bounded line display, not a full archive-entry parser. The URL-keyed cache does not invalidate on archive modification; an async result is visible on a subsequent render.
 
-There is no dedicated PDF, audio, or video viewer. Archive extraction uses `unzip -o ... -d <cwd>` for ZIP and `tar -xf ... -C <cwd>` otherwise. Extraction runs through Tern, not the Yazi request queue or trash confirmation. It can overwrite files and has no native confirmation/undo; exercise it only with disposable trusted fixtures. Recognizing an extension for listing does not imply extraction support.
-
+There is no dedicated PDF, audio, or video viewer. Archive previews provide read-only file listings; custom archive extraction mutations and extraction buttons have been removed in favor of Yazi's native archive openers and rules. Recognizing an archive extension for listing does not imply in-place mutation support.
 ## 8. Exact-target safety and regressions
 
 ### Target calculation
 
-`targets()` starts with Yazi's persistent selection, adds visual marks with `is_marked()==1`, removes marks with `is_marked()==2`, and sorts the resulting absolute paths. Only if that result is empty does it fall back to the visible target. This same authoritative calculation underlies yank and trash preparation.
+`targets()` starts with Yazi's persistent selection, adds visual marks with `is_marked()==1`, removes marks with `is_marked()==2`, and sorts the resulting absolute paths. Only if that result is empty does it fall back to the visible target. This authoritative calculation underlies `trash_prepare` (keyboard `y`/`x` instead dispatches native Yazi `yank` directly).
 
 ### Two-phase trash
 
@@ -480,37 +483,51 @@ There is no dedicated PDF, audio, or video viewer. Archive extraction uses `unzi
 8. Only after that guard does it emit `remove` with `force=true` and no permanent-removal option. Here `force` skips Yazi's second confirmation; it does not request permanent deletion.
 9. A following `settled` stage snapshots and acknowledges dispatch. Task/filesystem results still determine eventual completion.
 
-The same guarded exact-selection pipeline is used for yank, followed by clipboard copying of returned paths. `self.pending` rejects another overlapping target operation. The synchronous FIFO guard matters because Yazi synchronous emits preempt ordinary queued commands; an unrelated reveal must not retarget the final actor.
+The two-phase guarded confirmation pipeline is reserved for `trash_prepare` and `trash_commit`. Keyboard yank (`y`) and cut (`x`) delegate directly to Yazi's native `yank` actor (`ya.exec("yank", ...)`), which manages its internal yank register (not system clipboard) and clears the selection automatically without companion overrides or custom selection freezing.
 
 ### Preserve these invariants
 
 - A single click updates the real Yazi cursor through `reveal`; the next keyboard movement starts there.
-- File activation opens the explicit clicked path with its containing cwd, not an old hovered or selected file.
+- Double-click activation reveals an exact directory target in Yazi before native `enter`; file double-click opens the exact clicked path directly through Tern, independent of old hover/selection. Keyboard `o`/Enter opens the authoritative selected file set, or the hovered file when nothing is selected.
 - Task-only snapshots do not erase provisional click state.
 - Current rows follow Yazi's sorting/filtering and hidden-state toggle rather than a parallel local filter.
 - Native list item IDs and `args.positional` numeric reconstruction remain intact through the wire.
-- Raw shell input preserves spaces, Unicode, quotes, and shell syntax; manager input preserves its separate quoting/option semantics.
+- Raw shell input preserves spaces, Unicode, quotes, and shell syntax across both non-blocking (`;`) and blocking (`:`) modes without custom manager-command mangling or prefixes.
 - Cancelled confirmation has no Yazi/filesystem mutation. Approved paths/client remain frozen until commit.
 - Transport success, actor acknowledgement, and asynchronous task completion remain distinct claims.
-- A preview failure reports the actual cause without truncating content or relaxing caps.
+- Preview failures show concise user-facing warnings without exposing runtime exception details, truncating file content, or relaxing byte caps.
 
 ## 9. Reproducible isolated QA
 
 There are two different verification layers. Plugin registration verifies manifest/VM loading. Interactive fixtures verify events, layout, actor effects, and rendered previews. Record the commands, versions, expected outcomes, and observed files/screenshots for the layer actually exercised.
+### Test topology and automated validation
 
-### Registration/reload smoke
+Integration testing requires a real GUI display environment (X11 or Wayland) with an isolated, daemon-backed Tern window. Standalone `serve` mode cannot exercise managed daemon CLI routing or window-key pane controls; the manual renderer fixture below is a separate, narrower verification layer.
 
-The checked-in script links the plugin under a disposable `TERN_CONFIG_DIR`, verifies `ready` in `plugin list`, writes a synthetic `state-9999.json`, reloads, checks registration again, and unlinks. It does not open a companion block, start Yazi, dispatch clicks/keys, or assert rendered pixels. Its synthetic snapshot should not be treated as a complete protocol fixture.
+Tests create a private mode-0700 artifact root containing disposable `XDG_*` directories, a private daemon/socket, runtime inbox, real files, and a `YAZI_CONFIG_HOME` sandbox linked to the repository plugin. They do not touch user configuration (`~/.config/yazi`) or global desktop settings. GUI shells may strip non-standard variables while preserving `XDG_*`, so every managed launch explicitly prefixes `YAZI_CONFIG_HOME=<ROOT/yazi>` instead of relying on ambient inheritance. The fixture shell forwards `"$@"` to real `/bin/bash --noprofile --rcfile <private-bashrc> -i`, preserving Tern's `-c` commands as well as normal interactive startup. `tern new tab --json` creates an inactive tab and returns `{session, tab, block}`; the harness deliberately focuses that exact numeric `block` ID through the daemon CLI before waiting for its prompt and launching the second client. Successful runs clean up temporary files; failures preserve their private artifacts for inspection.
+The test suite consists of:
+- **Rust integration harness** (`launcher/tests/interaction.rs`): Automates real Tern window control and daemon management, verifying process supervision, PTY interception, and native protocol lifecycles.
+- **Shell test runner** (`tests/smoke_luau.sh`): Runs the Rust interaction suite against a real, isolated Tern window and its private daemon.
 
-Run it with a dedicated runtime inbox as well:
+#### Prerequisites
+
+- Rust/Cargo, `tern` and `ya` on `PATH`; `/usr/bin/yazi` and `/bin/bash` are the real runtimes exercised by the fixture. `TERN=/absolute/path/to/tern` selects a specific Tern build.
+- Active GUI display environment (`DISPLAY` or `WAYLAND_DISPLAY`). Tests use window-local control coordinates and do not switch the active desktop.
+- Existing `libc` and `serde_json` dependencies only; no synthetic backend or snapshot generation.
+
+`TERN_YAZI_TEST_WINDOW_HOOK=/absolute/path/to/executable` optionally places only the owned test window. The harness stops the renderer before it can create a window, invokes the executable with `<renderer-pid> <artifact-root> start`, then resumes that same process. During teardown (`Drop`), it invokes `<renderer-pid> <artifact-root> stop` before stopping the owned processes. A disposable hook can register PID-scoped placement before mapping and remove its own placement rule on `stop`; it must leave the active desktop, unrelated windows, and persistent desktop settings unchanged. The default harness needs no hook.
+
+#### Execution commands
 
 ```sh
-runtime=$(mktemp -d /tmp/tern-yazi-smoke-runtime.XXXXXX)
-XDG_RUNTIME_DIR="$runtime" sh tests/smoke_luau.sh
+# Run the shell test runner
+./tests/smoke_luau.sh
+
+# Run the Rust integration interaction suite
+cargo test --locked --manifest-path launcher/Cargo.toml --test interaction -- --nocapture
 ```
 
-The script removes its own temporary configuration and `state-9999.json`; inspect and remove the remaining disposable runtime directory after it exits. Do not run it against the working session's inbox: the fixed filename could collide with a real client. `TERN_CONFIG_DIR` alone does not isolate a daemon/window or the runtime inbox.
-
+The suite drives mouse clicks, directory history, selection, forward/backward smart find and `n/N`, smart filtering and native Escape priority, breadcrumb/editor interactions, Tern file blocks and previews, foreground/background shell commands, yank/cut, exact Trash confirmation, reload, independent clients and shutdown. Assertions observe real Yazi snapshots, rendered UI, terminal output, filesystem effects and process identities. Missing runtime prerequisites fail instead of skipping. Successful runs remove their private fixtures; failures retain `failure.txt`, window logs and screenshots. Set `TERN_YAZI_KEEP_INTERACTION_ARTIFACTS=1` to retain a successful run for visual review. Coverage in the harness is not evidence that a fresh full-suite run passed; record the actual terminal result and inspected artifact paths separately.
 ### Native renderer plus a real Yazi fixture
 
 The following setup uses the observed Tern `serve`/`ctl` interface and the fixture plugin loader. Execute it from a shell where `tern`, `ya`, and `yazi` resolve to the intended builds. Run the renderer and Yazi in separate foreground terminals so their lifetimes are explicit.
@@ -600,7 +617,7 @@ These checks describe evidence to collect for the current managed design; they a
 | Multiple launches | Different client/token pairs remain pinned; clicks, keys, replies, and confirmation affect only their own Yazi |
 | Idle client and reload | 500 ms supervisor health and block-owned lease advance while snapshots deduplicate; reload saves bindings and verifies nonce-bound pane adoption |
 | Closed/recycled pane during reload | The old client stops or gets a correctly pinned verified block; another client's pane never acquires its lease |
-| `q`, Esc, and pane/owner close | Editing/confirmation/Esc priority remains intact; managed closure terminates/reaps the backend and returns the shell |
+| `q`, Esc, and pane/owner close | Editing/confirmation/Esc priority remains intact; online Esc sends native escape without closing; managed closure terminates/reaps the backend and returns the shell |
 | Window close/reopen | Persisted daemon block/owner panes retain the backend; the lease progresses while the window is closed, then the same client/token is restored |
 | Lost health/lease | UI goes offline after 3 seconds without health progress; observed lease stops progressing and backend terminates after 8 seconds |
 | Missing native attachment | Published managed startup ends after the 15-second attachment deadline |
@@ -616,33 +633,42 @@ These checks describe evidence to collect for the current managed design; they a
 | Parent and child single click | Yazi cwd becomes the target's containing directory and hovered URL is the exact clicked path |
 | Directory/file double click | Directory changes cwd; file opener receives the exact path even when selection/old hover differs |
 | External Yazi cursor/cd | Companion updates from snapshots without local input |
-| Hidden toggle and filter | `.` changes Yazi's file list; `/` produces Yazi-filtered current rows; Enter retains and Esc clears |
-| Persistent/visual selection | Count/check marks remain independent of cursor; visual `+`/`-` marks follow range; Esc commits/leaves visual mode |
-| Yank | Returned paths, Yazi selected/yanked set, and clipboard target set agree |
+| Hidden toggle and smart filter | `.` changes Yazi's file list; `f` produces native smart-filtered rows (lowercase insensitive, uppercase sensitive); Enter retains, editing Esc clears; visual-mode Esc preserves the filter until a following Esc |
+| Forward/backward smart find | `/`/`?` move native hover without hiding rows; `n/N` move next/previous; Esc clears find before a retained filter, and a following Esc restores the full listing |
+| Breadcrumbs and path editor | Independent buttons navigate exact prefixes with hover feedback and full-prefix tooltips; ellipsis reveals ancestors; trailing single-line input accepts Unicode/relative/absolute paths, repeated clicks retain caret editing, Enter navigates and Esc cancels |
+| Persistent/visual selection | Count/check marks remain independent of cursor; visual `+`/`-` marks follow range; Esc commits/leaves visual mode; `Space` toggles and advances |
+| Yank and cut | `y` dispatches native yank copy; `x` dispatches native yank cut; Yazi clears selection automatically |
 | Trash cancel | All fixture files and authoritative selection remain unchanged |
 | Trash exact-target commit | Approved paths/client remain stable while external cursor/selection changes; only approved fixture files are trashed |
 | Broken target/send/reply | Actual error displayed; queued follow-on requests cleared; no false completion claim |
-| `;` shell and `:` shell action | Unique Unicode marker file appears in the intended cwd; quotes/spaces survive; `--orphan` survives as a named manager option |
-| Manager input errors | Unclosed quote, unknown actor, interactive option, forced/permanent removal, and cut are rejected |
+| `;` non-blocking shell | Raw command submits native background task without opening a terminal; browser returns promptly; spaces and quotes survive |
+| `:` blocking PTY shell | Raw command opens real visible PTY terminal displaying stdout, stderr, and exit code until Enter returns to browser; spaces and quotes survive |
+| Directory metadata rendering | Current, parent, and child columns render strictly from authoritative snapshot `file_dirs` without filesystem directory enumeration; snapshot limits respected |
 | Long lists and small pane | Current selection stays visible; local list wheel scrolling is contained; footer remains docked |
 | Wide/tall raster and SVG | Preview is contained within the column; natural dimensions do not allocate column width |
-| Markdown/code/Mermaid limits | A marker beyond the former small caps renders under the new limit; whole oversize files show limit/error, not a prefix |
-| Live preview settings | Save a lower/higher valid limit without a cursor move; existing companion updates; malformed JSON reports an error and correction recovers |
+| Markdown/code/Mermaid limits | Content within the configured limit renders; whole oversized files show a concise unavailable warning with the active limit, not a prefix, raw exception, traceback, `max_bytes`, or `host.luau`; a subsequent normal code/Markdown preview recovers |
+| Live preview settings | Save a lower/higher valid limit without a cursor move; existing companion updates; malformed JSON shows `Preview settings unavailable` without raw exceptions, and correction recovers |
 | Tern routing boundary | Plain PageUp/Down reaches the block; intercepted preset chords are recorded as upstream routing observations, not successful plugin paging |
 
-Use disposable fixtures for shell, trash, yank state, openers, and extraction. For click/open tests, configure an isolated observable Yazi opener when an external application would make the result ambiguous; its marker must record the actual opened path. For asynchronous operations, inspect marker/task/filesystem outcomes separately from `ok` replies. For previews, create fixtures just below/above the configured thresholds and inspect both the rendered result and error text; a truncated tree string is not proof that content was truncated by the preview reader.
+Use disposable fixtures for shell, trash, yank state, openers, and extraction. For click/open tests, configure an isolated observable Yazi opener when an external application would make the result ambiguous; its marker must record the actual opened path. For asynchronous operations, inspect marker/task/filesystem outcomes separately from `ok` replies. For previews, create fixtures just below/above the configured thresholds and inspect both the rendered content and concise unavailable status, including normal code/Markdown recovery; a truncated tree string is not proof that content was truncated by the preview reader.
 
 ### Observed interactive results
-The following observations are the previously recorded ordinary-Yazi/native-renderer results. They do not establish the managed supervisor, installer, lease, or multi-client acceptance scenarios above.
+The observations below are historical records from earlier isolated runs, not the result of the current automated interaction suite. Commands, complete terminal results and inspected screenshot paths from a fresh run must be recorded separately; a partial run does not establish a full-suite pass.
 
+*Historical note (superseded)*: Earlier smoke work exercised an experimental custom manager-command parser (`: shell ...`) and older Esc/clipboard behaviors. Those trials are superseded by the current upstream Yazi 26.9.1 semantics. A later, previously recorded live-Yazi run observed the following restored native behavior:
+- Physical `:` followed by `ls`, Enter printed `ls-visible.txt` with status 0 in a visible PTY terminal without any `shell` prefix, with clean selfprep status 0 and no lingering prep directories.
+- Raw `;` input with `sleep 1; printf BackgroundDone > background-done.txt` remained in the browser, wrote the marker file via Yazi's background task, and created no shell handoff files.
+- Native filter cascade: filtering `a.txt` followed by visual selection; first Esc transitions mode to `normal` while preserving `yz.filter = "a.txt"`; second Esc sets `yz.filter = false` and restores the unfiltered listing with the filter bar closed.
+- Native yank and cut: `y` copy generates native duplicate targets, `x` cut removes the source entry and preserves content at the destination; selection is cleared natively without frontend clipboard involvement.
+- Native history: `H` (back) and `L` (forward) traverse directory history natively after an explicitly revealed child.
+- These previously recorded outcomes do not establish the status of a fresh full-suite run.
 
-On the runtime versions above, isolated real-Yazi/native-renderer smoke work exercised current-column click followed by `j`, parent/child single clicks, directory/file double clicks, hidden toggle, raw `;` shell input with a Unicode marker, and a `:` shell action with `--orphan`. Confirmation smoke separately observed cancellation without file mutation and exact-target trash dispatch.
-
-Preview smoke rendered 62,463 bytes through the native code renderer and a 63,848-byte Markdown fixture through its final heading (`h-full-markdown-end`). Saving a 1 KiB code limit produced a `max_bytes` error; restoring 1 MiB recovered the preview without a cursor move. A configured code limit of `999999999` clamped to 4 MiB, and a 5 MiB fixture was rejected. The settings command initialized the actual sandbox store at `$ROOT/config/plugin-data/tern-yazi/kv.json`. The decoded PNG/small SVG and the large-SVG limitation are recorded in the preview section. These observations do not turn every row of the regression matrix into a passed automated test.
+On the runtime versions above, isolated real-Yazi/native-renderer smoke work exercised current-column click followed by `j`, parent/child single clicks, directory/file double clicks, hidden toggle, raw `;` shell input with a Unicode marker, and a historical `:` shell trial. Confirmation smoke separately observed cancellation without file mutation and exact-target trash dispatch.
+Historical preview smoke rendered 62,463 bytes through the native code renderer and a 63,848-byte Markdown fixture through its final heading (`h-full-markdown-end`). That older presentation exposed a `max_bytes` error after saving a 1 KiB code limit; current preview failures use the concise warnings described above. Restoring 1 MiB recovered the preview without a cursor move. A configured code limit of `999999999` clamped to 4 MiB, and a 5 MiB fixture was rejected. The settings command initialized the actual sandbox store at `$ROOT/config/plugin-data/tern-yazi/kv.json`. The decoded PNG/small SVG and the large-SVG limitation are recorded in the preview section. These historical observations do not turn every row of the regression matrix into a passed automated test.
 
 A 17 MiB image was rejected at the 16 MiB read limit, while the 10.3 MiB PNG decoded. A roughly 45 KiB Mermaid fixture rendered a native `.mfig-body.mmd` SVG measuring 165 by 40 pixels. These are observed preview results, distinct from the registration-only script; they do not assert that the final coordinated reload repeated all earlier click/shell regressions.
 
-### Observed managed startup results
+### Historical managed startup results
 
 The isolated native-window run at `/tmp/tern-yazi-native-start-w7Al3K` exercised the installed local `yazi` wrapper with real Yazi 26.9.1. Typing `yazi` opened a native companion beside the launching shell while Yazi remained in an invisible PTY. A click changed the authoritative snapshot to `a.txt`, followed by `j` to `b.txt`. Two clients kept separate cwd/hover state; closing one left the other alive. Toggling from the launching shell reused its existing managed panel. Plugin reload preserved the client/token/pane binding.
 
@@ -655,14 +681,14 @@ The final context/resize smoke matched native pane and lease dimensions at 45 ro
 Outside-Tern and inside-Tern `--version` invocations ran original Yazi 26.9.1. Installation rejected an unrelated wrapper, uninstall rejected a modified owned wrapper, and same-prefix sandbox uninstall removed the four owned files while preserving the original executable's SHA-256 digest. `cargo fmt --check` and `cargo clippy --locked -- -D warnings` passed. Native screenshots and layout evidence remain under `target/shots/tern/live/` inside the disposable root, including `host-activated-live.png`, `multi-clients-reload.png`, `installed-stable-live.png`, and `installed-resized-live.png`.
 
 
-### Observed native zoom overlay and terminal shell results
+### Historical native zoom overlay and terminal shell results
 
 In the live Yazi 26.9.1 verification environment, typing `yazi` launched directly into a native visual zoom overlay that preserved the owner shell and split tree.
 
 Interactive shell execution verified:
 - PTY terminal execution displayed stdout `ShellVisible`, stderr `ShellError`, exit status 7, and retained error status 9 in the visible terminal pane.
 - Interactive stdin read Unicode text `Hello 阿尔帕卡` correctly.
-- `: shell` quoted script `--block` verified: output and working directory (`cwd`) were correct.
+- Blocking shell terminal handoff verified (historical trial tested via `: shell` script `--block`; current behavior uses raw `:` without `shell` prefix): output and working directory (`cwd`) were correct.
 - Pressing Enter removed the status 9 terminal pane and returned directly to the same live Yazi session in the zoom overlay.
 - `q` and reload followed by `q` cleaned the runtime inbox and restored the owner shell unzoomed.
 - Dedicated path card geometry was observed at 331px wide by 28px tall, the separate status badges row at 18px tall, column headers at 28px tall, and full-path `title` tooltips were verified.
@@ -676,6 +702,34 @@ Final protocol smoke verified:
 - Final screenshot evidence was inspected under `target/shots/tern/live/visual-overlay-final.png` and `path-box-narrow-final-clear.png`.
 
 Stop the foreground Yazi and renderer before removing the exact disposable root. Retain screenshots/logs only when needed as regression evidence; do not leave QA fixtures in the repository or reuse the live user's Yazi configuration.
+
+### Current native interaction verification (2026-10-10)
+
+The complete real interaction suite passed with Tern `0.7.0 (9ca00e4)`, Yazi `26.9.1 (Terra 2025-12-27)` and Cargo `1.96.0 (30a34c682 2026-05-25)`. The following command chain exited with status 0:
+
+```sh
+cargo fmt --manifest-path launcher/Cargo.toml && env TERN_YAZI_TEST_WINDOW_HOOK=/tmp/tern-yazi-background-window.sh TERN_YAZI_KEEP_INTERACTION_ARTIFACTS=1 ./tests/smoke_luau.sh && cargo clippy --locked --manifest-path launcher/Cargo.toml --all-targets -- -D warnings && cargo fmt --manifest-path launcher/Cargo.toml --check && sh -n tests/smoke_luau.sh install.sh && luajit -b yazi-plugin/tern.yazi/main.lua /tmp/tern-yazi-final-main.luac
+```
+
+The interaction result reported:
+
+```text
+All real native interaction cases passed (owned GUI, isolated daemon).
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 43.13s
+```
+
+The retained proof root is `/tmp/tyi-2095558-18dd2308f81eb4f2`; native screenshots are under its `target/shots/tern/live/` directory. The disposable placement hook assigned only the owned PID's window to desktop 1 without switching the active desktop. Screenshots were produced with that owned window's `ctl shot`, not a desktop capture.
+
+Observed assertions and inspected screenshots:
+
+- `02-preview-limit-no-traceback.png` shows the sparse text fixture of 1 MiB + 1 byte with only `Preview unavailable (1.0 MB limit)`. The unavailable status contains no raw runtime exception, traceback, `max_bytes` or `host.luau` text. Subsequent normal text and Markdown previews recovered.
+- `04-breadcrumb-hover.png` was inspected, and the actual native `:hover` selector assertion passed for the current `files` breadcrumb with its full-prefix `title`. Breadcrumb clicks, repeated-click caret editing, Unicode long paths, narrow layouts, ancestor ellipsis navigation, non-directory rejection and recovery passed.
+- Forward/backward native smart find, `n/N`, smart filtering and native Escape priority passed against real Yazi snapshots.
+- Single and selected case-distinct batch Tern file opening passed with exact targets and focus assertions.
+- Raw `:` with `ls`, visible stdout/stderr and exit status, interactive stdin, native macros and non-blocking background shell execution passed. Native copy/cut and exact-path Trash assertions passed.
+- Plugin reload and independent clients passed. `q`, native pane close and owner close cleaned owned descendants; crashed Yazi rendered offline and `j`/Enter/`o` opened no files. `q` and reload did not resurrect closed controls.
+
+This run establishes the listed native GUI outcomes, not successful routing of intercepted physical Ctrl+D/U/F/B or Shift+PageUp/Down chords, and not new proof for the historical giant-image/SVG decoder boundaries.
 
 ## 10. Contribution checklist
 

@@ -206,7 +206,11 @@ impl Inbox {
         if fd < 0 {
             return Err(last_error());
         }
-        Ok(unsafe { File::from_raw_fd(fd) })
+        let file = unsafe { File::from_raw_fd(fd) };
+        if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
+            return Err(last_error());
+        }
+        Ok(file)
     }
 
     fn read(
@@ -336,10 +340,34 @@ impl Drop for Inbox {
             self.remove(&name);
         }
         let prefix = format!("reply-{}-{}-", self.cid, self.token);
+        let native_prefix = format!("native-shell-{}-{}-", self.cid, self.token);
+        let prep_prefix = format!("prep-{}-{}", self.cid, self.token);
+        let shim = format!("shim-{}-{}", self.cid, self.token);
         // Readdir through the pinned directory rather than a replaceable pathname.
         if let Ok(entries) = fs::read_dir(format!("/proc/self/fd/{}", self.dir.as_raw_fd())) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with(&native_prefix)
+                        && [".json", ".json.tmp", ".started", ".result", ".result.tmp"]
+                            .iter()
+                            .any(|suffix| name.ends_with(suffix))
+                    {
+                        self.remove(name);
+                    }
+                    if name == shim
+                        || name == prep_prefix
+                        || name == format!("{prep_prefix}.cleanup")
+                        || name
+                            .strip_prefix(&format!("{prep_prefix}-"))
+                            .is_some_and(|suffix| {
+                                let suffix = suffix.strip_suffix(".cleanup").unwrap_or(suffix);
+                                suffix.split('-').all(|part| {
+                                    !part.is_empty() && part.bytes().all(|v| v.is_ascii_digit())
+                                })
+                            })
+                    {
+                        self.remove_tree(name);
+                    }
                     if name.starts_with(&prefix)
                         && (name.ends_with(".json") || name.ends_with(".json.tmp"))
                     {
@@ -456,6 +484,8 @@ impl Backend {
         args: &[OsString],
         cid: &str,
         caller_umask: libc::mode_t,
+        bridge: &str,
+        path: &OsStr,
     ) -> io::Result<Self> {
         let mut dimensions = libc::winsize {
             ws_row: 40,
@@ -494,6 +524,8 @@ impl Backend {
                 .arg("--client-id")
                 .arg(cid)
                 .args(args)
+                .env("PATH", path)
+                .env(BRIDGE_ENV, bridge)
                 .env("TERM", "xterm-256color")
                 .env_remove("TERM_PROGRAM")
                 .env_remove("TERM_PROGRAM_VERSION")
@@ -676,8 +708,745 @@ fn passthrough(real: &OsStr, args: &[OsString]) -> io::Result<i32> {
     Err(Command::new(real).args(args).exec())
 }
 
+const NATIVE_CAP: usize = 256 * 1024;
+const BRIDGE_ENV: &str = "TERN_YAZI_BRIDGE";
+
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+fn json_text<'a>(value: &'a serde_json::Value, key: &str) -> io::Result<&'a str> {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| invalid("invalid native shell metadata"))
+}
+
+fn json_number(value: &serde_json::Value, key: &str) -> io::Result<u64> {
+    value
+        .get(key)
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| invalid("invalid native shell metadata"))
+}
+
+fn utf8(value: &OsStr) -> io::Result<&str> {
+    value.to_str().ok_or_else(|| {
+        invalid("native shell protocol requires UTF-8 arguments, paths and environment")
+    })
+}
+
+fn install_signals() {
+    unsafe {
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGHUP, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+}
+
+impl Inbox {
+    fn path(&self) -> io::Result<PathBuf> {
+        fs::read_link(format!("/proc/self/fd/{}", self.dir.as_raw_fd()))
+    }
+
+    fn connect(path: &Path, cid: &str, token: &str) -> io::Result<Self> {
+        if cid.is_empty()
+            || !cid.bytes().all(|v| v.is_ascii_digit())
+            || token.len() != 32
+            || !token.bytes().all(|v| v.is_ascii_hexdigit())
+        {
+            return Err(invalid("invalid native session identity"));
+        }
+        let dir = private_dir(path)?;
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(dir.as_raw_fd(), &mut stat) } != 0 {
+            return Err(last_error());
+        }
+        if stat.st_uid != unsafe { libc::geteuid() } || stat.st_mode & 0o077 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "unsafe native shell inbox",
+            ));
+        }
+        Ok(Self {
+            dir,
+            cid: cid.to_owned(),
+            token: token.to_owned(),
+            cleanup: false,
+        })
+    }
+
+    fn live_pane(&self, owner: u64) -> io::Result<u64> {
+        let (health, modified) =
+            self.read(&format!("managed-{}.json", self.cid), NATIVE_CAP, true)?;
+        let value: serde_json::Value = serde_json::from_slice(&health).map_err(io::Error::other)?;
+        let fresh = |time: SystemTime| {
+            SystemTime::now()
+                .duration_since(time)
+                .is_ok_and(|age| age < Duration::from_secs(8))
+        };
+        if !fresh(modified)
+            || json_text(&value, "client_id")? != self.cid
+            || json_text(&value, "token")? != self.token
+            || json_number(&value, "owner_pane")? != owner
+        {
+            return Err(invalid("native shell session is no longer live"));
+        }
+        let (lease, modified) = self.read(&format!("managed-{}.lease", self.cid), 1024, true)?;
+        let mut fields = std::str::from_utf8(&lease)
+            .map_err(io::Error::other)?
+            .split_whitespace();
+        if !fresh(modified) || fields.next() != Some(self.token.as_str()) {
+            return Err(invalid("native shell window lease is no longer live"));
+        }
+        fields
+            .next()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .ok_or_else(|| invalid("invalid native shell window pane"))
+    }
+
+    fn atomic_json(&self, name: &str, value: &serde_json::Value) -> io::Result<File> {
+        let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
+        if bytes.len() > NATIVE_CAP {
+            return Err(invalid("native shell request exceeds 256 KiB"));
+        }
+        let tmp = format!("{name}.tmp");
+        let mut file = self.create(&tmp)?;
+        let result = (|| {
+            file.write_all(&bytes)?;
+            file.flush()?;
+            let source = cstr(OsStr::new(&tmp))?;
+            let target = cstr(OsStr::new(name))?;
+            if unsafe {
+                libc::linkat(
+                    self.dir.as_raw_fd(),
+                    source.as_ptr(),
+                    self.dir.as_raw_fd(),
+                    target.as_ptr(),
+                    0,
+                )
+            } != 0
+            {
+                return Err(last_error());
+            }
+            Ok(())
+        })();
+        self.remove(&tmp);
+        result?;
+        Ok(file)
+    }
+
+    fn shim(&self, helper: &Path) -> io::Result<PathBuf> {
+        let name = format!("shim-{}-{}", self.cid, self.token);
+        let cname = cstr(OsStr::new(&name))?;
+        if unsafe { libc::mkdirat(self.dir.as_raw_fd(), cname.as_ptr(), 0o700) } != 0 {
+            return Err(last_error());
+        }
+        let directory = private_dir(&self.path()?.join(&name))?;
+        let source = cstr(helper.as_os_str())?;
+        let target = cstr(OsStr::new("sh"))?;
+        if unsafe { libc::symlinkat(source.as_ptr(), directory.as_raw_fd(), target.as_ptr()) } != 0
+        {
+            return Err(last_error());
+        }
+        Ok(self.path()?.join(name))
+    }
+
+    fn remove_tree(&self, name: &str) {
+        let Ok(name) = cstr(OsStr::new(name)) else {
+            return;
+        };
+        let fd = unsafe {
+            libc::openat(
+                self.dir.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return;
+        }
+        let dir = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(dir.as_raw_fd(), &mut stat) } != 0
+            || stat.st_uid != unsafe { libc::geteuid() }
+        {
+            return;
+        }
+        if let Ok(entries) = fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd())) {
+            for entry in entries.flatten() {
+                let Ok(child) = cstr(&entry.file_name()) else {
+                    continue;
+                };
+                // Owned staging contains only regular files and the private sh symlink.
+                unsafe {
+                    libc::unlinkat(dir.as_raw_fd(), child.as_ptr(), 0);
+                }
+            }
+        }
+        unsafe {
+            libc::unlinkat(self.dir.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR);
+        }
+    }
+}
+
+struct NativeRequest<'a> {
+    inbox: &'a Inbox,
+    name: String,
+    file: File,
+}
+
+impl Drop for NativeRequest<'_> {
+    fn drop(&mut self) {
+        // Serialize revocation with the terminal helper's final validation and spawn.
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_EX);
+        }
+        self.inbox.remove(&self.name);
+        let base = self.name.trim_end_matches(".json");
+        self.inbox.remove(&format!("{base}.started"));
+        self.inbox.remove(&format!("{base}.result"));
+        self.inbox.remove(&format!("{base}.result.tmp"));
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+fn native_shell(args: &[OsString]) -> io::Result<i32> {
+    let Some(raw) = env::var_os(BRIDGE_ENV) else {
+        return Err(Command::new("/bin/sh").arg0("sh").args(args).exec());
+    };
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1
+        || unsafe { libc::isatty(libc::STDOUT_FILENO) } != 1
+    {
+        return Err(Command::new("/bin/sh").arg0("sh").args(args).exec());
+    }
+    let bridge: serde_json::Value =
+        serde_json::from_slice(raw.as_bytes()).map_err(io::Error::other)?;
+    let inbox = Inbox::connect(
+        Path::new(json_text(&bridge, "inbox")?),
+        json_text(&bridge, "cid")?,
+        json_text(&bridge, "token")?,
+    )?;
+    let owner = json_number(&bridge, "owner_pane")?;
+    let pane = inbox.live_pane(owner)?;
+    let id = format!("{}-{}-{}", inbox.cid, inbox.token, std::process::id());
+    let name = format!("native-shell-{id}.json");
+    let argv: Vec<&str> = args
+        .iter()
+        .map(|arg| utf8(arg))
+        .collect::<io::Result<_>>()?;
+    let mut environment = serde_json::Map::new();
+    for (key, value) in env::vars_os() {
+        if key != BRIDGE_ENV {
+            environment.insert(
+                utf8(&key)?.to_owned(),
+                serde_json::Value::String(utf8(&value)?.to_owned()),
+            );
+        }
+    }
+    match bridge.get("original_path") {
+        Some(serde_json::Value::String(path)) => {
+            environment.insert("PATH".into(), serde_json::Value::String(path.clone()));
+        }
+        Some(serde_json::Value::Null) => {
+            environment.remove("PATH");
+        }
+        _ => return Err(invalid("invalid native shell original PATH")),
+    }
+    let cwd = env::current_dir()?;
+    let umask = unsafe { libc::umask(0) };
+    unsafe {
+        libc::umask(umask);
+    }
+    let request = serde_json::json!({"version":1,"id":id,"cid":inbox.cid,"token":inbox.token,
+        "owner_pane":owner,"pane":pane,"helper":json_text(&bridge,"helper")?,
+        "cwd":utf8(cwd.as_os_str())?,"argv":argv,"env":environment,"wait":true,"umask":umask});
+    let file = inbox.atomic_json(&name, &request)?;
+    let pending = NativeRequest {
+        inbox: &inbox,
+        name,
+        file,
+    };
+    install_signals();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut started = false;
+    loop {
+        let signal = SIGNAL.load(Ordering::Relaxed);
+        if signal != 0 {
+            return Ok(128 + signal);
+        }
+        if inbox.live_pane(owner)? != pane {
+            return Err(invalid("native shell window changed"));
+        }
+        if !started {
+            if let Ok((bytes, _)) = inbox.read(&format!("native-shell-{id}.started"), 1024, true) {
+                started = bytes == id.as_bytes();
+            }
+            if !started && Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "native terminal did not start within 15s",
+                ));
+            }
+        }
+        if started {
+            match inbox.read(&format!("native-shell-{id}.result"), 1024, true) {
+                Ok((bytes, _)) => {
+                    let result: serde_json::Value =
+                        serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                    if json_text(&result, "id")? != id {
+                        return Err(invalid("native shell result identity mismatch"));
+                    }
+                    let status = json_number(&result, "status")?;
+                    if status > 255 {
+                        return Err(invalid("invalid native shell exit status"));
+                    }
+                    drop(pending);
+                    return Ok(status as i32);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn request_present(inbox: &Inbox, name: &str, expected: &[u8]) -> bool {
+    inbox
+        .read(name, NATIVE_CAP, true)
+        .is_ok_and(|(bytes, _)| bytes == expected)
+}
+
+struct NativeResult<'a> {
+    inbox: &'a Inbox,
+    name: &'a str,
+    bytes: &'a [u8],
+    id: &'a str,
+    owner: u64,
+    pane: u64,
+    reported: bool,
+    file: &'a File,
+}
+
+impl NativeResult<'_> {
+    fn write(&mut self, status: i32) -> io::Result<()> {
+        if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(last_error());
+        }
+        let published = (|| {
+            if !request_present(self.inbox, self.name, self.bytes)
+                || self.inbox.live_pane(self.owner)? != self.pane
+            {
+                return Err(invalid("native shell request was revoked"));
+            }
+            self.inbox.atomic_json(
+                &format!("native-shell-{}.result", self.id),
+                &serde_json::json!({"id":self.id,"status":status}),
+            )?;
+            Ok(())
+        })();
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+        published?;
+        self.reported = true;
+        Ok(())
+    }
+}
+
+impl Drop for NativeResult<'_> {
+    fn drop(&mut self) {
+        if !self.reported {
+            let _ = self.write(1);
+        }
+    }
+}
+
+struct NativeWatchdog {
+    pipe: OwnedFd,
+    pid: libc::pid_t,
+    armed: bool,
+}
+
+impl NativeWatchdog {
+    fn new() -> io::Result<Self> {
+        let mut pipe = [-1; 2];
+        if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            return Err(last_error());
+        }
+        let reader = unsafe { OwnedFd::from_raw_fd(pipe[0]) };
+        let writer = unsafe { OwnedFd::from_raw_fd(pipe[1]) };
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            return Err(last_error());
+        }
+        if pid == 0 {
+            let fd = reader.as_raw_fd();
+            unsafe {
+                libc::setsid();
+                for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGPIPE] {
+                    libc::signal(signal, libc::SIG_DFL);
+                }
+                // Own only the read pipe, never a terminal or a request lock.
+                if fd > 0 {
+                    libc::syscall(libc::SYS_close_range, 0u32, (fd - 1) as u32, 0u32);
+                }
+                libc::syscall(libc::SYS_close_range, (fd + 1) as u32, u32::MAX, 0u32);
+                let mut target: libc::pid_t = 0;
+                let count = libc::read(
+                    fd,
+                    (&mut target as *mut libc::pid_t).cast(),
+                    std::mem::size_of::<libc::pid_t>(),
+                );
+                if count != std::mem::size_of::<libc::pid_t>() as isize || target <= 0 {
+                    libc::_exit(0);
+                }
+                let mut stop = 0u8;
+                loop {
+                    let count = libc::read(fd, (&mut stop as *mut u8).cast(), 1);
+                    if count > 0 {
+                        libc::_exit(0);
+                    }
+                    if count < 0 && last_error().kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    break;
+                }
+                // EOF covers SIGKILL of the wrapper, which cannot run its cleanup.
+                libc::kill(-target, libc::SIGTERM);
+                libc::usleep(500_000);
+                libc::kill(-target, libc::SIGKILL);
+                libc::_exit(0);
+            }
+        }
+        drop(reader);
+        Ok(Self {
+            pipe: writer,
+            pid,
+            armed: false,
+        })
+    }
+}
+
+impl Drop for NativeWatchdog {
+    fn drop(&mut self) {
+        unsafe {
+            if self.armed {
+                let stop = 1u8;
+                libc::write(self.pipe.as_raw_fd(), (&stop as *const u8).cast(), 1);
+            } else {
+                let stop: libc::pid_t = -1;
+                libc::write(
+                    self.pipe.as_raw_fd(),
+                    (&stop as *const libc::pid_t).cast(),
+                    std::mem::size_of::<libc::pid_t>(),
+                );
+            }
+            let mut status = 0;
+            while libc::waitpid(self.pid, &mut status, 0) < 0
+                && last_error().kind() == io::ErrorKind::Interrupted
+            {}
+        }
+    }
+}
+
+struct NativeChild {
+    child: std::process::Child,
+    foreground: libc::pid_t,
+    _watchdog: NativeWatchdog,
+}
+
+impl Drop for NativeChild {
+    fn drop(&mut self) {
+        let pid = self.child.id() as libc::pid_t;
+        unsafe {
+            libc::kill(-pid, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < deadline {
+            let _ = self.child.try_wait();
+            if unsafe { libc::kill(-pid, 0) } != 0
+                && last_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+        let _ = self.child.wait();
+        unsafe {
+            libc::tcsetpgrp(libc::STDIN_FILENO, self.foreground);
+        }
+    }
+}
+
+fn native_terminal(path: &Path) -> io::Result<i32> {
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1
+        || unsafe { libc::isatty(libc::STDOUT_FILENO) } != 1
+    {
+        return Err(invalid(
+            "native terminal requires visible terminal stdin and stdout",
+        ));
+    }
+    let directory = path
+        .parent()
+        .ok_or_else(|| invalid("missing native request inbox"))?;
+    let name = path
+        .file_name()
+        .and_then(|v| v.to_str())
+        .ok_or_else(|| invalid("invalid native request path"))?;
+    if !path.is_absolute() || !name.starts_with("native-shell-") || !name.ends_with(".json") {
+        return Err(invalid("invalid native request path"));
+    }
+    // Pin the parent before opening the request with no-follow semantics.
+    let dir = private_dir(directory)?;
+    let cname = cstr(OsStr::new(name))?;
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            cname.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(last_error());
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+        || metadata.len() > NATIVE_CAP as u64
+    {
+        return Err(invalid("unsafe native shell request"));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    (&mut file)
+        .take(NATIVE_CAP as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > NATIVE_CAP {
+        return Err(invalid("native shell request exceeds 256 KiB"));
+    }
+    let request: serde_json::Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    let inbox = Inbox::connect(
+        directory,
+        json_text(&request, "cid")?,
+        json_text(&request, "token")?,
+    )?;
+    let id = json_text(&request, "id")?;
+    let prefix = format!("{}-{}-", inbox.cid, inbox.token);
+    if json_number(&request, "version")? != 1
+        || name != format!("native-shell-{id}.json")
+        || !id
+            .strip_prefix(&prefix)
+            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|v| v.is_ascii_digit()))
+        || fs::canonicalize(json_text(&request, "helper")?)?
+            != fs::canonicalize(env::current_exe()?)?
+    {
+        return Err(invalid("native shell request identity mismatch"));
+    }
+    let owner = json_number(&request, "owner_pane")?;
+    let pane = json_number(&request, "pane")?;
+    let umask = json_number(&request, "umask")?;
+    if owner == 0 || pane == 0 || umask > 0o777 {
+        return Err(invalid("invalid native shell execution context"));
+    }
+    let cwd = Path::new(json_text(&request, "cwd")?);
+    if !cwd.is_absolute() {
+        return Err(invalid("native shell cwd must be absolute"));
+    }
+    let argv = request
+        .get("argv")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| invalid("invalid native shell argv"))?
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .ok_or_else(|| invalid("invalid native shell argument"))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let environment = request
+        .get("env")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| invalid("invalid native shell environment"))?;
+    let wait = request
+        .get("wait")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| invalid("invalid native shell wait policy"))?;
+    let mut command = Command::new("/bin/sh");
+    command.arg0("sh").args(argv).current_dir(cwd).env_clear();
+    for (key, value) in environment {
+        if key.is_empty() || key.contains('=') || key.as_bytes().contains(&0) {
+            return Err(invalid("invalid native shell environment key"));
+        }
+        let value = value
+            .as_str()
+            .ok_or_else(|| invalid("invalid native shell environment value"))?;
+        if value.as_bytes().contains(&0) {
+            return Err(invalid("invalid native shell environment value"));
+        }
+        if key != BRIDGE_ENV {
+            command.env(key, value);
+        }
+    }
+    for key in ["TERM", "TERM_PROGRAM", "COLORTERM"] {
+        match env::var_os(key) {
+            Some(value) => {
+                command.env(key, value);
+            }
+            None => {
+                command.env_remove(key);
+            }
+        }
+    }
+    install_signals();
+    let mut watchdog = NativeWatchdog::new()?;
+    let watchdog_fd = watchdog.pipe.as_raw_fd();
+    unsafe {
+        libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        command.pre_exec(move || {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(last_error());
+            }
+            let pid = libc::getpid();
+            if libc::write(
+                watchdog_fd,
+                (&pid as *const libc::pid_t).cast(),
+                std::mem::size_of::<libc::pid_t>(),
+            ) != std::mem::size_of::<libc::pid_t>() as isize
+            {
+                return Err(last_error());
+            }
+            if libc::tcsetpgrp(libc::STDIN_FILENO, pid) != 0 {
+                return Err(last_error());
+            }
+            libc::umask(umask as libc::mode_t);
+            for signal in [
+                libc::SIGINT,
+                libc::SIGTERM,
+                libc::SIGHUP,
+                libc::SIGPIPE,
+                libc::SIGTTOU,
+                libc::SIGTTIN,
+                libc::SIGTSTP,
+            ] {
+                libc::signal(signal, libc::SIG_DFL);
+            }
+            Ok(())
+        });
+    }
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(last_error());
+    }
+    if inbox.live_pane(owner)? != pane || !request_present(&inbox, name, &bytes) {
+        return Err(invalid("native shell request is no longer live"));
+    }
+    let mut started = inbox.create(&format!("native-shell-{id}.started"))?;
+    started.write_all(id.as_bytes())?;
+    started.flush()?;
+    let mut result = NativeResult {
+        inbox: &inbox,
+        name,
+        bytes: &bytes,
+        id,
+        owner,
+        pane,
+        reported: false,
+        file: &file,
+    };
+    let foreground = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
+    let child = command.spawn()?;
+    watchdog.armed = true;
+    let mut child = NativeChild {
+        child,
+        foreground,
+        _watchdog: watchdog,
+    };
+    unsafe {
+        libc::tcsetpgrp(libc::STDIN_FILENO, child.child.id() as libc::pid_t);
+        libc::kill(-(child.child.id() as libc::pid_t), libc::SIGCONT);
+        libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+    }
+    let status = loop {
+        if let Some(status) = child.child.try_wait()? {
+            use std::os::unix::process::ExitStatusExt;
+            break status
+                .code()
+                .unwrap_or_else(|| 128 + status.signal().unwrap_or(1));
+        }
+        let signal = SIGNAL.load(Ordering::Relaxed);
+        if signal != 0
+            || inbox.live_pane(owner).ok() != Some(pane)
+            || !request_present(&inbox, name, &bytes)
+        {
+            drop(child);
+            let _ = result.write(if signal == 0 { 1 } else { 128 + signal });
+            return Ok(0);
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    drop(child);
+    result.write(status)?;
+    if wait && SIGNAL.load(Ordering::Relaxed) == 0 {
+        eprintln!("\n[exit {status}] Press Enter to close.");
+        loop {
+            if SIGNAL.load(Ordering::Relaxed) != 0 || inbox.live_pane(owner).ok() != Some(pane) {
+                break;
+            }
+            let mut poll = libc::pollfd {
+                fd: libc::STDIN_FILENO,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut poll, 1, 20) };
+            if ready < 0 && last_error().kind() != io::ErrorKind::Interrupted {
+                break;
+            }
+            if ready > 0 {
+                if poll.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                    break;
+                }
+                if poll.revents & libc::POLLIN != 0 {
+                    let mut byte = 0u8;
+                    let count =
+                        unsafe { libc::read(libc::STDIN_FILENO, (&mut byte as *mut u8).cast(), 1) };
+                    if count <= 0 || byte == b'\n' || byte == b'\r' {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Ok(0)
+}
+
 fn run() -> io::Result<i32> {
     let mut input = env::args_os().skip(1);
+    let first = env::args_os().next();
+    if first.as_deref().and_then(|v| Path::new(v).file_name()) == Some(OsStr::new("sh")) {
+        return native_shell(&env::args_os().skip(1).collect::<Vec<_>>());
+    }
+    match env::args_os().nth(1).as_deref() {
+        Some(mode) if mode == "--native-shell" => {
+            return native_shell(&env::args_os().skip(2).collect::<Vec<_>>());
+        }
+        Some(mode) if mode == "--native-terminal" => {
+            let path = env::args_os()
+                .nth(2)
+                .ok_or_else(|| invalid("missing native shell request path"))?;
+            if env::args_os().nth(3).is_some() {
+                return Err(invalid("unexpected native terminal arguments"));
+            }
+            return native_terminal(Path::new(&path));
+        }
+        _ => {}
+    }
     if input.next().as_deref() != Some(OsStr::new("--real")) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -735,7 +1504,29 @@ fn run() -> io::Result<i32> {
         libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
     }
     let inbox = Inbox::new()?;
-    let mut backend = Backend::spawn(real_path.as_os_str(), &args, &inbox.cid, caller_umask)?;
+    let helper = fs::canonicalize(env::current_exe()?)?;
+    let shim = inbox.shim(&helper)?;
+    let original_path = env::var_os("PATH");
+    let original_path_text = original_path.as_deref().map(utf8).transpose()?;
+    let bridge = serde_json::to_string(&serde_json::json!({"cid":inbox.cid,"token":inbox.token,
+        "owner_pane":pane,"inbox":utf8(inbox.path()?.as_os_str())?,
+        "helper":utf8(helper.as_os_str())?,"original_path":original_path_text}))
+    .map_err(io::Error::other)?;
+    let mut path = shim.into_os_string();
+    path.push(":");
+    path.push(
+        original_path
+            .as_deref()
+            .unwrap_or_else(|| OsStr::new("/usr/local/bin:/usr/bin:/bin")),
+    );
+    let mut backend = Backend::spawn(
+        real_path.as_os_str(),
+        &args,
+        &inbox.cid,
+        caller_umask,
+        &bridge,
+        &path,
+    )?;
     let started = Instant::now();
     let mut published: Option<Instant> = None;
     let mut heartbeat = Instant::now();

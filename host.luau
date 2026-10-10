@@ -34,14 +34,19 @@ type TaskInfo = {
 type ParentInfo = {
 	cwd: string?,
 	files: { string }?,
+	file_dirs: { [string]: boolean }?,
 }
 
 type YaziState = {
 	seq: number,
 	client_id: any,
 	parent: ParentInfo?,
+	preview: ParentInfo?,
 	cwd: string,
 	files: { string },
+	file_dirs: { [string]: boolean }?,
+	filter: (string | boolean)?,
+	finder: (string | boolean)?,
 	selected: number,
 	selected_urls: { string }?,
 	mode: string?,
@@ -173,7 +178,8 @@ local function is_archive(ext: string): boolean
 end
 
 -- Resolves semantic icon and tone aligned with Tern / Nerd Font file tree
-local function file_icon(fname: string, is_dir: boolean): (string, string)
+local function file_icon(fname: string, is_dir: boolean?): (string, string)
+	if is_dir == nil then return "?", "muted" end
 	if is_dir then
 		if fname:sub(1, 1) == "." then
 			return "", "muted"
@@ -285,6 +291,42 @@ local function refresh_live(state: any): boolean
 	return live
 end
 
+-- Only the live, leased block may forward a native shell request to its window.
+local function poll_native_shells(state: any, cx: any)
+	if not state.token or not state.live or state.closing then return end
+	local dir = state_dir()
+	local ok, lease = pcall(tern.fs.read, dir .. "/managed-" .. state.cid .. ".lease", 4096)
+	if not ok then return end
+	local token, pane = lease:match("^(%S+)%s+(%d+)")
+	if token ~= state.token or tonumber(pane) ~= cx.pane then return end
+	local listed, entries = pcall(tern.fs.list, dir)
+	if not listed then return end
+	state.native_shells = state.native_shells or {}
+	local seen = {}
+	local prefix = state.cid .. "-" .. state.token .. "-"
+	for _, fname in ipairs(entries) do
+		local id = fname:match("^native%-shell%-([%w-]+)%.json$")
+		if not id or id:sub(1, #prefix) ~= prefix or not id:sub(#prefix + 1):match("^%d+$") then continue end
+		local path = dir .. "/" .. fname
+		local body = read_json(path)
+		if not body or body.version ~= 1 or body.id ~= id or body.cid ~= state.cid
+			or body.token ~= state.token or body.owner_pane ~= state.owner_pane or body.pane ~= cx.pane then continue end
+		seen[id] = true
+		local pending = state.native_shells[id]
+		if not pending then pending = { seen = tern.now() }; state.native_shells[id] = pending end
+		local started_ok, started = pcall(tern.fs.read, dir .. "/native-shell-" .. id .. ".started", 256)
+		if started_ok and started == id then pending.started = true end
+		-- Missing window routes may recover during startup; the window's persistent
+		-- request registry and helper's exclusive claim prevent duplicate execution.
+		if not pending.started and tern.now() - pending.seen < 15000
+			and (not pending.opened or tern.now() - pending.opened >= 500) then
+			pending.opened = tern.now()
+			pcall(function() cx:open(path) end)
+		end
+	end
+	for id in pairs(state.native_shells) do if not seen[id] then state.native_shells[id] = nil end end
+end
+
 local function read_latest_state(state: any): YaziState?
 	local sdir = state_dir()
 	refresh_live(state)
@@ -339,6 +381,7 @@ local function close_companion(state: any, cx: any)
 	state.closing = true
 	state.live = false
 	state.requests = {}
+	state.find_mode, state.find_query, state.find_previous = false, "", false
 	clear_shell_handoffs(state)
 	if state.timer then state.timer:cancel(); state.timer = nil end
 	running[cx.pane] = nil
@@ -357,14 +400,10 @@ local function managed_poll(state: any, ev: any, cx: any)
 	pcall(tern.fs.write, state_dir() .. "/managed-" .. state.cid .. ".lease", lease)
 end
 
-local function fetch_archive_contents(full_url: string, ext: string, state: any)
-	if not state.archive_cache then
-		state.archive_cache = {}
-	end
-	if state.archive_cache[full_url] ~= nil then
-		return
-	end
-	state.archive_cache[full_url] = false
+local function fetch_archive_contents(full_url: string, ext: string, state: any, cx: any)
+	local cache = state.archive_cache
+	if cache[full_url] ~= nil then return end
+	cache[full_url] = false
 	local cmd
 	if ext == "zip" then
 		cmd = { "unzip", "-Z1", full_url }
@@ -378,6 +417,7 @@ local function fetch_archive_contents(full_url: string, ext: string, state: any)
 
 	pcall(function()
 		tern.process.run(cmd, function(res)
+			if state.closing or state.archive_cache ~= cache or running[cx.pane] ~= state then return end
 			if res and res.status == 0 and res.stdout then
 				local lines = {}
 				for line in res.stdout:gmatch("[^\r\n]+") do
@@ -386,10 +426,11 @@ local function fetch_archive_contents(full_url: string, ext: string, state: any)
 						if #lines >= 50 then break end
 					end
 				end
-				state.archive_cache[full_url] = lines
+				cache[full_url] = lines
 			else
-				state.archive_cache[full_url] = {}
+				cache[full_url] = {}
 			end
+			cx:render()
 		end)
 	end)
 end
@@ -406,7 +447,7 @@ local function read_preview(path: string, kind: string): (string?, Node?)
 	local spec = PREVIEW_LIMITS[kind]
 	local ok_config, config = pcall(tern.kv.get, "preview_limits")
 	if not ok_config then
-		return nil, ui.text({ ui.span("Preview settings unavailable: " .. tostring(config), "warn") })
+		return nil, ui.text({ ui.span("Preview settings unavailable", "warn") })
 	end
 	local value = type(config) == "table" and config[kind] or nil
 	local limit = spec.default
@@ -415,41 +456,22 @@ local function read_preview(path: string, kind: string): (string?, Node?)
 	end
 	local ok_read, content = pcall(tern.fs.read, path, limit)
 	if not ok_read then
-		return nil, ui.col({
+		return nil, ui.node("col", { role = "yazi.preview-unavailable", gap = "none" }, {
 			ui.text({ ui.span("Preview unavailable (" .. fmt_size(limit) .. " limit)", "warn") }),
-			ui.text({ ui.span(tostring(content), "muted") }),
 		})
 	end
 	return content, nil
 end
 
 
--- Rich native preview: Markdown, SVG, Mermaid, Images, Syntax-highlighted code, directory tree
-local function build_rich_preview(full_url: string, is_dir: boolean, active_name: string, state: any, cx: any): Node
-	if is_dir then
-		local ok, list = pcall(tern.fs.list, full_url)
-		if ok and list then
-			if #list == 0 then
-				return ui.text({ ui.span("(empty directory)", "muted") })
-			end
-			local preview_items = {}
-			for i = 1, math.min(18, #list) do
-				table.insert(preview_items, ui.text({ ui.span(" " .. list[i], "muted") }))
-			end
-			if #list > 18 then
-				table.insert(preview_items, ui.text({ ui.span(string.format("… and %d more entries", #list - 18), "muted") }))
-			end
-			return ui.col(preview_items)
-		else
-			return ui.text({ ui.span("Directory (unreadable)", "muted") })
-		end
-	end
+-- Rich native file preview; directory rows come only from Yazi snapshots.
+local function build_rich_preview(full_url: string, active_name: string, state: any, cx: any): Node
 	local ext = file_ext(full_url)
 	local img_mime = mime_for(ext)
 
 	-- 0. Compressed Archive Preview (.zip, .tar, .tar.gz, .tgz, .7z, etc.)
 	if is_archive(ext) then
-		fetch_archive_contents(full_url, ext, state)
+		fetch_archive_contents(full_url, ext, state, cx)
 		local cached = state.archive_cache and state.archive_cache[full_url]
 		if type(cached) == "table" and #cached > 0 then
 			local entry_nodes = {}
@@ -499,7 +521,7 @@ local function build_rich_preview(full_url: string, is_dir: boolean, active_name
 			return cx:blob(content, img_mime)
 		end)
 		if not ok_blob or not blob_id then
-			return ui.text({ ui.span("Image preview unavailable: " .. tostring(blob_id), "warn") })
+			return ui.text({ ui.span("Image preview unavailable", "warn") })
 		end
 		return ui.node("col", { role = "yazi.image-preview", gap = "sm" }, {
 			ui.node("image", {
@@ -569,6 +591,7 @@ local function sync_hover(state: any, yz: YaziState?)
 	end
 	local source = safe_cid(yz.client_id)
 	local hovered = yz.hovered and yz.hovered.url
+	if state.source_client ~= source or state.source_cwd ~= yz.cwd then state.pending_g = nil end
 	if state.source_client ~= source or state.source_cwd ~= yz.cwd or state.source_hover ~= hovered then
 		state.active_file = nil
 		state.optimistic_cwd = nil
@@ -576,32 +599,42 @@ local function sync_hover(state: any, yz: YaziState?)
 		state.source_cwd = yz.cwd
 		state.source_hover = hovered
 	end
+	-- Keep local typing until all actor requests settle; then trust the snapshot.
+	if not state.filter_mode and not state.sending and (not state.requests or #state.requests == 0)
+		and yz.filter ~= nil and (state.filter_source ~= source or state.filter_seq ~= yz.seq) then
+		state.filter_query = type(yz.filter) == "string" and yz.filter or ""
+		state.filter_source, state.filter_seq = source, yz.seq
+	end
 end
 
--- Parent directory entries (from Yazi state, falling back to a live listing).
-local function compute_parent(yz: YaziState?, cur_cwd: string): ({ string }?, string?)
-	local p = yz and yz.cwd == cur_cwd and yz.parent or nil
-	local parent_files = p and p.files
-	local parent_cwd = p and p.cwd
-	if (not parent_files or #parent_files == 0) and cur_cwd and cur_cwd ~= "/" then
-		local parent_dir = cur_cwd:match("(.+)/[^/]+$") or "/"
-		local ok_list, list = pcall(tern.fs.list, parent_dir)
-		if ok_list and list then
-			parent_files = list
-			parent_cwd = parent_dir
-		end
-	end
-	if not parent_files or #parent_files == 0 then
-		return nil, nil
-	end
-	return parent_files, parent_cwd
+-- Never enumerate paths to infer types. Each directory belongs to this snapshot.
+local function compute_directory(yz: YaziState?, cwd: string): ParentInfo?
+	if not yz then return nil end
+	if yz.cwd == cwd then return yz end
+	if yz.parent and yz.parent.cwd == cwd then return yz.parent end
+	if yz.preview and yz.preview.cwd == cwd then return yz.preview end
+	return nil
 end
 
--- Current rows come from Yazi's filtered and sorted entries, never a local filter.
+local function file_is_dir(yz: YaziState?, cwd: string, name: string): boolean?
+	local folder = compute_directory(yz, cwd)
+	local is_dir = folder and folder.file_dirs and folder.file_dirs[name]
+	if type(is_dir) == "boolean" then return is_dir end
+	if yz and yz.hovered and yz.hovered.url == join_path(cwd, name) then return yz.hovered.dir end
+	return nil
+end
+
+local function compute_parent(yz: YaziState?, cur_cwd: string): ({ string }?, string?, { [string]: boolean }?)
+	if cur_cwd == "/" then return nil, nil, nil end
+	local parent_cwd = cur_cwd:match("(.+)/[^/]+$") or "/"
+	local folder = compute_directory(yz, parent_cwd)
+	return folder and folder.files, parent_cwd, folder and folder.file_dirs
+end
+
+-- Preserve all Yazi entries and ordering, including known optimistic directories.
 local function compute_file_list(state: any, yz: YaziState, cur_cwd: string): { string }
-	if cur_cwd == yz.cwd then return yz.files or {} end
-	local ok, names = pcall(tern.fs.list, cur_cwd)
-	return ok and names or {}
+	local folder = compute_directory(yz, cur_cwd)
+	return folder and folder.files or {}
 end
 
 -- Persistent Yazi selection is distinct from the native cursor highlight.
@@ -722,21 +755,17 @@ pump = function(state: any, cx: any)
 	if not ok then finish({ ok = false, error = tostring(err) }) end
 end
 
-local function open_shell(state: any, cx: any, reply: any, query: string, kind: string): boolean
+local function open_shell(state: any, cx: any, reply: any, query: string, block: boolean): boolean
 	if state.closing or running[cx.pane] ~= state then return false end
-	if reply.orphan then
-		cx:toast("info", "Orphan shell queued in Yazi", "Detached execution; output is not shown and completion is not acknowledged")
-		return true
-	end
 	local shell = reply.shell
-	if type(reply.id) ~= "string" or not reply.id:match("^[%w-]+$") or type(shell) ~= "table"
-		or type(shell.command) ~= "string" or type(shell.cwd) ~= "string" then
+	if not block or type(reply.id) ~= "string" or not reply.id:match("^[%w-]+$") or type(shell) ~= "table"
+		or type(shell.command) ~= "string" or type(shell.cwd) ~= "string" or shell.block ~= true then
 		cx:toast("error", "Invalid shell launch", "Yazi did not prepare a visible terminal command")
 		return false
 	end
 	local path = state_dir() .. "/shell-" .. reply.id .. ".json"
 	state.shell_handoffs = state.shell_handoffs or {}
-	local handoff = { path = path, query = query, kind = kind,
+	local handoff = { path = path, query = query, block = block,
 		shell = { command = shell.command, cwd = shell.cwd, block = shell.block } }
 	state.shell_handoffs[reply.id] = handoff
 	local ok, err = pcall(function()
@@ -757,7 +786,7 @@ local function open_shell(state: any, cx: any, reply: any, query: string, kind: 
 		pcall(tern.fs.remove, path)
 		pcall(tern.fs.remove, path .. ".ack")
 		if state.closing or running[cx.pane] ~= state then return end
-		state.cmd_mode, state.cmd_kind, state.cmd_query = true, handoff.kind, handoff.query
+		state.cmd_mode, state.cmd_block, state.cmd_query = true, handoff.block, handoff.query
 		cx:toast("error", "Cannot open shell terminal", handoff.nonce
 			and "Timed out waiting for terminal launch acknowledgement; launch outcome unknown"
 			or "Timed out preparing visible terminal; command was not launched")
@@ -794,10 +823,87 @@ local function shell_handoff_event(state: any, ev: any, cx: any)
 	pcall(tern.fs.remove, handoff.path)
 	pcall(tern.fs.remove, handoff.path .. ".ack")
 	if ev.act ~= "shell_launched" then
-		state.cmd_mode, state.cmd_kind, state.cmd_query = true, handoff.kind, handoff.query
+		state.cmd_mode, state.cmd_block, state.cmd_query = true, handoff.block, handoff.query
 		cx:toast("error", "Cannot open shell terminal", ev.error or "Visible terminal launch failed")
 	end
 	cx:render()
+end
+
+local function open_selected(state: any, cx: any, selected: { string }?, ev: any?)
+	if ev then
+		local handoff = state.shell_handoffs and state.shell_handoffs[ev.request_id]
+		local body = handoff and handoff.body
+		if state.closing or running[cx.pane] ~= state or not body or ev.cid ~= body.cid
+			or ev.token ~= body.token or ev.pane ~= body.pane or ev.owner_pane ~= body.owner_pane
+			or state.cid ~= body.cid or state.token ~= body.token or cx.pane ~= body.pane
+			or state.owner_pane ~= body.owner_pane or type(ev.nonce) ~= "string"
+			or not ev.nonce:match("^[%w-]+$") then return end
+		if ev.act ~= "files_handoff_check" and ev.nonce ~= handoff.nonce then return end
+		local unchanged = type(ev.paths) == "table" and #ev.paths == #body.paths
+		if unchanged then
+			for i, path in ipairs(body.paths) do if ev.paths[i] ~= path then unchanged = false; break end end
+		end
+		local err = ev.error
+		if not unchanged then err = "Selected-file paths changed during acknowledgement"
+		elseif ev.act == "files_handoff_check" then
+			if not refresh_live(state) then err = "The originating Yazi session is offline"
+			elseif handoff.nonce == ev.nonce then return
+			else
+				handoff.nonce = ev.nonce
+				local ok, result = pcall(function()
+					tern.fs.write(handoff.path .. ".ack", tern.json.encode({ version = 1, id = body.id,
+						cid = body.cid, token = body.token, pane = body.pane, owner_pane = body.owner_pane,
+						nonce = ev.nonce, paths = body.paths }))
+					cx:open(handoff.path)
+				end)
+				if ok then return end
+				err = tostring(result)
+			end
+		end
+		state.shell_handoffs[ev.request_id] = nil
+		pcall(tern.fs.remove, handoff.path)
+		pcall(tern.fs.remove, handoff.path .. ".ack")
+		if err or ev.act ~= "files_opened" then
+			cx:toast("error", "Cannot open selected files", err or "Native file open failed")
+		end
+		return
+	end
+	if state.closing or running[cx.pane] ~= state or not refresh_live(state) then
+		cx:toast("error", "Yazi is offline", "Reconnect before using file actions")
+		return
+	end
+	local cid = safe_cid(state.cid)
+	if not cid then cx:toast("error", "No Yazi client", nil); return end
+	-- Copy, never normalize or consult hover again: Alpha.txt and alpha.txt are
+	-- distinct frozen targets even if the actor changes selection before ACK.
+	local paths = {}
+	for i, path in ipairs(selected or {}) do
+		if type(path) ~= "string" or path:sub(1, 1) ~= "/" or path:find("%z") then
+			cx:toast("error", "Cannot open selected files", "Yazi supplied an invalid selected path")
+			return
+		end
+		paths[i] = path
+	end
+	if #paths == 0 then return end
+	request_seq += 1
+	local prefix = state.token and (cid .. "-" .. state.token .. "-") or ""
+	local id = prefix .. request_epoch .. "-" .. tostring(cx.pane) .. "-" .. tostring(request_seq)
+	local path = state_dir() .. "/files-" .. id .. ".json"
+	local body = { version = 1, id = id, cid = cid, token = state.token,
+		pane = cx.pane, owner_pane = state.owner_pane, paths = paths }
+	-- Reuse the owned shell inbox lifecycle so close/reload removes both files.
+	state.shell_handoffs = state.shell_handoffs or {}
+	state.shell_handoffs[id] = { path = path, body = body }
+	local ok, err = pcall(function()
+		tern.fs.write(path, tern.json.encode(body))
+		cx:open(path)
+	end)
+	if not ok then
+		state.shell_handoffs[id] = nil
+		pcall(tern.fs.remove, path)
+		pcall(tern.fs.remove, path .. ".ack")
+		cx:toast("error", "Cannot open selected files", tostring(err))
+	end
 end
 
 local function action(state: any, yz: any, cx: any, name: string, args: any)
@@ -808,6 +914,13 @@ local function clear_filter(state: any, yz: any, cx: any)
 	state.filter_mode = false
 	state.filter_query = ""
 	request(state, yz, cx, { op = "filter", query = "" })
+end
+
+local function clear_find(state: any, yz: any, cx: any)
+	state.find_mode = false
+	state.find_query = ""
+	state.find_previous = false
+	action(state, yz, cx, "escape", { find = true })
 end
 
 local function erase_codepoint(text: string): string
@@ -828,32 +941,6 @@ local function typed_text(key: any): string?
 	return nil
 end
 
--- Argument quoting, not shell execution: no substitutions, pipes or globbing.
-local function command_words(query: string): (any?, string?)
-	local words, buffer = {}, {}
-	local quote, escaped, started = nil, false, false
-	for i = 1, #query do
-		local c = query:sub(i, i)
-		if escaped then
-			if quote == '"' and c ~= '$' and c ~= '`' and c ~= '"' and c ~= "\\" and c ~= "\n" then
-				table.insert(buffer, "\\")
-			end
-			if c ~= "\n" then table.insert(buffer, c) end
-			escaped = false
-			started = true
-		elseif c == "\\" and quote ~= "'" then escaped = true; started = true
-		elseif quote then
-			if c == quote then quote = nil else table.insert(buffer, c) end
-		elseif c == "'" or c == '"' then quote = c; started = true
-		elseif c:match("%s") then
-			if started then table.insert(words, table.concat(buffer)); buffer = {}; started = false end
-		else table.insert(buffer, c); started = true end
-	end
-	if quote or escaped then return nil, "Unclosed quote or trailing escape" end
-	if started then table.insert(words, table.concat(buffer)) end
-	return words, nil
-end
-
 local function trash_decision(state: any, cx: any, confirm: boolean)
 	local pending = state.trash
 	state.trash = nil
@@ -866,16 +953,143 @@ end
 
 local handle_key
 
+local PATH_FIELD = "main.browser.path.content.field"
+
+local function utf16_size(text: string): number
+	local size = 0
+	for _, cp in utf8.codes(text) do size += cp > 0xFFFF and 2 or 1 end
+	return size
+end
+
+local function byte_at_utf16(text: string, offset: number): number
+	local size = 0
+	for pos, cp in utf8.codes(text) do
+		if size >= offset then return pos end
+		size += cp > 0xFFFF and 2 or 1
+	end
+	return #text + 1
+end
+
+local function replace_path(state: any, text: string, first: number?, last: number?)
+	local query = state.path_query or ""
+	local cursor = state.path_cursor or utf16_size(query)
+	local anchor = state.path_anchor or cursor
+	first = first or math.min(cursor, anchor)
+	last = last or math.max(cursor, anchor)
+	state.path_query = query:sub(1, byte_at_utf16(query, first) - 1)
+		.. text .. query:sub(byte_at_utf16(query, last))
+	state.path_cursor = first + utf16_size(text)
+	state.path_anchor = state.path_cursor
+end
+
+local function resolve_directory(query: string, cwd: string): string?
+	if query == "" or query:find("[%z\r\n]") then return nil end
+	local home = tern.getenv("HOME") or ""
+	if query == "~" or query:sub(1, 2) == "~/" then
+		if home == "" then return nil end
+		query = home .. query:sub(2)
+	end
+	if query:sub(1, 1) ~= "/" then query = join_path(cwd, query) end
+	-- Preserve '..' for the filesystem to resolve through symbolic links.
+	return query
+end
+
+local function jump_directory(state: any, yz: any, cx: any, target: string)
+	local query = state.path_query
+	state.path_menu = false
+	request(state, yz, cx, { op = "cd", target = target }, function(reply)
+		if reply.ok then
+			state.active_file = nil
+			state.optimistic_cwd = nil
+			if state.path_query == query then state.path_mode = false end
+		end
+	end)
+end
+
+local function submit_path(state: any, yz: any, cx: any)
+	local target = resolve_directory(state.path_query or "", yz.cwd or "/")
+	if not target then
+		cx:toast("error", "Invalid directory", "Enter a directory path on one line")
+		return
+	end
+	jump_directory(state, yz, cx, target)
+end
+
+local function path_segments(cwd: string): { any }
+	local home = tern.getenv("HOME") or ""
+	local at_home = home ~= "" and (cwd == home or cwd:sub(1, #home + 1) == home .. "/")
+	local root = at_home and home or "/"
+	local segments = { { label = at_home and "~" or "/", path = root } }
+	local tail = at_home and cwd:sub(#home + 1) or cwd
+	local path = root
+	for name in tail:gmatch("[^/]+") do
+		path = join_path(path, name)
+		table.insert(segments, { label = name, path = path })
+	end
+	return segments
+end
+
+local function path_header(state: any, cwd: string, cx: any): (any, any)
+	local children, layer = {}, nil
+	if state.path_mode then
+		table.insert(children, ui.node("input", { key = "field", role = "yazi.path-input",
+			text = state.path_query or "", cursor = state.path_cursor, anchor = state.path_anchor,
+			placeholder = "Directory path", sendable = true, grow = 1, min = { w = 0 } }))
+		table.insert(children, clickable(ui.el("button", { key = "go" }, { ui.text("Go") }), "path_submit"))
+		table.insert(children, clickable(ui.el("button", { key = "cancel" }, { ui.text("Cancel") }), "path_cancel"))
+	else
+		local segments = path_segments(cwd)
+		local budget = math.max(8, (cx.cols or 80) - 12)
+		local cap = math.max(4, math.min(24, math.floor(budget / 2)))
+		local first, used = #segments, math.min(cap, utf8.len(segments[#segments].label) or cap) + 5
+		while first > 2 do
+			local cost = math.min(cap, utf8.len(segments[first - 1].label) or cap) + 3
+			if used + cost > budget then break end
+			used += cost
+			first -= 1
+		end
+		local function crumb(segment, index)
+			return clickable(ui.el("button", { key = "dir" .. index, role = "yazi.path-segment",
+				title = segment.path, min = { w = 0 }, max = { w = tostring(cap) .. "ch" } }, {
+				ui.node("text", { text = segment.label, wrap = "none", truncate = "end" }),
+			}), "path_cd:" .. segment.path)
+		end
+		table.insert(children, crumb(segments[1], 1))
+		if first > 2 then
+			table.insert(children, clickable(ui.el("button", { key = "more", role = "yazi.path-more",
+				title = "Show ancestor directories" }, { ui.text("…") }), "path_more"))
+		end
+		for index = math.max(2, first), #segments do
+			table.insert(children, ui.node("text", { key = "sep" .. index, text = "›", tone = "muted", shrink = 0 }))
+			table.insert(children, crumb(segments[index], index))
+		end
+		-- The tail remains a distinct target even when every segment is truncated.
+		table.insert(children, clickable(ui.el("button", { key = "edit", role = "yazi.path-edit",
+			title = "Edit directory path", grow = 1, shrink = 0, min = { w = "3ch" } }, { ui.text(" ") }), "path_edit"))
+		if state.path_menu then
+			local ancestors = {}
+			for index = 2, first - 1 do table.insert(ancestors, crumb(segments[index], index)) end
+			table.insert(ancestors, clickable(ui.el("button", { key = "cancel" }, { ui.text("Cancel [Esc]") }), "path_cancel"))
+			layer = ui.col({ ui.node("card", { key = "ancestors", role = "yazi.path-ancestors" }, {
+				ui.text("Ancestor directories"), ui.col(ancestors),
+			}) })
+		end
+	end
+	return ui.node("card", { key = "path", role = "yazi.path-header", title = cwd }, {
+		ui.node("row", { key = "content", role = "yazi.path-content", gap = "xs" }, children),
+	}), layer
+end
+
 -- ---------------------------------------------------------------- Miller columns builders
 
 -- Left Column: Parent directory as a scrollable list; the current
 -- directory row is the list selection (native active capsule).
 local function build_parent_column(yz: YaziState?, cur_cwd: string, max_lines: number, selected_paths: { [string]: boolean }): Node
-	local parent_files, parent_cwd = compute_parent(yz, cur_cwd)
+	local parent_files, parent_cwd, parent_dirs = compute_parent(yz, cur_cwd)
 	if not parent_files then
 		return ui.card(
 			{ ui.span("Parent", "muted") },
-			{ ui.text({ ui.span("(root)", "muted") }) }
+			{ ui.text({ ui.span(cur_cwd == "/" and "(root)" or "Waiting for Yazi directory metadata...", "muted") }) }
 		)
 	end
 
@@ -887,11 +1101,7 @@ local function build_parent_column(yz: YaziState?, cur_cwd: string, max_lines: n
 		if is_cur then
 			selected = #items + 1
 		end
-		local is_dir = is_cur
-		if not is_dir and parent_cwd then
-			local ok_dir = pcall(tern.fs.list, join_path(parent_cwd, fname))
-			is_dir = ok_dir
-		end
+		local is_dir = parent_dirs and parent_dirs[fname]
 		local sym, tone = file_icon(fname, is_dir)
 		table.insert(items, {
 			name = fname,
@@ -910,12 +1120,13 @@ local function build_parent_column(yz: YaziState?, cur_cwd: string, max_lines: n
 end
 
 -- Right Column child preview: Expand subfolder contents as a scrollable list
-local function render_child_directory_preview(full_url: string, dir_name: string, max_lines: number, selected_paths: { [string]: boolean }): Node
-	local ok, list = pcall(tern.fs.list, full_url)
-	if not ok or not list then
+local function render_child_directory_preview(yz: YaziState, full_url: string, dir_name: string, max_lines: number, selected_paths: { [string]: boolean }): Node
+	local folder = compute_directory(yz, full_url)
+	local list = folder and folder.files
+	if not list then
 		return ui.card(
 			{ ui.span("[" .. dir_name .. "]", "accent") },
-			{ ui.text({ ui.span("(unreadable directory)", "muted") }) }
+			{ ui.text({ ui.span("Waiting for Yazi directory preview...", "muted") }) }
 		)
 	end
 	if #list == 0 then
@@ -926,13 +1137,8 @@ local function render_child_directory_preview(full_url: string, dir_name: string
 	end
 	local child_items = {}
 	for _, cname in ipairs(list) do
-		local is_sub_dir = false
 		local sub_path = join_path(full_url, cname)
-		if tern.fs.exists(sub_path) then
-			local ok_sub = pcall(tern.fs.list, sub_path)
-			is_sub_dir = ok_sub
-		end
-		local sym, tone = file_icon(cname, is_sub_dir)
+		local sym, tone = file_icon(cname, folder.file_dirs and folder.file_dirs[cname])
 		table.insert(child_items, {
 			name = cname,
 			url = sub_path,
@@ -952,12 +1158,11 @@ handle_key = function(state: any, key: any, cx: any): boolean
 	local k = raw:lower()
 	local yz = read_latest_state(state)
 	sync_hover(state, yz)
-	local cwd = state.optimistic_cwd or (yz and yz.cwd) or "/"
-	local files = yz and compute_file_list(state, yz, cwd) or {}
-	local name = state.active_file or (yz and yz.cwd == cwd and yz.hovered and basename(yz.hovered.url)) or files[1]
-	local target = name and join_path(cwd, name)
-	local escape = k == "escape" or k == "esc"
+	local escape = k == "escape" or k == "esc" or (key.ctrl and k == "[")
 	local enter = k == "enter" or k == "return"
+	local plain_g = k == "g" and not key.shift and raw == k and not key.ctrl and not key.alt and not key.meta
+	local pending_g = state.pending_g == true
+	state.pending_g = nil
 	if not state.live then
 		if (k == "q" or escape) and not key.ctrl and not key.alt and not key.meta then
 			close_companion(state, cx)
@@ -969,42 +1174,52 @@ handle_key = function(state: any, key: any, cx: any): boolean
 		elseif enter then trash_decision(state, cx, true) end
 		return true
 	end
+	if state.path_menu then
+		if escape then state.path_menu = false end
+		return true
+	end
+	if state.path_mode then
+		if escape then state.path_mode = false
+		elseif enter then submit_path(state, yz, cx)
+		elseif key.ctrl and k == "a" then
+			state.path_anchor = 0; state.path_cursor = utf16_size(state.path_query or "")
+		elseif k == "backspace" or k == "delete" then
+			local query = state.path_query or ""
+			local cursor = state.path_cursor or utf16_size(query)
+			local anchor = state.path_anchor or cursor
+			if cursor ~= anchor then replace_path(state, "")
+			elseif k == "backspace" and cursor > 0 then
+				local prefix = query:sub(1, byte_at_utf16(query, cursor) - 1)
+				replace_path(state, "", utf16_size(erase_codepoint(prefix)), cursor)
+			elseif k == "delete" then
+				local next_byte = utf8.offset(query, 2, byte_at_utf16(query, cursor)) or (#query + 1)
+				replace_path(state, "", cursor, utf16_size(query:sub(1, next_byte - 1)))
+			end
+		elseif k == "home" then state.path_cursor = 0; state.path_anchor = 0
+		elseif k == "end" then
+			state.path_cursor = utf16_size(state.path_query or ""); state.path_anchor = state.path_cursor
+		else
+			local text = typed_text(key)
+			if text then replace_path(state, text) else return false end
+		end
+		return true
+	end
 	if state.cmd_mode then
 		if escape then state.cmd_mode = false; state.cmd_query = ""
 		elseif enter then
-			local query = state.cmd_query or ""
-			if state.cmd_kind == "shell" then
-				if query == "" then state.cmd_mode = false; return true end
-				request(state, yz, cx, { op = "command", action = "shell", args = { query } }, function(reply)
-					if reply.ok and open_shell(state, cx, reply, query, "shell") then
-						if state.cmd_query == query then state.cmd_mode = false; state.cmd_query = "" end
-					end
-				end)
-				return true
-			end
-			local words, err = command_words(query)
-			if err then cx:toast("error", "Invalid command", err)
-			elseif words and #words > 0 then
-				local args, positional_only = {}, false
-				for i = 2, #words do
-					if words[i] == "--" and not positional_only then positional_only = true
-					else
-						local option = not positional_only and words[i]:match("^%-%-(.+)$")
-						if option then
-							local field, value = option:match("^([^=]+)=(.*)$")
-							args[(field or option):gsub("-", "_")] = value or true
-						else table.insert(args, words[i]) end
-					end
+			local query, block = state.cmd_query or "", state.cmd_block == true
+			if query == "" then state.cmd_mode = false; return true end
+			request(state, yz, cx, { op = "command", action = "shell", args = { query, block = block } }, function(reply)
+				if not reply.ok then return end
+				if block and not state.token then
+					if not open_shell(state, cx, reply, query, block) then return end
+				else
+					cx:toast("info", "Shell queued in Yazi", "Task accepted; completion is reported by Yazi tasks")
 				end
-				request(state, yz, cx, { op = "command", action = words[1], args = args, target = target, cwd = cwd }, function(reply)
-					if reply.ok then
-						if words[1] == "shell" and not open_shell(state, cx, reply, query, "command") then return end
-						if state.cmd_query == query then state.cmd_mode = false; state.cmd_query = "" end
-						if reply.confirm_trash and reply.paths and #reply.paths > 0 then state.trash = { cid = safe_cid(yz.client_id), paths = reply.paths } end
-						if words[1] ~= "shell" then cx:toast("info", "Yazi accepted command", "Actor accepted; asynchronous work may still be pending") end
-					end
-				end)
-			else state.cmd_mode = false; state.cmd_query = "" end
+				if state.cmd_query == query and state.cmd_block == block then
+					state.cmd_mode = false; state.cmd_query = ""
+				end
+			end)
 		elseif k == "backspace" then state.cmd_query = erase_codepoint(state.cmd_query or "")
 		else
 			local text = typed_text(key)
@@ -1012,27 +1227,51 @@ handle_key = function(state: any, key: any, cx: any): boolean
 		end
 		return true
 	end
+	if state.find_mode then
+		if escape then clear_find(state, yz, cx)
+		elseif enter then
+			local query, previous = state.find_query or "", state.find_previous == true
+			state.find_mode = false
+			state.find_query = ""
+			state.active_file = nil
+			request(state, yz, cx, { op = "find", query = query, previous = previous })
+		else
+			local query = state.find_query or ""
+			if k == "backspace" then query = erase_codepoint(query)
+			else local text = typed_text(key); if not text then return true end; query ..= text end
+			state.find_query = query
+			state.active_file = nil
+			request(state, yz, cx, { op = "find", query = query, previous = state.find_previous == true })
+		end
+		return true
+	end
 	if state.filter_mode then
 		if escape then clear_filter(state, yz, cx)
-		elseif enter then state.filter_mode = false
+		elseif enter then
+			state.filter_mode = false
+			request(state, yz, cx, { op = "filter", query = state.filter_query or "", done = true })
 		else
 			local query = state.filter_query or ""
 			if k == "backspace" then query = erase_codepoint(query)
 			else local text = typed_text(key); if not text then return true end; query ..= text end
 			state.filter_query = query
 			state.active_file = nil
-			request(state, yz, cx, { op = "filter", query = query })
+			request(state, yz, cx, { op = "filter", query = query, done = false })
 		end
 		return true
 	end
 	if key.alt or key.meta then return false end
+	if escape then
+		state.filter_mode = false
+		action(state, yz, cx, "escape", {})
+		return true
+	end
 	if key.ctrl then
-		if k == "r" then return true end
+		if k == "a" then action(state, yz, cx, "toggle_all", { state = "on" }); return true end
+		if k == "r" then action(state, yz, cx, "toggle_all", {}); return true end
 		if k ~= "d" and k ~= "u" and k ~= "f" and k ~= "b" then return false end
 	end
-	if escape and state.filter_query and state.filter_query ~= "" then clear_filter(state, yz, cx); return true end
-	if escape and yz and yz.mode and yz.mode ~= "normal" then action(state, yz, cx, "escape", { visual = true }); return true end
-	local upper = key.shift or raw == "G"
+	local upper = key.shift or raw ~= k
 	local page_down = k == "page_down" or k == "pagedown" or (key.ctrl and (k == "d" or k == "f"))
 	local page_up = k == "page_up" or k == "pageup" or (key.ctrl and (k == "u" or k == "b"))
 	if page_down or page_up then
@@ -1042,45 +1281,54 @@ handle_key = function(state: any, key: any, cx: any): boolean
 	end
 	if key.ctrl then return false end
 	if k == "end" or (k == "g" and upper) then action(state, yz, cx, "arrow", { "bot" }); return true end
-	if k == "home" or k == "g" then action(state, yz, cx, "arrow", { "top" }); return true end
-	if (key.shift or raw ~= k) and k:match("^[a-z]$") then return false end
+	if k == "home" then action(state, yz, cx, "arrow", { "top" }); return true end
+	if plain_g then
+		if pending_g then action(state, yz, cx, "arrow", { "top" })
+		else state.pending_g = true end
+		return true
+	end
+	if k == "n" then action(state, yz, cx, "find_arrow", { previous = upper }); return true end
+	if upper and k:match("^[a-z]$") then
+		if k == "v" then action(state, yz, cx, "visual_mode", { unset = true })
+		elseif k == "h" then action(state, yz, cx, "back", {})
+		elseif k == "l" then action(state, yz, cx, "forward", {})
+		else return false end
+		return true
+	end
 	if k == "j" or k == "down" or k == "arrowdown" or k == "arrow_down" or k == "k" or k == "up" or k == "arrowup" or k == "arrow_up" then
 		local step = (k == "j" or k == "down" or k == "arrowdown" or k == "arrow_down") and 1 or -1
 		action(state, yz, cx, "arrow", { tostring(step) })
-	elseif k == "h" or k == "left" or k == "arrowleft" or k == "arrow_left" or k == "backspace" then
-		local parent = cwd:match("(.+)/[^/]+$") or "/"
-		state.optimistic_cwd = parent; state.active_file = basename(cwd)
-		action(state, yz, cx, "cd", { parent })
-	elseif k == "l" or k == "right" or k == "arrowright" or k == "arrow_right" or enter then
-		if target and pcall(tern.fs.list, target) then
-			state.optimistic_cwd = target; state.active_file = nil
-			action(state, yz, cx, "cd", { target })
-		elseif enter and target then request(state, yz, cx, { op = "open", target = target, cwd = cwd }) end
-	elseif k == "space" or k == " " then
-		if target then request(state, yz, cx, { op = "toggle", target = target }) end
+	elseif k == "h" or k == "left" or k == "arrowleft" or k == "arrow_left" then
+		action(state, yz, cx, "leave", {})
+	elseif k == "l" or k == "right" or k == "arrowright" or k == "arrow_right" then
+		action(state, yz, cx, "enter", {})
+	elseif enter or k == "o" then
+		local selected = yz and yz.selected_urls or {}
+		if #selected > 0 then
+			open_selected(state, cx, selected)
+		elseif yz and yz.hovered and yz.hovered.url then
+			if enter and yz.hovered.dir == true then action(state, yz, cx, "enter", {})
+			else cx:open(yz.hovered.url) end
+		end
+	elseif k == "space" or k == " " then request(state, yz, cx, { op = "toggle_advance" })
 	elseif k == "v" then action(state, yz, cx, "visual_mode", {})
-	elseif k == "y" then
-		if target then request(state, yz, cx, { op = "yank", target = target }, function(reply)
-			if reply.ok then cx:copy(table.concat(reply.paths or {}, "\n")); cx:toast("info", "Yazi yank accepted", "Copied the same target paths") end
-		end) end
-	elseif k == "o" then if target then cx:open(target) end
+	elseif k == "y" then action(state, yz, cx, "yank", {})
+	elseif k == "x" then action(state, yz, cx, "yank", { cut = true })
 	elseif k == "d" then
-		request(state, yz, cx, { op = "trash_prepare", target = target }, function(reply)
+		request(state, yz, cx, { op = "trash_prepare" }, function(reply)
 			if reply.ok and reply.paths and #reply.paths > 0 then
 				state.trash = { cid = safe_cid(yz.client_id), paths = reply.paths }
 			elseif reply.ok then cx:toast("info", "Nothing to trash", nil) end
 		end)
-	elseif k == "/" then state.filter_mode = true
-	elseif k == ";" and not key.shift then state.cmd_mode = true; state.cmd_kind = "shell"; state.cmd_query = ""
-	elseif k == ":" or k == "colon" or (k == ";" and key.shift) then state.cmd_mode = true; state.cmd_kind = "command"; state.cmd_query = ""
+	elseif k == "f" then state.filter_mode = true
+	elseif k == "/" or k == "?" then
+		state.find_mode = true
+		state.find_query = ""
+		state.find_previous = k == "?" or key.shift == true
+	elseif (k == ";" or k == "semicolon") and not key.shift then state.cmd_mode = true; state.cmd_block = false; state.cmd_query = ""
+	elseif k == ":" or k == "colon" or ((k == ";" or k == "semicolon") and key.shift) then state.cmd_mode = true; state.cmd_block = true; state.cmd_query = ""
 	elseif k == "." or k == "period" then action(state, yz, cx, "hidden", { state = "toggle" })
-	elseif k == "x" and target and is_archive(file_ext(target)) then
-		local argv = file_ext(target) == "zip" and { "unzip", "-o", target, "-d", cwd } or { "tar", "-xf", target, "-C", cwd }
-		local ok, err = pcall(function() tern.process.run(argv, function(res)
-			cx:toast(res.status == 0 and "success" or "error", res.status == 0 and "Extracted archive" or "Extraction failed", res.stderr)
-		end) end)
-		if not ok then cx:toast("error", "Extraction failed", tostring(err)) end
-	elseif k == "q" or escape then close_companion(state, cx)
+	elseif k == "q" then close_companion(state, cx)
 	else return false end
 	return true
 end
@@ -1104,6 +1352,7 @@ local function poll_block(state)
 			return
 		end
 		local yz = read_latest_state(state)
+		poll_native_shells(state, cx)
 		if state.token and state.lease_nonce then
 			managed_poll(state, { cid = state.cid, token = state.token, nonce = state.lease_nonce }, cx)
 		elseif not state.token and yz and not state.sending and tern.now() >= (state.next_probe or 0) then
@@ -1122,6 +1371,7 @@ local function poll_block(state)
 end
 
 tern.block.define("companion", {
+	features = { "edit" },
 	init = function(cx, args, saved)
 		args = args or {}
 		saved = type(saved) == "table" and saved or {}
@@ -1146,9 +1396,12 @@ tern.block.define("companion", {
 			optimistic_cwd = nil,
 			filter_mode = false,
 			filter_query = "",
+			find_mode = false,
+			find_query = "",
+			find_previous = false,
 			cmd_mode = false,
 			cmd_query = "",
-			cmd_kind = "command",
+			cmd_block = false,
 			archive_cache = {},
 		}
 		running[cx.pane] = state
@@ -1176,55 +1429,55 @@ tern.block.define("companion", {
 			}
 		end
 		sync_hover(state, yz)
+		-- Async results never outlive the directory/snapshot that requested them.
+		local preview_stamp = tostring(yz.client_id) .. ":" .. tostring(yz.seq) .. ":" .. yz.cwd
+		if state.preview_stamp ~= preview_stamp then
+			state.preview_stamp = preview_stamp
+			state.archive_cache = {}
+		end
 
 		local cur_cwd = state.optimistic_cwd or yz.cwd or "/"
 		if state.optimistic_cwd and yz.cwd == state.optimistic_cwd then
 			state.optimistic_cwd = nil
 		end
 
-		-- 1. Top Header: Minimal clean path (collapsing $HOME to ~)
-		local home_dir = tern.getenv("HOME") or ""
-		local display_path = cur_cwd
-		if home_dir ~= "" and display_path:sub(1, #home_dir) == home_dir then
-			display_path = "~" .. display_path:sub(#home_dir + 1)
-		end
-
 		local top_rows = {}
-		local path_header = ui.card({ ui.span(display_path, "accent") }, {})
-		path_header.p.role = "yazi.path-header"
-		path_header.p.key = "path"
-		path_header.p.title = cur_cwd
-		table.insert(top_rows, path_header)
-		table.insert(top_rows, ui.node("row", { role = "yazi.path-status", gap = "xs", wrap = true }, {
-			ui.badge(string.format("%d selected", yz.selected or 0), (yz.selected or 0) > 0 and "accent" or "muted"),
-			ui.badge("Synced", "success"),
-		}))
+		local header, path_layer = path_header(state, cur_cwd, cx)
+		table.insert(top_rows, header)
 
-		-- 1.1 Filter Bar (when filter active)
-		if state.filter_mode or (state.filter_query and state.filter_query ~= "") then
-			local f_bar = ui.row({
-				ui.badge("Filter [/]", "accent"),
+		-- Keep one input line reserved so editors do not shift the file columns.
+		local input_bar = ui.row({ ui.text(" ") })
+		if state.cmd_mode then
+			input_bar = ui.row({
+				ui.badge(state.cmd_block and "Shell [:]" or "Shell [;]", "warn"),
+				ui.text({
+					ui.span(" " .. (state.cmd_block and ":" or ";") .. (state.cmd_query or ""), "strong"),
+					ui.span(state.cmd_mode and " ▎" or "", "warn"),
+				}),
+				clickable(ui.badge("Cancel [Esc]", "muted"), "clear_cmd"),
+			})
+		elseif state.find_mode then
+			input_bar = ui.row({
+				ui.badge(state.find_previous and "Find [?]" or "Find [/]", "accent"),
+				ui.text({ ui.span(" " .. (state.find_query or ""), "strong"), ui.span(" ▎", "accent") }),
+				clickable(ui.badge("Cancel [Esc]", "muted"), "clear_find"),
+			})
+		elseif state.filter_mode then
+			input_bar = ui.row({
+				ui.badge("Filter [f]", "accent"),
 				ui.text({
 					ui.span(" " .. (state.filter_query or ""), "strong"),
 					ui.span(state.filter_mode and " ▎" or "", "accent"),
 				}),
 				clickable(ui.badge("Clear [Esc]", "muted"), "clear_filter"),
 			})
-			table.insert(top_rows, f_bar)
 		end
-
-		-- 1.2 Command Bar (when command active)
-		if state.cmd_mode or (state.cmd_query and state.cmd_query ~= "") then
-			local c_bar = ui.row({
-				ui.badge(state.cmd_kind == "shell" and "Shell [;]" or "Command [:]", "warn"),
-				ui.text({
-					ui.span(" " .. (state.cmd_kind == "shell" and ";" or ":") .. (state.cmd_query or ""), "strong"),
-					ui.span(state.cmd_mode and " ▎" or "", "warn"),
-				}),
-				clickable(ui.badge("Cancel [Esc]", "muted"), "clear_cmd"),
-			})
-			table.insert(top_rows, c_bar)
-		end
+		input_bar.p = input_bar.p or {}
+		input_bar.p.key = "input"
+		input_bar.p.role = "yazi.input-row"
+		input_bar.p.min = { h = "1.5lines" }
+		input_bar.p.max = { h = "1.5lines" }
+		table.insert(top_rows, input_bar)
 
 		-- 2. Task progress (if background tasks are running)
 		if yz.tasks and yz.tasks.total and yz.tasks.total > 0 then
@@ -1265,16 +1518,7 @@ tern.block.define("companion", {
 
 		-- Determine active item type & paths
 		local active_full_url = active_name and join_path(cur_cwd, active_name) or cur_cwd
-		local is_active_dir = false
-		if active_name then
-			local is_exact_hover = (hovered_name == active_name) and yz.hovered
-			if is_exact_hover and yz.hovered.dir ~= nil then
-				is_active_dir = yz.hovered.dir
-			elseif tern.fs.exists(active_full_url) then
-				local ok_dir = pcall(tern.fs.list, active_full_url)
-				is_active_dir = ok_dir
-			end
-		end
+		local is_active_dir = active_name and file_is_dir(yz, cur_cwd, active_name)
 
 		-- ---------------- Left Column (Parent Directory)
 		local left_col_card = build_parent_column(yz, cur_cwd, col_lines, selected_paths)
@@ -1283,13 +1527,8 @@ tern.block.define("companion", {
 		local middle_items = {}
 		for _, fname in ipairs(file_list) do
 			local is_active = (fname == active_name)
-			local is_dir = false
 			local item_path = join_path(cur_cwd, fname)
-			if tern.fs.exists(item_path) then
-				local ok_dir = pcall(tern.fs.list, item_path)
-				is_dir = ok_dir
-			end
-			local sym, tone = file_icon(fname, is_dir)
+			local sym, tone = file_icon(fname, file_is_dir(yz, cur_cwd, fname))
 			table.insert(middle_items, {
 				name = fname,
 				url = item_path,
@@ -1301,7 +1540,8 @@ tern.block.define("companion", {
 		local middle_title = string.format("%s (%d/%d)", basename(cur_cwd), cur_idx, #file_list)
 		local middle_col_card = ui.card(
 			{ ui.span(middle_title, "strong") },
-			{ viewport_list(middle_items, col_lines, "files_list", cur_idx) }
+			{ #middle_items > 0 and viewport_list(middle_items, col_lines, "files_list", cur_idx)
+				or ui.text({ ui.span(cur_cwd == yz.cwd and "(empty directory)" or "Waiting for Yazi directory metadata...", "muted") }) }
 		)
 
 		-- ---------------- Right Column (Preview / Child Subfolder Expansion)
@@ -1309,21 +1549,22 @@ tern.block.define("companion", {
 		if not active_name then
 			right_col_card = ui.card(
 				{ ui.span("Preview", "muted") },
-				{ ui.text({ ui.span("(no file selected)", "muted") }) }
+				{ ui.text({ ui.span(cur_cwd == yz.cwd and "(no file selected)" or "Waiting for Yazi directory metadata...", "muted") }) }
 			)
 		elseif is_active_dir then
 			-- Child Directory Content Expansion (exactly like Yazi right pane!)
-			right_col_card = render_child_directory_preview(active_full_url, active_name, col_lines, selected_paths)
+			right_col_card = render_child_directory_preview(yz, active_full_url, active_name, col_lines, selected_paths)
+		elseif is_active_dir == nil then
+			right_col_card = ui.card({ ui.span(active_name, "strong") }, {
+				ui.text({ ui.span("Waiting for Yazi file metadata...", "muted") }),
+			})
 		else
 			-- Rich File Preview (Code, Markdown, Image, Archive table of contents)
-			local preview_content = build_rich_preview(active_full_url, false, active_name, state, cx)
+			local preview_content = build_rich_preview(active_full_url, active_name, state, cx)
 			local act_buttons = {
-				clickable(ui.el("button", {}, { ui.text("Open in Tern (o)") }), "open_file=" .. active_full_url),
+				clickable(ui.el("button", {}, { ui.text("Open in Tern") }), "open_file=" .. active_full_url),
 			}
-			if is_archive(file_ext(active_name)) then
-				table.insert(act_buttons, clickable(ui.el("button", {}, { ui.text("Extract Here (x)") }), "extract_archive=" .. active_full_url))
-			end
-			table.insert(act_buttons, clickable(ui.el("button", {}, { ui.text("Copy Path (y)") }), "copy_path=" .. active_full_url))
+			table.insert(act_buttons, clickable(ui.el("button", {}, { ui.text("Copy Path") }), "copy_path=" .. active_full_url))
 			table.insert(act_buttons, clickable(ui.el("button", {}, { ui.text("Terminal Here") }), "terminal_here=" .. cur_cwd))
 
 			right_col_card = ui.card(
@@ -1352,10 +1593,9 @@ tern.block.define("companion", {
 		table.insert(top_rows, miller_columns)
 
 		-- ---------------- Bottom Status Bar (Yazi-style Pill Status Bar)
-		local mode_str = state.cmd_mode and "CMD" or (state.filter_mode and "FILTER" or (yz.mode == "select" and "VIS" or (yz.mode == "unset" and "UNSET" or "NOR")))
+		local mode_str = state.cmd_mode and "CMD" or (state.find_mode and "FIND" or (state.filter_mode and "FILTER" or (yz.mode == "select" and "VIS" or (yz.mode == "unset" and "UNSET" or "NOR"))))
 		local mode_tone = (state.cmd_mode or (yz.mode and yz.mode ~= "normal")) and "warn" or "accent"
 
-		local perm_str = is_active_dir and "drwxrwxrwx" or "-rw-r--r--"
 		local pct_num = (#file_list > 0) and math.floor((cur_idx / #file_list) * 100) or 0
 		local pct_str = string.format("%d%%", pct_num)
 		local pos_str = string.format("%d/%d", cur_idx, math.max(1, #file_list))
@@ -1364,7 +1604,6 @@ tern.block.define("companion", {
 			ui.badge(mode_str, mode_tone),
 			ui.badge(string.format("%d sel", yz.selected or 0), (yz.selected or 0) > 0 and "warn" or "muted"),
 			ui.node("text", { role = "yazi.status-name", spans = { ui.span(active_name or "", "strong") } }),
-			ui.text({ ui.span(perm_str, is_active_dir and "accent" or "muted") }),
 			ui.text({ ui.span(" " .. pct_str .. " ", "muted") }),
 			ui.badge(pos_str, "accent"),
 		})
@@ -1389,7 +1628,7 @@ tern.block.define("companion", {
 			main = ui.col({ ui.node("col", { role = "yazi.browser", key = "browser", gap = "sm" }, top_rows) }),
 			-- Region roots are stripped; preserve the row as a child of the dock.
 			dock = ui.col({ status_bar }),
-			layer = trash_layer,
+			layer = trash_layer or path_layer,
 		}
 	end,
 
@@ -1414,6 +1653,10 @@ tern.block.define("companion", {
 			shell_handoff_event(state, ev, cx)
 			return
 		end
+		if act == "files_handoff_check" or act == "files_opened" or act == "files_failed" then
+			open_selected(state, cx, nil, ev)
+			return
+		end
 		if act == "poll" then
 			if not state.token and yz and not state.sending and tern.now() >= (state.next_probe or 0) then
 				state.next_probe = tern.now() + 2000
@@ -1430,23 +1673,62 @@ tern.block.define("companion", {
 			elseif act == "trash_cancel" then trash_decision(state, cx, false) end
 			return
 		end
+		state.pending_g = nil
+		if act == "path_edit" then
+			state.path_mode, state.path_menu = true, false
+			state.cmd_mode, state.find_mode, state.filter_mode = false, false, false
+			state.path_query = cwd
+			state.path_cursor, state.path_anchor = utf16_size(cwd), 0
+			return
+		elseif act == "path_cancel" then
+			state.path_mode, state.path_menu = false, false
+			return
+		elseif act == "path_more" then
+			state.path_menu = not state.path_menu
+			return
+		elseif act == "path_submit" then
+			if state.path_mode then submit_path(state, yz, cx) end
+			return
+		elseif type(act) == "string" and act:sub(1, 8) == "path_cd:" then
+			jump_directory(state, yz, cx, act:sub(9))
+			return
+		elseif ev.id == PATH_FIELD and state.path_mode then
+			if ev.ev == "focus" then
+				-- Select-all belongs only to entering path mode. Native pointer
+				-- editing owns the caret after the user clicks inside the field.
+				state.path_cursor, state.path_anchor = nil, nil
+				return
+			end
+			if ev.ev == "edit" then
+				if ev.len ~= utf16_size(state.path_query or "") then return end
+				replace_path(state, ev.text or "", ev.from, ev.to)
+				state.path_cursor, state.path_anchor = ev.cursor, ev.cursor
+			elseif ev.ev == "send" then
+				state.path_query = ev.text or state.path_query
+				submit_path(state, yz, cx)
+			end
+			return
+		end
 
 		if ev.ev == "select" or ev.ev == "activate" then
 			local name = list_event_name(ev)
 			local cur_cwd_ev = state.optimistic_cwd or cwd
-			local base, names
+			local base, names, dirs
 			if ev.id == LIST_IDS.parent_list then
-				names, base = compute_parent(yz, cur_cwd_ev)
+				names, base, dirs = compute_parent(yz, cur_cwd_ev)
 			elseif ev.id == LIST_IDS.files_list and yz then
 				base = cur_cwd_ev
 				names = compute_file_list(state, yz, cur_cwd_ev)
+				local folder = compute_directory(yz, base)
+				dirs = folder and folder.file_dirs
 			elseif ev.id == LIST_IDS.child_list then
 				local active = state.active_file
 					or (yz and yz.hovered and yz.hovered.url and basename(yz.hovered.url))
 				if active then
 					base = join_path(cur_cwd_ev, active)
-					local ok, entries = pcall(tern.fs.list, base)
-					names = ok and entries or nil
+					local folder = compute_directory(yz, base)
+					names = folder and folder.files
+					dirs = folder and folder.file_dirs
 				end
 			end
 			if not name or not base or not names or not table.find(names, name) then
@@ -1454,18 +1736,20 @@ tern.block.define("companion", {
 			end
 
 			local target = join_path(base, name)
-			local is_dir = pcall(tern.fs.list, target)
+			local is_dir = dirs and dirs[name]
+			if type(is_dir) ~= "boolean" then is_dir = file_is_dir(yz, base, name) end
+			if ev.ev == "activate" and is_dir == nil then return end
 			if ev.ev == "activate" and is_dir then
 				state.optimistic_cwd = target
 				state.active_file = nil
-				action(state, yz, cx, "cd", { target })
+				request(state, yz, cx, { op = "activate", target = target, action = "enter" })
 			else
 				if base ~= cwd then
 					state.optimistic_cwd = base
 				end
 				state.active_file = name
 				if ev.ev == "activate" then
-					request(state, yz, cx, { op = "open", target = target, cwd = base })
+					cx:open(target)
 				else action(state, yz, cx, "reveal", { target, no_dummy = true }) end
 			end
 			return
@@ -1480,45 +1764,28 @@ tern.block.define("companion", {
 		elseif act == "enter_dir" and val then
 			state.optimistic_cwd = val
 			state.active_file = nil
-			action(state, yz, cx, "cd", { val })
+			request(state, yz, cx, { op = "activate", target = val, action = "enter" })
 		elseif act == "open_file" and val then
 			cx:open(val)
-			cx:toast("info", "Opening through Tern", val)
 		elseif act == "terminal_here" and val then
-			cx:toast("info", "Opening terminal in " .. val, nil)
-			pcall(function()
-				tern.process.run({ "tern", "split", "down", "--cwd", val }, function() end)
-			end)
-		elseif act == "leave" then
-			local cur_cwd = state.optimistic_cwd or (yz and yz.cwd) or "/"
-			local parent_dir = cur_cwd:match("(.+)/[^/]+$") or "/"
-			state.optimistic_cwd = parent_dir
-			state.active_file = basename(cur_cwd)
-			action(state, yz, cx, "cd", { parent_dir })
-		elseif act == "clear_filter" then
-			clear_filter(state, yz, cx)
-		elseif act == "clear_cmd" then
-			state.cmd_mode = false
-			state.cmd_query = ""
-		elseif act == "extract_archive" and val then
-			local cur_cwd = state.optimistic_cwd or (yz and yz.cwd) or "."
-			local ext = file_ext(val)
-			local cmd
-			if ext == "zip" then
-				cmd = { "unzip", "-o", val, "-d", cur_cwd }
-			else
-				cmd = { "tar", "-xf", val, "-C", cur_cwd }
-			end
-			pcall(function()
-				tern.process.run(cmd, function(res)
-					if res and res.status == 0 then
-						cx:toast("success", "Extracted archive successfully", basename(val))
-					else
-						cx:toast("error", "Failed to extract archive", basename(val))
+			local ok, err = pcall(function()
+				tern.process.run({ "tern", "split", tostring(cx.pane), "down", "--cwd", val }, function(res)
+					if state.closing or running[cx.pane] ~= state then return end
+					if not res or res.status ~= 0 then
+						cx:toast("error", "Cannot open terminal", res and res.stderr or "Missing launch result")
 					end
 				end)
 			end)
-			-- Handled by view re-run
+			if not ok then cx:toast("error", "Cannot open terminal", tostring(err)) end
+		elseif act == "leave" then
+			action(state, yz, cx, "leave", {})
+		elseif act == "clear_filter" then
+			clear_filter(state, yz, cx)
+		elseif act == "clear_find" then
+			clear_find(state, yz, cx)
+		elseif act == "clear_cmd" then
+			state.cmd_mode = false
+			state.cmd_query = ""
 		end
 	end,
 

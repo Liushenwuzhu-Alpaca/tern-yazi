@@ -347,6 +347,202 @@ tern.route.open(function(req, cx)
 	return { handled = true }
 end)
 
+-- One host effect carries the frozen selection; native window opens must not
+-- compete as independent link effects for the focused pane.
+local files_pending = {}
+local function same_paths(left, right): boolean
+	if type(left) ~= "table" or type(right) ~= "table" or #left ~= #right then return false end
+	for i, path in ipairs(left) do if right[i] ~= path then return false end end
+	return true
+end
+local function files_event(cx, body, act, nonce, err)
+	if cx.session:pane(body.pane) then
+		cx.session:event(body.pane, { ev = "action", id = "main.poll", act = act,
+			request_id = body.id, cid = body.cid, token = body.token, pane = body.pane,
+			owner_pane = body.owner_pane, nonce = nonce, paths = body.paths, error = err })
+	end
+end
+tern.route.open(function(req, cx)
+	local prefix = state_dir() .. "/files-"
+	if req.path:sub(1, #prefix) ~= prefix then return nil end
+	local id = req.path:sub(#prefix + 1):match("^([%w-]+)%.json$")
+	if not id then return nil end
+	local body = read_json(req.path)
+	local pane = body and type(body.pane) == "number" and cx.session:pane(body.pane)
+	-- Effects may reach multiple windows; only the owning window consumes them.
+	if not pane then return { handled = true } end
+	local valid = req.origin == "link" and body.version == 1 and body.id == id and pane.block == BLOCK_KIND
+		and type(body.cid) == "string" and body.cid:match("^%d+$")
+		and id:match("%-" .. tostring(body.pane) .. "%-%d+$")
+		and type(body.paths) == "table" and #body.paths > 0
+	if valid then
+		for _, path in ipairs(body.paths) do
+			if type(path) ~= "string" or path:sub(1, 1) ~= "/" or path:find("%z") then valid = false; break end
+		end
+	end
+	if valid and body.token then
+		local health = read_json(state_dir() .. "/managed-" .. body.cid .. ".json")
+		local token, hint = lease_hint(body.cid)
+		valid = health and health.client_id == body.cid and health.token == body.token
+			and health.owner_pane == body.owner_pane and cx.session:pane(body.owner_pane)
+			and token == body.token and hint == body.pane
+	end
+	local pending = files_pending[id]
+	local function fail(message)
+		files_pending[id] = nil
+		pcall(tern.fs.remove, req.path)
+		pcall(tern.fs.remove, req.path .. ".ack")
+		if pending then files_event(cx, pending.body, "files_failed", pending.nonce, message)
+		else cx:toast("error", "Cannot open selected files", message) end
+		return { handled = true }
+	end
+	if not valid then return fail("The originating Yazi session is unavailable") end
+	local tab = cx.session:tab_of(body.pane)
+	if not tab then return fail("The originating Yazi pane is not in a tab") end
+	if not pending then
+		nonce_seq += 1
+		pending = { nonce = nonce_epoch .. "-files-" .. tostring(nonce_seq), body = body, tab = tab }
+		files_pending[id] = pending
+		files_event(cx, body, "files_handoff_check", pending.nonce)
+		return { handled = true }
+	end
+	if pending.body.pane ~= body.pane or pending.body.cid ~= body.cid or pending.body.token ~= body.token
+		or pending.body.owner_pane ~= body.owner_pane or not same_paths(pending.body.paths, body.paths)
+		or pending.tab ~= tab then return fail("Selected-file handoff changed during acknowledgement") end
+	local ack = read_json(req.path .. ".ack")
+	if not ack or ack.version ~= 1 or ack.id ~= id or ack.nonce ~= pending.nonce or ack.cid ~= body.cid
+		or ack.token ~= body.token or ack.pane ~= body.pane or ack.owner_pane ~= body.owner_pane
+		or not same_paths(ack.paths, body.paths) then return { handled = true } end
+	files_pending[id] = nil
+	pcall(tern.fs.remove, req.path)
+	pcall(tern.fs.remove, req.path .. ".ack")
+	-- Keep every split anchored to this pane in its tab, including case-distinct
+	-- paths; native opens bypass routes and never re-read hover or selection.
+	zoom_pane(cx, body.pane, false)
+	local failures = {}
+	for index, path in ipairs(body.paths) do
+		local ok, err = pcall(function() cx:open(path, "beside", { focus = index == #body.paths }) end)
+		if not ok then table.insert(failures, path .. ": " .. tostring(err)) end
+	end
+	files_event(cx, body, #failures == 0 and "files_opened" or "files_failed", pending.nonce,
+		#failures > 0 and table.concat(failures, "\n") or nil)
+	return { handled = true }
+end)
+
+-- Keep request identities across window reloads. A closed terminal is a
+-- tombstone until the shim revokes its request, never permission to rerun it.
+local native_key = "native_shell_requests"
+local function native_store()
+	local value = tern.kv.get(native_key)
+	return type(value) == "table" and value or {}
+end
+
+local function native_session_live(cx, record)
+	local health = read_json(state_dir() .. "/managed-" .. record.cid .. ".json")
+	local token, pane = lease_hint(record.cid)
+	local source = cx.session:pane(record.pane)
+	local owner = cx.session:pane(record.owner_pane)
+	local session = managed[record.cid]
+	return health and health.client_id == record.cid and health.token == record.token
+		and health.owner_pane == record.owner_pane and token == record.token and pane == record.pane
+		and source and source.block == BLOCK_KIND and owner and session
+		and session.token == record.token and session.pane == record.pane and not session.stopped
+		and session.health_seen and tern.now() - session.health_seen < 3000
+end
+
+local function native_terminal_alive(cx, record)
+	local info = record.terminal and cx.session:pane(record.terminal)
+	local owned = record.terminal and shell_store()[tostring(record.terminal)]
+	return info and info.kind == "terminal" and owned and owned.native_id == record.id
+		and owned.cid == record.cid and owned.token == record.token
+end
+
+tern.route.open(function(req, cx)
+	local prefix = state_dir() .. "/native-shell-"
+	if req.path:sub(1, #prefix) ~= prefix then return nil end
+	local id = req.path:sub(#prefix + 1):match("^([%w-]+)%.json$")
+	if not id then return nil end
+	local body = read_json(req.path)
+	local valid = req.origin == "link" and body and body.version == 1 and body.id == id
+		and type(body.cid) == "string" and body.cid:match("^%d+$")
+		and type(body.token) == "string" and body.token:match("^[%w-]+$")
+		and type(body.pane) == "number" and type(body.owner_pane) == "number"
+		and type(body.helper) == "string" and body.helper:sub(1, 1) == "/" and not body.helper:find("%z")
+		and type(body.cwd) == "string" and body.cwd:sub(1, 1) == "/"
+		and type(body.argv) == "table" and type(body.env) == "table" and type(body.wait) == "boolean"
+	if valid then
+		local identity = body.cid .. "-" .. body.token .. "-"
+		valid = id:sub(1, #identity) == identity and id:sub(#identity + 1):match("^%d+$")
+			and native_session_live(cx, body)
+	end
+	if not valid then return { handled = true } end
+	local registry = native_store()
+	local previous = registry[id]
+	if previous then
+		if previous.cid ~= body.cid or previous.token ~= body.token or previous.pane ~= body.pane
+			or previous.owner_pane ~= body.owner_pane then return { handled = true } end
+		if not native_terminal_alive(cx, previous) then
+			previous.closed = true
+			tern.kv.set(native_key, registry)
+		end
+		-- An absent/exited pane is a tombstone, not permission to relaunch.
+		return { handled = true }
+	end
+	local stem = state_dir() .. "/native-shell-" .. id
+	if tern.fs.exists(stem .. ".started") or tern.fs.exists(stem .. ".result") then
+		registry[id] = { cid = body.cid, token = body.token, pane = body.pane,
+			owner_pane = body.owner_pane, path = req.path, closed = true }
+		tern.kv.set(native_key, registry)
+		return { handled = true }
+	end
+	local source_tab = cx.session:tab_of(body.pane)
+	local source_layout = source_tab and cx.session:layout(source_tab)
+	local record = { id = id, cid = body.cid, token = body.token, pane = body.pane,
+		owner_pane = body.owner_pane, path = req.path,
+		was_zoomed = source_layout and source_layout.zoomed or false }
+	registry[id] = record
+	tern.kv.set(native_key, registry)
+	-- Only transport quoting: /bin/sh argv and the expanded native command stay
+	-- private in the immutable request and are executed by the Rust helper.
+	local ok, terminal = pcall(function()
+		return cx.layout:split(body.pane, "right", { cwd = body.cwd,
+			command = shell_quote(body.helper) .. " --native-terminal " .. shell_quote(req.path) }, { focus = true })
+	end)
+	if not ok or not terminal then
+		record.closed = true
+		cx:toast("error", "Cannot open native Yazi terminal", "Terminal launch failed; the native request will expire")
+	else
+		record.terminal = terminal
+		local store = shell_store()
+		store[tostring(terminal)] = { pane = body.pane, owner_pane = body.owner_pane,
+			was_zoomed = record.was_zoomed, native_id = id, cid = body.cid, token = body.token }
+		tern.kv.set(shell_key, store)
+		zoom_pane(cx, terminal, true)
+	end
+	registry[id] = record
+	tern.kv.set(native_key, registry)
+	return { handled = true }
+end)
+
+local function expire_native_terminals(cx, closed_pane)
+	local registry = native_store()
+	local close = {}
+	for id, record in pairs(registry) do
+		local alive = native_terminal_alive(cx, record)
+		if closed_pane and closed_pane == record.terminal then record.closed = true; alive = false end
+		if alive and (closed_pane == record.pane or closed_pane == record.owner_pane
+			or not native_session_live(cx, record)) then
+			table.insert(close, record.terminal)
+			record.closed = true
+		end
+		if not alive and not tern.fs.exists(record.path) then registry[id] = nil end
+	end
+	tern.kv.set(native_key, registry)
+	for _, pane in ipairs(close) do cx.layout:close(pane) end
+end
+
+tern.on("pane_closed", function(ev, cx) expire_native_terminals(cx, ev.pane) end)
+
 tern.on("pane_closed", function(ev, cx)
 	local store = shell_store()
 	local previous = store[tostring(ev.pane)]
@@ -371,6 +567,16 @@ local function expire_shell_handoffs(cx)
 			shell_event(cx, pending.body, "shell_failed", pending.nonce, "Shell terminal handoff expired")
 		end
 	end
+	-- Batch ACKs have no timer or retry. Revoke only requests already removed
+	-- by their host lifecycle, or whose originating pane has disappeared.
+	for id, pending in pairs(files_pending) do
+		local path = state_dir() .. "/files-" .. id .. ".json"
+		if not cx.session:pane(pending.body.pane) or not tern.fs.exists(path) then
+			files_pending[id] = nil
+			pcall(tern.fs.remove, path)
+			pcall(tern.fs.remove, path .. ".ack")
+		end
+	end
 end
 
 local function arm_timer()
@@ -379,6 +585,7 @@ local function arm_timer()
 			expire_shell_handoffs(cx)
 			local ok, err = pcall(poke, cx)
 			if not ok then tern.log.warn("Yazi managed poll failed", tostring(err)) end
+			expire_native_terminals(cx)
 		end
 		arm_timer()
 	end)

@@ -15,7 +15,7 @@
     flex-shrink: 0;
 }
 
-/* The path owns its row; status badges cannot squeeze it into vertical text. */
+/* Each breadcrumb owns its hit target; the tail opens the directory editor. */
 [data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-header"] {
     align-self: stretch;
     min-width: 0;
@@ -23,17 +23,49 @@
 }
 
 [data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-header"] > .sf-card-body {
-    display: none;
-}
-
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-status"] {
+    padding: 6px 8px;
     min-width: 0;
-    flex-wrap: wrap;
+    overflow: hidden;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-status"] > * {
-    flex-shrink: 0;
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-content"] {
+    min-width: 0;
+    flex-wrap: nowrap;
+    align-items: center;
+    overflow: hidden;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-segment"] {
+    min-width: 0;
+    overflow: hidden;
     white-space: nowrap;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-segment"]:hover {
+    background: rgb(from var(--t1) r g b / 14%);
+    color: var(--t1);
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-segment"] .sf-text {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-input"] {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-ancestors"] {
+    max-height: 70vh;
+    overflow-y: auto;
+}
+
+.sf-layer[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-ancestors"] {
+    pointer-events: auto;
+    background: rgb(from var(--card) r g b / 100%);
+    color: var(--t1);
 }
 
 [data-surface="plugin.tern-yazi.companion"] [data-role="yazi.columns"] {
