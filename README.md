@@ -31,13 +31,26 @@ Add to your Yazi `init.lua`:
 require("tern"):setup()
 ```
 
-Run `yazi` inside Tern to open a native visual zoom overlay that preserves the owner shell and original split tree, with Yazi running in an invisible PTY. Outside Tern, `yazi` runs the original executable with your arguments.
+Run `yazi` inside Tern to show the native browser in the launching pane's original visual slot, without another visible split or automatic zoom. Tiled panes retain their leaf and dividers; floating panes retain the same background pane and corner without changing its split tree. The actual shell pane is parked, not replaced or restarted; Yazi runs in an invisible PTY. Outside Tern, `yazi` runs the original executable with your arguments.
 
-Each managed overlay stays pinned to its client across plugin reloads. `q` closes it, stops its backend, and returns to the original shell in its prior zoom state; Esc cancels local modals or dispatches native Yazi escape (closing only when offline). Closing the managed pane or launching shell pane also stops the backend. Managed sessions persist in Tern's daemon when their window closes.
+Each managed browser stays pinned to its client across plugin reloads. `q` stops its backend and restores the same original shell pane before closing; Esc cancels local modals or dispatches native Yazi escape (closing only when offline). Existing sibling splits, floating presentation and zoom are preserved by this normal return path. Raw CLI/pane close restores the same shell in its original tab using a surviving recorded anchor: a tiled shell goes beside it, while a floating shell returns over its original background pane and corner when that pane survives. If the background pane was removed, the float uses another surviving recorded tiled anchor; if none survive, the shell returns tiled in a dedicated recovery tab. Tern's public API cannot recover a removed tab ID or exact collapsed divider ratios. Closing the original shell pane stops that client's backend. Closing only the GUI window preserves the daemon-backed session.
 
-Use **Ctrl+Alt+Y** or **Yazi: Toggle Companion Panel** to focus the managed overlay, or to attach to an ordinary running Yazi with floating and docked panel layouts. Closing an attached panel leaves that Yazi running.
+Tern's **New Yazi block**, **Ctrl+Alt+Y**, and **Yazi: Toggle Companion Panel** create a usable native browser with its own real Yazi backend when no managed browser is selected. This standalone entry creates no helper shell pane and does not zoom. Toggle focuses an existing managed browser without changing its layout. Explicit client-ID block arguments remain attach-only; closing such an attached block leaves its independently launched Yazi running.
 
 The installer defaults to `~/.local`; `--prefix DIR` selects another location. Place its `bin` first on `PATH`. `sh install.sh --uninstall` removes the owned wrapper and helper while preserving the original Yazi; use the same `--prefix` for a custom installation.
+
+## Layout themes
+
+Choose a layout from Tern's command palette under **Yazi**:
+
+- **Yazi: Layout - Current** (default): the original 4:9:7 three-column layout, density and preview controls
+- **Yazi: Layout - Aurora Glass**: roomy rounded cards, 172 px parent and 264 px current columns
+- **Yazi: Layout - Editorial Paper**: flat separator panels, 150 px parent and 254 px current columns, quiet navigation and a reading-oriented preview
+- **Yazi: Layout - Amber Ledger**: compact ledger rows, 186 px parent and 268 px current columns, real row ordinals and selected-filename chips
+
+The remaining width belongs to the preview. The plugin-local `layout_theme` setting in Tern's plugin `kv.json` persists the choice across plugin reloads and new companion panes; all existing companion panes update without restarting Yazi. Values are `current`, `aurora`, `editorial`, and `amber`.
+
+Below 120 pane columns, the three demo layouts hide the parent visually and retain side-by-side current and preview columns. Current keeps its original layout at every width. Demo layouts omit the three preview action buttons; keyboard opening, path copying and terminal behavior remain unchanged. All themes use the same native lists, bounded independent scrollers, image containment, authoritative Yazi icons/metadata and persistent selection marks. They require no web embedding, new runtime, installed font or global appearance/keybinding changes.
 
 ## Features
 
@@ -59,7 +72,7 @@ The installer defaults to `~/.local`; `--prefix DIR` selects another location. P
 - `q` closes companion outside editing/confirmation; `Esc` follows native Yazi ordering (visual mode and find clear before a retained filter), cancels local input/trash and the corresponding native find/filter while editing, and closes only when offline
 - Images/SVG, Markdown, Mermaid and highlighted code previews
 - Configurable preview limits: **Yazi: Configure Preview Limits**
-- Floating and docked panels for ordinary attach
+- Native standalone block creation and explicit client-ID attach
 
 ## Pending
 

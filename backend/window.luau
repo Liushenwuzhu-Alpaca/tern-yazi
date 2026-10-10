@@ -1,6 +1,7 @@
 -- Window-local protocol state. Native presentation remains in frontend/window.
 local inbox = require('./inbox')
 local preview_policy = require('./preview_policy')
+local control_path = require('../shared/control_path')
 local state_dir = inbox.state_dir
 local read_json = inbox.read_json
 local lease_hint = inbox.lease_hint
@@ -14,6 +15,7 @@ local nonce_seq = 0
 local nonce_epoch = tern.fs.read("/proc/sys/kernel/random/uuid", 64):match("^[%w-]+")
 local shell_key = "shell_terminals"
 local native_key = "native_shell_requests"
+local slot_key = "managed_slots"
 local preview_config_stamp = nil
 local Window = {}
 
@@ -37,6 +39,67 @@ end
 local function native_store()
 	local value = tern.kv.get(native_key)
 	return type(value) == "table" and value or {}
+end
+local function slot_store()
+	local value = tern.kv.get(slot_key)
+	return type(value) == "table" and value or {}
+end
+function Window.managed_slot(record)
+	local saved = slot_store()[record.key]
+	if type(saved) == "table" and saved.owner_pane == record.owner_pane
+		and saved.pane == record.pane then return saved end
+	return nil
+end
+function Window.save_managed_slot(record, slot)
+	local store = slot_store()
+	store[record.key] = slot
+	tern.kv.set(slot_key, store)
+end
+function Window.forget_managed_slot(record)
+	local store = slot_store()
+	store[record.key] = nil
+	tern.kv.set(slot_key, store)
+end
+-- Plain layout records describe ownership; only the frontend applies them.
+local function slot_leaves(tree, out)
+	if tree.pane then table.insert(out, tree.pane)
+	else for _, child in ipairs(tree) do slot_leaves(child, out) end end
+end
+local function tiled_slot(tree, pane)
+	if tree.pane == pane then return { kind = "tiled", dir = "right", anchors = {} } end
+	if tree.pane then return nil end
+	for index, child in ipairs(tree) do
+		local found = tiled_slot(child, pane)
+		if found then
+			if #found.anchors == 0 then
+				found.dir = tree.split == "down" and (index == 1 and "up" or "down")
+					or (index == 1 and "left" or "right")
+			end
+			for other, sibling in ipairs(tree) do
+				if other ~= index then slot_leaves(sibling, found.anchors) end
+			end
+			return found
+		end
+	end
+	return nil
+end
+function Window.managed_slot_plan(record, layout)
+	for _, float in ipairs(layout.floats) do
+		if float.pane == record.owner_pane then
+			local anchors = {}
+			slot_leaves(layout.root, anchors)
+			return { kind = "floating", over = float.over, corner = float.corner, anchors = anchors }
+		end
+	end
+	return tiled_slot(layout.root, record.owner_pane)
+end
+function Window.managed_float_target(slot, layout)
+	if not layout then return nil end
+	if tiled_slot(layout.root, slot.over) then return slot.over end
+	for _, pane in ipairs(slot.anchors or {}) do
+		if tiled_slot(layout.root, pane) then return pane end
+	end
+	return nil
 end
 local function remove_request(path)
 	pcall(tern.fs.remove, path)
@@ -92,25 +155,31 @@ function Window.next_managed(scan)
 			if record then stop_session(record) end
 			continue
 		end
-		local adoption = false
 		local launch = false
 		if not record then
 			nonce_seq += 1
 			record = { cid = cid, token = health.token, key = key, owner_pane = health.owner_pane,
-				cwd = health.cwd, nonce = nonce_epoch .. "-" .. tostring(nonce_seq), started = tern.now() }
+				owner_kind = health.owner_kind, cwd = health.cwd,
+				nonce = nonce_epoch .. "-" .. tostring(nonce_seq), started = tern.now() }
 			managed[cid] = record
 			local token, hint = lease_hint(cid)
-			if token == record.token and hint and not panes[hint] then
+			local saved = slot_store()[key]
+			if health.owner_kind == "standalone" and health.native_pane == health.owner_pane
+				and panes[health.native_pane] and panes[health.native_pane].block == BLOCK_KIND then
+				record.pane = health.native_pane
+			elseif type(saved) == "table" and saved.owner_pane == health.owner_pane
+				and panes[saved.pane] and panes[saved.pane].block == BLOCK_KIND then
+				-- A saved token-bound pair is another hint, still nonce-verified.
+				record.pane = saved.pane
+			elseif token == record.token and hint and not panes[hint] then
 				-- Closing during reload must not resurrect the companion.
 				stop_session(record)
 				continue
 			elseif token == record.token and hint and panes[hint] and panes[hint].block == BLOCK_KIND then
 				record.pane = hint
-				record.adopting = true
-				adoption = true
 			else launch = true end
 		end
-		return { record = record, health = health, adopt = adoption, launch = launch }
+		return { record = record, health = health, launch = launch }
 	end
 	return nil
 end
@@ -122,7 +191,6 @@ end
 function Window.managed_launched(record, pane)
 	record.pane = pane
 	record.started = tern.now()
-	record.adopting = false
 end
 function Window.managed_active(candidate, query): boolean
 	local record, health = candidate.record, candidate.health
@@ -136,7 +204,6 @@ function Window.managed_lease(record)
 	if token == record.token and hint == record.pane and nonce == record.nonce then
 		record.verified = true
 	elseif tern.now() - record.started >= 3000 then
-		if record.adopting then return "relaunch" end
 		stop_session(record)
 		return "failed"
 	end
@@ -166,22 +233,60 @@ function Window.focused_managed(focused, query)
 	return nil
 end
 function Window.managed_closed(pane)
-	local restore = {}
+	local plans = {}
 	for cid, record in pairs(managed) do
 		if record.pane == pane or record.owner_pane == pane then
 			stop_session(record)
-			if record.pane == pane then table.insert(restore, record); managed[cid] = nil end
+			table.insert(plans, { record = record, owner_closed = record.owner_pane == pane,
+				slot = Window.managed_slot(record) })
+			managed[cid] = nil
 		end
 	end
-	return restore
+	-- An offline block may outlive health and a VM reload. Its persisted pair
+	-- still owns restoration, never a whichever-client-is-focused fallback.
+	local known = {}
+	for _, plan in ipairs(plans) do known[plan.record.key] = true end
+	for key, slot in pairs(slot_store()) do
+		if not known[key] and (slot.pane == pane or slot.owner_pane == pane) then
+			local cid, token = key:match("^(%d+)%-([%w-]+)$")
+			if cid then
+				local record = { cid = cid, token = token, key = key, pane = slot.pane, owner_pane = slot.owner_pane }
+				stop_session(record)
+				table.insert(plans, { record = record, slot = slot, owner_closed = slot.owner_pane == pane })
+			end
+		end
+	end
+	return plans
+end
+function Window.managed_close_request(req, query)
+	local kind, cid, token, pane = control_path.parse(req.path, state_dir())
+	if kind ~= "return" then return nil end
+	if req.pane ~= nil and req.pane ~= pane then return { handled = true } end
+	local record = cid and managed[cid]
+	if cid and (not record or record.token ~= token or record.pane ~= pane) then
+		local key = cid .. "-" .. token
+		local slot = slot_store()[key]
+		if type(slot) == "table" and slot.pane == pane then
+			record = { cid = cid, token = token, key = key, pane = pane, owner_pane = slot.owner_pane }
+		end
+	end
+	local source = query.pane(pane)
+	if not source or source.block ~= BLOCK_KIND then return { handled = true } end
+	if not record or record.token ~= token or record.pane ~= pane then
+		return { handled = true, pane = pane }
+	end
+	return { handled = true, record = record, slot = Window.managed_slot(record) }
 end
 function Window.managed_request(req, query)
-	local prefix = state_dir() .. "/"
-	if req.path:sub(1, #prefix) ~= prefix then return nil end
-	local cid = req.path:sub(#prefix + 1):match("^managed%-(%d+)%.json$")
-	if not cid then return nil end
+	local kind, cid = control_path.parse(req.path, state_dir())
+	if kind ~= "managed" then return nil end
 	local health = read_json(req.path)
-	local live = health and health.client_id == cid and type(health.owner_pane) == "number"
+	if health and type(health.owner_pane) == "number" then
+		if req.pane ~= nil and req.pane ~= health.owner_pane then return { handled = true, foreign = true } end
+		if not query.pane(health.owner_pane) then return { handled = true, foreign = true } end
+	end
+	local live = health and health.client_id == cid and type(health.token) == "string"
+		and health.token:match("^[%w-]+$") and type(health.owner_pane) == "number"
 		and query.pane(health.owner_pane)
 	return { handled = true, wake = live and true or false }
 end
@@ -210,11 +315,13 @@ function Window.initialize_preview_limits()
 end
 
 function Window.shell_request(req, query)
-	local prefix = state_dir() .. "/shell-"
-	if req.path:sub(1, #prefix) ~= prefix then return nil end
-	local id = req.path:sub(#prefix + 1):match("^([%w-]+)%.json$")
-	if not id then return nil end
+	local kind, id = control_path.parse(req.path, state_dir())
+	if kind ~= "shell" then return nil end
 	local body = read_json(req.path)
+	if body and req.pane ~= nil and req.pane ~= body.pane then return { handled = true } end
+	-- Host effects reach every window; only the window with the source may
+	-- consume the shared request or advance its acknowledgement.
+	if body and type(body.pane) == "number" and not query.pane(body.pane) then return { handled = true } end
 	local pane = body and type(body.pane) == "number" and query.pane(body.pane)
 	local valid = body and body.version == 1 and body.id == id and pane and pane.block == BLOCK_KIND
 		and type(body.cid) == "string" and body.cid:match("^%d+$")
@@ -224,7 +331,8 @@ function Window.shell_request(req, query)
 	if valid and body.token then
 		local health = read_json(state_dir() .. "/managed-" .. body.cid .. ".json")
 		local token, hint = lease_hint(body.cid)
-		valid = health and health.token == body.token and health.owner_pane == body.owner_pane
+		valid = health and health.client_id == body.cid and health.token == body.token
+			and health.owner_pane == body.owner_pane and query.pane(body.owner_pane)
 			and token == body.token and hint == body.pane
 	end
 	if not valid then
@@ -268,11 +376,10 @@ end
 
 -- One acknowledged effect owns the frozen, case-distinct selection.
 function Window.files_request(req, query)
-	local prefix = state_dir() .. "/files-"
-	if req.path:sub(1, #prefix) ~= prefix then return nil end
-	local id = req.path:sub(#prefix + 1):match("^([%w-]+)%.json$")
-	if not id then return nil end
+	local kind, id = control_path.parse(req.path, state_dir())
+	if kind ~= "files" then return nil end
 	local body = read_json(req.path)
+	if body and req.pane ~= nil and req.pane ~= body.pane then return { handled = true } end
 	local pane = body and type(body.pane) == "number" and query.pane(body.pane)
 	-- Only the owning window consumes effects delivered to multiple windows.
 	if not pane then return { handled = true } end
@@ -348,11 +455,10 @@ end
 -- Persistent claims survive reload. Closed terminals remain tombstones until
 -- the shim revokes their request; no route is permission to execute twice.
 function Window.native_request(req, query)
-	local prefix = state_dir() .. "/native-shell-"
-	if req.path:sub(1, #prefix) ~= prefix then return nil end
-	local id = req.path:sub(#prefix + 1):match("^([%w-]+)%.json$")
-	if not id then return nil end
+	local kind, id = control_path.parse(req.path, state_dir())
+	if kind ~= "native-shell" then return nil end
 	local body = read_json(req.path)
+	if body and req.pane ~= nil and req.pane ~= body.pane then return { handled = true } end
 	local valid = req.origin == "link" and body and body.version == 1 and body.id == id
 		and type(body.cid) == "string" and body.cid:match("^%d+$")
 		and type(body.token) == "string" and body.token:match("^[%w-]+$")

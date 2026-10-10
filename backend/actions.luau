@@ -70,6 +70,10 @@ local pump
 
 local function request(state: any, yz: any, body: any, done: any?)
 	local cid = safe_cid(yz and yz.client_id)
+	if body.op ~= "ping" and state.snapshot_error then
+		notify(state, "error", "Yazi snapshot unavailable", state.snapshot_error)
+		return
+	end
 	if state.closing or (body.op ~= "ping" and not refresh_live(state)) then
 		notify(state, "error", "Yazi is offline", "Reconnect before using file actions")
 		return
@@ -96,7 +100,7 @@ pump = function(state: any)
 	if state.sending or not state.requests or #state.requests == 0 then return end
 	state.sending = true
 	local job = state.requests[1]
-	if state.closing or job.cid ~= state.cid or (job.body.op ~= "ping" and not refresh_live(state)) then
+	if state.closing or job.cid ~= state.cid or (job.body.op ~= "ping" and (state.snapshot_error or not refresh_live(state))) then
 		state.sending = false
 		state.requests = {}
 		return

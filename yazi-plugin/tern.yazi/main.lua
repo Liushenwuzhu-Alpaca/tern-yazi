@@ -35,61 +35,112 @@ local function selected_urls()
 	return urls
 end
 
+-- One hover-owned calculation only; never accumulate a path-indexed cache.
+local directory_usage = { token = 0 }
+local directory_size
+
 local function read_hovered()
 	local h = cx.active.current.hovered
 	if not h then
+		pcall(directory_size, nil)
 		return { url = nil, selected = selected_count() }
 	end
 	local cha = h.cha
 	local mtime = cha and tonumber(cha.mtime)
+	-- Public Cha:perm() returns Unix permission text, or nil when unavailable.
+	local ok_perm, permissions = pcall(function() return cha and not cha.is_dummy and cha:perm() or nil end)
+	-- Cha.len on a directory is its inode, not the size of its contents.
+	local ok_size, usage = pcall(directory_size, h)
+	local size
+	if cha and not cha.is_dummy then
+		if cha.is_dir then size = ok_size and usage or nil
+		else size = cha.len end
+	end
 	return {
 		url = tostring(h.url),
 		dir = cha and cha.is_dir or false,
-		size = cha and cha.len or nil,
+		size = size,
 		mtime = mtime and math.floor(mtime) or nil,
+		permissions = ok_perm and type(permissions) == "string" and permissions ~= "" and permissions or nil,
 		selected = selected_count(),
 	}
 end
 
--- Reuse Yazi's sorted/filtered entries and their already-resolved attributes.
-local function read_entries(folder, limit)
-	local names, dirs = {}, {}
+local icon_error_reported = false
+local function read_icon_text(file, base)
+	local hovered = file.is_hovered
+	if base then hovered = false end
+	local icon = th.icon:match(file, { hovered = hovered })
+	return icon and icon.text or false
+end
+
+-- Reuse Yazi's sorted/filtered entries and theme-resolved icons from live Files.
+local function read_entries(folder, limit, base)
+	local names, dirs, icons = {}, {}, {}
 	for i = 1, math.min(limit or #folder.files, #folder.files) do
 		local file = folder.files[i]
 		local name = file.url.name or tostring(file.url):match("([^/]+)$") or tostring(file.url)
 		names[i] = name
 		dirs[name] = file.cha.is_dir
+		local ok_icon, icon = pcall(read_icon_text, file, base)
+		if ok_icon then
+			-- False means a successful nil result; empty text stays authoritative.
+			icons[name] = icon
+		elseif not icon_error_reported then
+			icon_error_reported = true
+			broadcast(KIND_STATE, { error = tostring(icon) })
+		end
+		-- An API error leaves this entry's icon metadata unknown, not disabled.
 	end
-	return names, dirs
+	return names, dirs, icons
 end
 
-local function read_folder()
+-- A partial or failed folder listing is not an authoritative empty directory.
+local function read_entry_count(folder)
+	local ok, count = pcall(function()
+		local loaded, err = folder.stage()
+		if loaded == true and err == nil then return #folder.files end
+	end)
+	return ok and count or nil
+end
+
+local function read_folder(base)
 	local cur = cx.active.current
-	local names, dirs = read_entries(cur)
-	return { url = tostring(cur.cwd), files = names, file_dirs = dirs, selected = selected_count() }
+	local names, dirs, icons = read_entries(cur, nil, base)
+	return { url = tostring(cur.cwd), files = names, file_dirs = dirs, file_icons = icons, file_count = read_entry_count(cur), selected = selected_count() }
 end
 
-local function read_parent()
+local function read_parent(base)
 	local p = cx.active.parent
 	if not p or not p.cwd then return nil end
-	local names, dirs = read_entries(p, 30)
-	return { cwd = tostring(p.cwd), files = names, file_dirs = dirs }
+	local names, dirs, icons = read_entries(p, 30, base)
+	return { cwd = tostring(p.cwd), files = names, file_dirs = dirs, file_icons = icons, file_count = read_entry_count(p) }
 end
 
-local function read_preview(hovered)
+local function read_preview(hovered, base)
 	local p = cx.active.preview.folder
 	if not p or not hovered.dir or tostring(p.cwd) ~= hovered.url then return nil end
-	local names, dirs = read_entries(p, 30)
-	return { cwd = tostring(p.cwd), files = names, file_dirs = dirs }
+	local names, dirs, icons = read_entries(p, 30, base)
+	return { cwd = tostring(p.cwd), files = names, file_dirs = dirs, file_icons = icons, file_count = read_entry_count(p) }
+end
+
+local function read_icon_overrides(folder)
+	local file = folder and folder.hovered
+	if not file then return {} end
+	local ok_icon, icon = pcall(read_icon_text, file)
+	if not ok_icon then return {} end
+	local name = file.url.name or tostring(file.url):match("([^/]+)$") or tostring(file.url)
+	return { [name] = icon }
 end
 
 
--- yazi fires hover on every redraw, not just on moves; dedupe at the source.
+-- Hover metadata may change without cursor movement; dedupe the complete payload.
 local last_hover = nil
 local function publish_hover()
 	local payload = read_hovered()
-	if payload.url ~= last_hover then
-		last_hover = payload.url
+	local key = ya.json_encode(payload)
+	if key ~= last_hover then
+		last_hover = key
 		broadcast(KIND_HOVER, payload)
 	end
 end
@@ -152,6 +203,9 @@ end
 -- State inbox writer for native Tern companion plugin (Option A).
 local state_seq = 0
 local last_dump_key = nil
+local listing_epoch = nil
+local listing_revision = 0
+local last_listing_key = nil
 
 local function state_dir()
 	local base = os.getenv("XDG_RUNTIME_DIR")
@@ -169,24 +223,42 @@ local function get_client_id()
 	return "default"
 end
 
+local function write_inbox(sdir, cid, kind, encoded)
+	local tmp_file = string.format("%s/%s-%s.tmp", sdir, kind, cid)
+	local dest_file = string.format("%s/%s-%s.json", sdir, kind, cid)
+	local f = io.open(tmp_file, "w")
+	if not f then return false end
+	local written = f:write(encoded)
+	local closed = f:close()
+	return written ~= nil and closed == true and os.rename(tmp_file, dest_file) ~= nil
+end
+
+-- Append a small envelope without serializing the large listing a second time.
+local function with_envelope(encoded, envelope)
+	return encoded:sub(1, -2) .. "," .. ya.json_encode(envelope):sub(2)
+end
+
 local function dump_state()
 	local active = cx.active
 	if not active or not active.current then
 		return
 	end
 
-	local folder = read_folder()
+	local folder = read_folder(true)
 	local hovered = read_hovered()
-	local parent = read_parent()
-	local preview = read_preview(hovered)
+	local parent = read_parent(true)
+	local preview = read_preview(hovered, true)
 	local ok_p, pulse_data = pcall(read_pulse)
 	local tasks_data = ok_p and pulse_data.tasks or { total = 0, succ = 0, fail = 0, found = 0, processed = 0 }
 	local selected = ok_p and pulse_data.selected or selected_count()
 	local selected_paths = selected_urls()
 	local marked = {}
-	for i = 1, #active.current.files do
-		local file = active.current.files[i]
-		if file:is_marked() ~= 0 then marked[#marked + 1] = tostring(file.url) end
+	-- File:is_marked() is always zero in normal mode; avoid a redundant full walk.
+	if not active.mode.is_normal then
+		for i = 1, #active.current.files do
+			local file = active.current.files[i]
+			if file:is_marked() ~= 0 then marked[#marked + 1] = tostring(file.url) end
+		end
 	end
 	local mode = active.mode.is_normal and "normal" or (active.mode.is_select and "select" or "unset")
 	local ok_filter, filter = pcall(function()
@@ -200,68 +272,135 @@ local function dump_state()
 	end)
 	if not ok_finder then finder = nil end
 
-	local key = table.concat({
-		folder.url,
-		ya.json_encode(folder.files),
-		ya.json_encode(folder.file_dirs),
-		ya.json_encode(parent),
-		ya.json_encode(preview),
-		ya.json_encode(hovered),
-		hovered.url or "",
-		selected,
-		tasks_data.total,
-		tasks_data.succ,
-		tasks_data.fail,
-		tasks_data.found,
-		tasks_data.processed,
-		ya.json_encode(selected_paths),
-		mode,
-		ya.json_encode(marked),
-		ok_filter and tostring(filter) or "unknown-filter",
-		ok_finder and tostring(finder) or "unknown-finder",
-	}, ";")
-
-	if key == last_dump_key then
-		return
-	end
-	last_dump_key = key
-	state_seq = state_seq + 1
-	local sdir = state_dir()
-	local cid = tostring(get_client_id())
-	local cur_time = (ya.time and ya.time()) or os.time()
-	local payload = {
-		ts = cur_time,
-		seq = state_seq,
-		client_id = cid,
-		parent = parent,
-		preview = preview,
+	local listing = {
 		cwd = folder.url,
 		files = folder.files,
 		file_dirs = folder.file_dirs,
+		file_icons = folder.file_icons,
+		file_count = folder.file_count,
+		parent = parent,
+		preview = preview,
+		selected_urls = selected_paths,
+		marked_urls = marked,
+	}
+	local ok_listing, listing_key = pcall(ya.json_encode, listing)
+	if not ok_listing or not listing_key then return end
+	local sdir, cid = state_dir(), tostring(get_client_id())
+	listing_epoch = listing_epoch or tostring(ya.time()) .. ":" .. tostring({})
+	if listing_key ~= last_listing_key then
+		local revision = listing_revision + 1
+		local encoded = with_envelope(listing_key, { epoch = listing_epoch, revision = revision })
+		-- The consumer accepts only matching epoch/revision pairs, never mixed files.
+		if not write_inbox(sdir, cid, "listing", encoded) then return end
+		last_listing_key, listing_revision = listing_key, revision
+	end
+	local payload = {
+		listing_epoch = listing_epoch,
+		listing_revision = listing_revision,
+		cursor = active.current.cursor + 1,
+		icon_overrides = read_icon_overrides(active.current),
+		parent_icon_overrides = parent and read_icon_overrides(active.parent) or nil,
+		preview_icon_overrides = preview and read_icon_overrides(active.preview.folder) or nil,
 		filter = filter,
 		finder = finder,
 		selected = selected,
-		selected_urls = selected_paths,
 		mode = mode,
-		marked_urls = marked,
 		hovered = hovered.url and hovered or nil,
 		tasks = tasks_data,
 	}
-
-	local ok_enc, encoded = pcall(ya.json_encode, payload)
-	if not ok_enc or not encoded then
-		return
-	end
-
-	local tmp_file = string.format("%s/state-%s.tmp", sdir, cid)
-	local dest_file = string.format("%s/state-%s.json", sdir, cid)
-	local f = io.open(tmp_file, "w")
-	if f then
-		f:write(encoded)
-		f:close()
-		os.rename(tmp_file, dest_file)
+	local ok_encoded, key = pcall(ya.json_encode, payload)
+	if not ok_encoded or not key or key == last_dump_key then return end
+	local seq = state_seq + 1
+	local encoded = with_envelope(key, { ts = ya.time(), seq = seq, client_id = cid })
+	if write_inbox(sdir, cid, "state", encoded) then
+		last_dump_key, state_seq = key, seq
 	end
 end
+
+local function reset_directory_usage()
+	directory_usage.token = directory_usage.token + 1
+	if directory_usage.handle then directory_usage.handle:abort() end
+	directory_usage.handle = nil
+	directory_usage.url, directory_usage.bytes, directory_usage.attempted = nil, nil, false
+end
+
+local function owns_directory_usage(url, token)
+	if directory_usage.url ~= url or directory_usage.token ~= token then return false end
+	local h = cx.active.current.hovered
+	local cha = h and h.cha
+	return h ~= nil and tostring(h.url) == url and cha ~= nil and cha.is_dir
+		and not cha.is_dummy and not cha.is_link
+		and cha.mtime == directory_usage.mtime and cha.btime == directory_usage.btime
+		and cha.len == directory_usage.len
+end
+
+local usage_current = ya.sync(function(_, url, token)
+	local ok, current = pcall(owns_directory_usage, url, token)
+	return ok and current or false
+end)
+
+local usage_complete = ya.sync(function(_, url, token, bytes)
+	pcall(function()
+		if not owns_directory_usage(url, token) then return end
+		directory_usage.handle, directory_usage.bytes = nil, bytes
+		-- Completion is metadata, not a cursor move; publish even without a redraw.
+		publish_hover()
+		dump_state()
+	end)
+end)
+
+directory_size = function(h)
+	local cha = h and h.cha
+	-- Yazi's calculator does not follow a root symlink; never export its inode.
+	if not cha or not cha.is_dir or cha.is_dummy or cha.is_link then
+		if directory_usage.url then reset_directory_usage() end
+		return nil
+	end
+	local url = tostring(h.url)
+	if directory_usage.url ~= url or directory_usage.mtime ~= cha.mtime
+		or directory_usage.btime ~= cha.btime or directory_usage.len ~= cha.len then
+		reset_directory_usage()
+		directory_usage.url = url
+		directory_usage.mtime, directory_usage.btime, directory_usage.len = cha.mtime, cha.btime, cha.len
+	end
+	-- File:size() reads Yazi's directory cache; it never returns Cha.len for dirs.
+	local ok_cached, cached = pcall(function() return h:size() end)
+	if ok_cached and type(cached) == "number" and cached >= 0 then
+		if directory_usage.handle then
+			directory_usage.token = directory_usage.token + 1
+			directory_usage.handle:abort()
+			directory_usage.handle = nil
+		end
+		directory_usage.bytes, directory_usage.attempted = cached, true
+		return cached
+	end
+	if not directory_usage.attempted then
+		directory_usage.attempted = true
+		local token = directory_usage.token
+		directory_usage.handle = ya.async(function()
+			local ok, bytes = pcall(function()
+				if not usage_current(url, token) then return nil end
+				-- Public 26.9.1 fs.calc_size uses Yazi's async, chunked Rust walker.
+				local calculator, err = fs.calc_size(Url(url))
+				if not calculator or err then return nil end
+				local root = calculator.cha
+				if not root or not root.is_dir or root.is_dummy or root.is_link then return nil end
+				local total = 0
+				while true do
+					if not usage_current(url, token) then return nil end
+					local chunk, read_err = calculator:recv()
+					if read_err then return nil end
+					if chunk == nil then return total end
+					if type(chunk) ~= "number" or chunk < 0 then return nil end
+					total = total + chunk
+				end
+			end)
+			usage_complete(url, token, ok and bytes or nil)
+		end)
+	end
+	return directory_usage.bytes
+end
+
 
 -- A DDS send is not an actor acknowledgement. Every request has its own reply.
 local function reply(req, value)

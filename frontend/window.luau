@@ -1,10 +1,8 @@
 -- Native window presentation and registration. Protocol decisions stay backend-owned.
 local backend = require('../backend/window')
+local theme = require('./theme')
 local BLOCK_KIND = "tern-yazi.companion"
-local DEFAULT_CORNER = "tr"
 local companion = { pane = nil }
-local overlay_key = "managed_overlays"
-local overlay_restore = {}
 local Window = {}
 
 local function send_event(cx, report)
@@ -12,10 +10,6 @@ local function send_event(cx, report)
 end
 local function poll_pane(cx, pane)
 	cx.session:event(pane, { ev = "action", id = "main.poll", act = "poll" })
-end
-local function overlay_store(): any
-	local value = tern.kv.get(overlay_key)
-	return type(value) == "table" and value or {}
 end
 local function pane_zoomed(cx, pane): boolean
 	local tab = cx.session:tab_of(pane)
@@ -37,66 +31,141 @@ local function zoom_pane(cx, pane, zoomed)
 	cx.layout:focus(pane)
 	if layout.zoomed ~= zoomed then cx:command("zoom") end
 end
-local function remember_overlay(cx, record)
-	local store = overlay_store()
-	local saved = store[record.key]
-	if type(saved) == "table" and saved.owner_pane == record.owner_pane then
-		overlay_restore[record.key] = saved.was_zoomed == true
-	else
-		overlay_restore[record.key] = pane_zoomed(cx, record.owner_pane)
-		store[record.key] = { owner_pane = record.owner_pane, was_zoomed = overlay_restore[record.key] }
-		tern.kv.set(overlay_key, store)
-	end
-end
-local function restore_overlay(cx, record)
+local function restore_slot(cx, record, slot)
+	if not slot or record.owner_pane == record.pane then return true end
 	local owner = cx.session:pane(record.owner_pane)
-	if owner then
-		local focused = cx.session:focused()
-		-- Do not steal focus from another client or a different tab.
-		if focused == record.pane or focused == record.owner_pane then
-			zoom_pane(cx, record.owner_pane, overlay_restore[record.key] == true)
+	if not owner then return true end
+	local focused = cx.session:focused()
+	local native = cx.session:pane(record.pane)
+	local in_slot = native and cx.session:tab_of(record.pane) == slot.tab
+	local zoomed = slot.was_zoomed
+	if in_slot then zoomed = pane_zoomed(cx, record.pane) end
+	local target
+	if slot.kind == "floating" then
+		-- Float/unpark targets must be tiled leaves, not the focused float.
+		target = backend.managed_float_target(slot, cx.session:layout(slot.tab))
+	else
+		target = in_slot and record.pane or nil
+		if not target then
+			for _, pane in ipairs(slot.anchors or {}) do
+				if cx.session:tab_of(pane) == slot.tab then target = pane; break end
+			end
 		end
 	end
-	local store = overlay_store()
-	overlay_restore[record.key] = nil
-	store[record.key] = nil
-	tern.kv.set(overlay_key, store)
+	local ok, err = true, nil
+	if owner.parked then
+		if target then
+			-- unpark is current-tab-relative. Select only this recorded source tab.
+			cx.layout:focus(target)
+			ok, err = cx.layout:unpark(record.owner_pane, { focus = false })
+			if ok and slot.kind == "floating" then
+				ok, err = cx.layout:float(record.owner_pane, target, slot.corner, { focus = false })
+				if not ok then cx.layout:park(record.owner_pane) end
+			elseif ok and not in_slot then
+				ok = cx.layout:move(record.owner_pane, target, slot.dir or "right", { focus = false })
+			end
+		else
+			-- Raw close may already have destroyed the last-pane tab. Restore in a
+			-- dedicated tab, never beside an unrelated currently focused client.
+			local tab
+			tab, err = cx.layout:move_to_new_tab(record.owner_pane, slot.session, { focus = false })
+			ok = tab ~= nil
+			if ok then
+				cx.layout:name_tab(tab, slot.name)
+				cx.layout:color_tab(tab, slot.color)
+				cx.layout:order_tab(tab, slot.position or 1)
+			end
+		end
+	end
+	if not ok then
+		tern.log.warn("Yazi shell restoration failed", tostring(err or "layout refused restoration"))
+		if focused and cx.session:pane(focused) then cx.layout:focus(focused) end
+		return false
+	end
+	if native then
+		-- Collapse only this temporary pair, or remove only this native float.
+		-- The actual shell now owns the original presentation again.
+		ok, err = cx.layout:park(record.pane)
+		if not ok then
+			tern.log.warn("Yazi return failed", tostring(err))
+			cx.layout:park(record.owner_pane)
+			if focused and cx.session:pane(focused) then cx.layout:focus(focused) end
+			return false
+		end
+	end
+	zoom_pane(cx, record.owner_pane, zoomed == true)
+	if focused and focused ~= record.pane and focused ~= record.owner_pane
+		and cx.session:pane(focused) then cx.layout:focus(focused) end
+	backend.forget_managed_slot(record)
+	return true
 end
 local function companion_alive(cx): boolean
 	return companion.pane ~= nil and cx.session:pane(companion.pane) ~= nil
 end
 
--- Ordinary Yazi remains attach-only, never inferred live from a saved snapshot.
+-- No-argument creation owns its backend; explicit client arguments attach only.
 local function open_companion(cx)
 	if companion_alive(cx) then return end
 	local pane = cx:new_block(BLOCK_KIND, nil, "beside", { focus = true })
 	if not pane then tern.log.warn("new_block failed", BLOCK_KIND); return end
 	companion.pane = pane
-	local ok, err = cx.layout:float(pane, nil, DEFAULT_CORNER)
-	if not ok then tern.log.warn("float failed", err) end
 	poll_pane(cx, pane)
 end
 local function toggle(cx)
 	local focused = cx.session:focused()
 	local pane = companion_alive(cx) and companion.pane or nil
 	local record = backend.focused_managed(focused, query(cx))
-	if record then zoom_pane(cx, record.pane, true); return end
+	if record then cx.layout:focus(record.pane); return end
+	-- The first toggle after reload can precede registry discovery.
+	local info = focused and cx.session:pane(focused)
+	if info and info.block == BLOCK_KIND then return end
 	if not pane then open_companion(cx); return end
-	local info = cx.session:pane(pane)
-	if info and info.floating then cx.layout:dock(pane)
-	else
-		local ok, err = cx.layout:float(pane, nil, DEFAULT_CORNER)
-		if not ok then tern.log.warn("float failed", err) end
-	end
+	cx.layout:focus(pane)
 end
 local function launch_managed(cx, record)
+	if record.owner_kind == "standalone" then return end
 	local plan = backend.managed_launch_plan(record)
-	-- new_block is relative to focus; explicitly select the launching shell.
-	cx.layout:focus(plan.owner_pane)
-	remember_overlay(cx, record)
+	local focused = cx.session:focused()
+	local tab = cx.session:tab_of(plan.owner_pane)
+	local layout = tab and cx.session:layout(tab)
+	if not layout then return end
+	local slot = backend.managed_slot_plan(record, layout)
+	if not slot then
+		cx:toast("error", "Cannot open native Yazi", "The launching pane has no restorable visual slot")
+		return
+	end
+	slot.tab, slot.was_zoomed, slot.owner_pane = tab, layout.zoomed, plan.owner_pane
+	for _, info in ipairs(cx.session:tabs()) do
+		if info.id == tab then
+			slot.session, slot.name, slot.color, slot.position = info.session, info.name, info.color, info.position
+			break
+		end
+	end
+	-- Do not depend on new_block beside a float: use its actual tiled owner.
+	cx.layout:focus(slot.kind == "floating" and slot.over or plan.owner_pane)
 	local pane = cx:new_block(BLOCK_KIND, plan.args, "beside", { focus = true })
+	if not pane then
+		if focused then cx.layout:focus(focused) end
+		return
+	end
 	backend.managed_launched(record, pane)
-	if pane then zoom_pane(cx, pane, true) end
+	slot.pane = pane
+	backend.save_managed_slot(record, slot)
+	local ok, err = cx.layout:park(plan.owner_pane)
+	if not ok then
+		-- A failed park is not a usable in-place launch. Keep the original shell.
+		cx.layout:close(pane)
+		cx:toast("error", "Cannot open native Yazi", tostring(err or "Cannot preserve the launching shell"))
+	elseif slot.kind == "floating" then
+		ok, err = cx.layout:float(pane, slot.over, slot.corner, { focus = true })
+		if not ok then
+			-- Restore the actual shell before abandoning a failed presentation.
+			restore_slot(cx, record, slot)
+			cx.layout:close(pane)
+			cx:toast("error", "Cannot open native Yazi", tostring(err or "Cannot preserve the floating slot"))
+		else zoom_pane(cx, pane, slot.was_zoomed == true) end
+	else zoom_pane(cx, pane, slot.was_zoomed == true) end
+	if focused and focused ~= plan.owner_pane and cx.session:pane(focused) then cx.layout:focus(focused) end
 end
 local function poke(cx)
 	local panes = {}
@@ -117,16 +186,17 @@ local function poke(cx)
 		local candidate = backend.next_managed(scan)
 		if not candidate then break end
 		local record = candidate.record
-		if candidate.adopt then remember_overlay(cx, record)
-		elseif candidate.launch then launch_managed(cx, record) end
+		if candidate.launch then launch_managed(cx, record) end
 		if not backend.managed_active(candidate, metadata) then continue end
 		if not record.pane then launch_managed(cx, record) end
 		if not record.pane then continue end
+		local slot = backend.managed_slot(record)
+		if slot and cx.session:tab_of(record.pane) then
+			local zoomed = pane_zoomed(cx, record.pane)
+			if slot.was_zoomed ~= zoomed then slot.was_zoomed = zoomed; backend.save_managed_slot(record, slot) end
+		end
 		local lease = backend.managed_lease(record)
-		if lease == "relaunch" then
-			-- A recycled hint gets one newly pinned block, never the first companion.
-			launch_managed(cx, record)
-		elseif lease == "failed" then
+		if lease == "failed" then
 			cx:toast("error", "Cannot attach native Yazi", "The block did not acknowledge its client/token")
 			continue
 		end
@@ -150,22 +220,46 @@ local function arm_timer()
 	end)
 end
 
-function Window.register()
+function Window.register(control_route)
+	local function return_managed(result, cx)
+		if not result then return nil end
+		if result.record then
+			local ok = restore_slot(cx, result.record, result.slot)
+			cx.session:event(result.record.pane, { ev = "action", id = "main.poll", act = "managed_return", ok = ok })
+		end
+		if not result.record and result.pane and cx.session:pane(result.pane) then
+			cx.session:event(result.pane, { ev = "action", id = "main.poll", act = "managed_return", ok = false })
+		end
+		return { handled = true }
+	end
+	-- Host q/offline-Esc sends a token-bound plain route before BlockCx.exit.
+	control_route(function(req, cx)
+		return return_managed(backend.managed_close_request(req, query(cx)), cx)
+	end)
 	-- Launcher file-open wakes idle windows without depending on the timer.
-	tern.route.open(function(req, cx)
+	control_route(function(req, cx)
 		local result = backend.managed_request(req, query(cx))
 		if not result then return nil end
 		if result.wake then poke(cx)
-		else cx:toast("error", "Cannot open managed Yazi", "The launching pane or managed session is missing") end
+		elseif not result.foreign then
+			cx:toast("error", "Cannot open managed Yazi", "The launching pane or managed session is missing")
+		end
 		return { handled = true }
 	end)
 	tern.on("window_start", function(cx) poke(cx) end)
 	tern.on("pane_closed", function(ev, cx)
 		if companion.pane == ev.pane then companion.pane = nil end
-		for _, record in ipairs(backend.managed_closed(ev.pane)) do restore_overlay(cx, record) end
+		for _, plan in ipairs(backend.managed_closed(ev.pane)) do
+			if plan.owner_closed then
+				backend.forget_managed_slot(plan.record)
+				if plan.record.pane ~= ev.pane and cx.session:pane(plan.record.pane) then
+					cx.layout:close(plan.record.pane)
+				end
+			else restore_slot(cx, plan.record, plan.slot) end
+		end
 	end)
 
-	tern.route.open(function(req, cx)
+	control_route(function(req, cx)
 		local result = backend.shell_request(req, query(cx))
 		if not result then return nil end
 		if result.unavailable then
@@ -188,7 +282,7 @@ function Window.register()
 		return { handled = true }
 	end)
 
-	tern.route.open(function(req, cx)
+	control_route(function(req, cx)
 		local result = backend.files_request(req, query(cx))
 		if not result then return nil end
 		if result.message then cx:toast("error", "Cannot open selected files", result.message) end
@@ -207,7 +301,7 @@ function Window.register()
 		return { handled = true }
 	end)
 
-	tern.route.open(function(req, cx)
+	control_route(function(req, cx)
 		local result = backend.native_request(req, query(cx))
 		if not result then return nil end
 		local launch = result.launch
@@ -237,6 +331,23 @@ function Window.register()
 		end
 	end)
 	arm_timer()
+
+	for _, option in ipairs(theme.options) do
+		local id = option.id
+		tern.command({
+			id = "theme_" .. id,
+			title = "Yazi: Layout - " .. option.title,
+			group = "Yazi",
+			run = function(cx)
+				if not theme.set(id) then return end
+				for _, pane in ipairs(cx.session:panes()) do
+					if pane.block == BLOCK_KIND then
+						cx.session:event(pane.pane, { ev = "action", id = "main.theme", act = "set_theme=" .. id })
+					end
+				end
+			end,
+		})
+	end
 
 	tern.command({ id = "toggle", title = "Yazi: Toggle Companion Panel", group = "Yazi", run = toggle })
 	tern.bind("ctrl+alt+y", toggle)

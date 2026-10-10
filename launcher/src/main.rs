@@ -76,6 +76,55 @@ fn private_dir(path: &Path) -> io::Result<OwnedFd> {
     Ok(current)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Owner {
+    Shell(u64),
+    Standalone(u64),
+}
+
+impl Owner {
+    fn pane(self) -> u64 {
+        match self {
+            Self::Shell(pane) | Self::Standalone(pane) => pane,
+        }
+    }
+}
+
+struct LaunchArgs {
+    real: OsString,
+    args: Vec<OsString>,
+    standalone_pane: Option<u64>,
+}
+
+fn launch_args(mut input: impl Iterator<Item = OsString>) -> io::Result<LaunchArgs> {
+    let mut option = input.next();
+    let standalone_pane = if option.as_deref() == Some(OsStr::new("--standalone-pane")) {
+        let pane = input
+            .next()
+            .and_then(|value| value.to_str().and_then(|value| value.parse::<u64>().ok()))
+            .filter(|pane| *pane > 0)
+            .ok_or_else(|| invalid("expected a positive native pane ID after --standalone-pane"))?;
+        option = input.next();
+        Some(pane)
+    } else {
+        None
+    };
+    if option.as_deref() != Some(OsStr::new("--real")) {
+        return Err(invalid("expected --real ORIGINAL -- [Yazi arguments]"));
+    }
+    let real = input
+        .next()
+        .ok_or_else(|| invalid("missing original Yazi binary"))?;
+    if input.next().as_deref() != Some(OsStr::new("--")) {
+        return Err(invalid("expected -- before Yazi arguments"));
+    }
+    Ok(LaunchArgs {
+        real,
+        args: input.collect(),
+        standalone_pane,
+    })
+}
+
 struct Inbox {
     dir: OwnedFd,
     cid: String,
@@ -146,6 +195,8 @@ impl Inbox {
             let names = [
                 format!("state-{cid}.json"),
                 format!("state-{cid}.tmp"),
+                format!("listing-{cid}.json"),
+                format!("listing-{cid}.tmp"),
                 format!("managed-{cid}.json"),
                 format!("managed-{cid}.lease"),
                 format!("managed-{cid}.stop"),
@@ -273,10 +324,31 @@ impl Inbox {
         }
     }
 
-    fn heartbeat(&self, pane: u64, cwd: &Path, seq: u64) -> io::Result<()> {
+    fn stop_requested(&self) -> bool {
+        self.read(&format!("managed-{}.stop", self.cid), 1024, true)
+            .is_ok_and(|(bytes, _)| {
+                std::str::from_utf8(&bytes).is_ok_and(|text| text.trim() == self.token)
+            })
+    }
+
+    fn identity(&self, owner: Owner, cwd: &Path) -> serde_json::Value {
+        let mut value = serde_json::json!({"client_id":self.cid,"token":self.token,
+            "owner_pane":owner.pane(),"cwd":cwd.to_string_lossy()});
+        match owner {
+            Owner::Shell(_) => value["owner_kind"] = "shell".into(),
+            Owner::Standalone(pane) => {
+                value["owner_kind"] = "standalone".into();
+                value["native_pane"] = pane.into();
+            }
+        }
+        value
+    }
+
+    fn heartbeat(&self, owner: Owner, cwd: &Path, seq: u64) -> io::Result<()> {
         let name = format!("managed-{}.json", self.cid);
         let tmp = format!("{name}.tmp");
-        let value = serde_json::json!({ "client_id": self.cid, "token": self.token, "owner_pane": pane, "cwd": cwd.to_string_lossy(), "seq": seq });
+        let mut value = self.identity(owner, cwd);
+        value["seq"] = seq.into();
         let mut file = self.create(&tmp)?;
         if let Err(error) = serde_json::to_writer(&mut file, &value)
             .map_err(io::Error::other)
@@ -304,22 +376,39 @@ impl Inbox {
     }
 
     fn ready(&self) -> io::Result<bool> {
-        // Yazi snapshots inherit the caller's umask inside the private inbox.
-        match self.read(&format!("state-{}.json", self.cid), 256 * 1024, false) {
-            Ok((bytes, _)) => {
-                let value: serde_json::Value =
-                    serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-                let cid = value.get("client_id").and_then(|v| {
-                    v.as_str()
-                        .map(str::to_owned)
-                        .or_else(|| v.as_u64().map(|id| id.to_string()))
-                });
-                Ok(cid.as_deref() == Some(self.cid.as_str())
-                    && value.get("cwd").and_then(|v| v.as_str()).is_some())
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(error),
+        // Both snapshots inherit the caller's umask inside the private inbox.
+        let (bytes, _) = match self.read(&format!("state-{}.json", self.cid), NATIVE_CAP, false) {
+            Ok(snapshot) => snapshot,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let state: serde_json::Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        let valid_client = state.get("client_id").is_some_and(|cid| {
+            cid.as_str() == Some(self.cid.as_str())
+                || cid.as_u64().is_some_and(|id| self.cid.parse::<u64>().ok() == Some(id))
+        });
+        let Some(epoch) = state.get("listing_epoch").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) else {
+            return Ok(false);
+        };
+        let Some(revision) = state.get("listing_revision").and_then(|v| v.as_u64()).filter(|v| *v > 0) else {
+            return Ok(false);
+        };
+        if !valid_client || !state.get("seq").and_then(|v| v.as_u64()).is_some_and(|seq| seq > 0) {
+            return Ok(false);
         }
+        let (bytes, _) = match self.read(&format!("listing-{}.json", self.cid), LISTING_CAP, false) {
+            Ok(snapshot) => snapshot,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let listing: serde_json::Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        let valid_files = listing.get("files").is_some_and(|files| {
+            files.is_array() || files.as_object().is_some_and(|files| files.is_empty())
+        });
+        Ok(listing.get("epoch").and_then(|v| v.as_str()) == Some(epoch)
+            && listing.get("revision").and_then(|v| v.as_u64()) == Some(revision)
+            && listing.get("cwd").and_then(|v| v.as_str()).is_some()
+            && valid_files)
     }
 }
 
@@ -336,6 +425,8 @@ impl Drop for Inbox {
             format!("managed-{}.lock", self.cid),
             format!("state-{}.json", self.cid),
             format!("state-{}.tmp", self.cid),
+            format!("listing-{}.json", self.cid),
+            format!("listing-{}.tmp", self.cid),
         ] {
             self.remove(&name);
         }
@@ -373,6 +464,92 @@ impl Drop for Inbox {
                     {
                         self.remove(name);
                     }
+                }
+            }
+        }
+    }
+}
+
+// A stable private lock inode serializes starts across host/backend reloads.
+// It is intentionally retained: unlinking a flock file would allow split locks.
+struct StandaloneBinding<'a> {
+    inbox: &'a Inbox,
+    pane: u64,
+    _lock: File,
+}
+
+impl<'a> StandaloneBinding<'a> {
+    fn new(inbox: &'a Inbox, pane: u64, cwd: &Path) -> io::Result<Self> {
+        let name = cstr(OsStr::new(&format!("native-{pane}.lock")))?;
+        let fd = unsafe {
+            libc::openat(
+                inbox.dir.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR
+                    | libc::O_CREAT
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(last_error());
+        }
+        let lock = unsafe { File::from_raw_fd(fd) };
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(lock.as_raw_fd(), &mut stat) } != 0 {
+            return Err(last_error());
+        }
+        if stat.st_uid != unsafe { libc::geteuid() }
+            || stat.st_mode & libc::S_IFMT != libc::S_IFREG
+            || stat.st_mode & 0o077 != 0
+        {
+            return Err(invalid("unsafe standalone native pane lock"));
+        }
+        if unsafe { libc::fchmod(lock.as_raw_fd(), 0o600) } != 0 {
+            return Err(last_error());
+        }
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = last_error();
+            return Err(if error.kind() == io::ErrorKind::WouldBlock {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "standalone supervisor already owns this native pane",
+                )
+            } else {
+                error
+            });
+        }
+        let binding = Self {
+            inbox,
+            pane,
+            _lock: lock,
+        };
+        let name = format!("native-{pane}.json");
+        // A crashed previous owner may have left an incomplete atomic write.
+        inbox.remove(&format!("{name}.tmp"));
+        let mut identity = inbox.identity(Owner::Standalone(pane), cwd);
+        identity["source_cwd"] = identity["cwd"].clone();
+        // The pane lock grants exclusive publication, including replacement after a crash.
+        if let Err(error) = inbox.atomic_json(&name, &identity, true) {
+            inbox.remove(&format!("{name}.tmp"));
+            return Err(error);
+        }
+        Ok(binding)
+    }
+}
+
+impl Drop for StandaloneBinding<'_> {
+    fn drop(&mut self) {
+        let name = format!("native-{}.json", self.pane);
+        if let Ok((bytes, _)) = self.inbox.read(&name, NATIVE_CAP, true) {
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if value["client_id"].as_str() == Some(self.inbox.cid.as_str())
+                    && value["token"].as_str() == Some(self.inbox.token.as_str())
+                    && value["native_pane"].as_u64() == Some(self.pane)
+                {
+                    self.inbox.remove(&name);
                 }
             }
         }
@@ -709,6 +886,7 @@ fn passthrough(real: &OsStr, args: &[OsString]) -> io::Result<i32> {
 }
 
 const NATIVE_CAP: usize = 256 * 1024;
+const LISTING_CAP: usize = 16 * 1024 * 1024;
 const BRIDGE_ENV: &str = "TERN_YAZI_BRIDGE";
 
 fn invalid(message: &str) -> io::Error {
@@ -806,7 +984,12 @@ impl Inbox {
             .ok_or_else(|| invalid("invalid native shell window pane"))
     }
 
-    fn atomic_json(&self, name: &str, value: &serde_json::Value) -> io::Result<File> {
+    fn atomic_json(
+        &self,
+        name: &str,
+        value: &serde_json::Value,
+        replace: bool,
+    ) -> io::Result<File> {
         let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
         if bytes.len() > NATIVE_CAP {
             return Err(invalid("native shell request exceeds 256 KiB"));
@@ -818,16 +1001,25 @@ impl Inbox {
             file.flush()?;
             let source = cstr(OsStr::new(&tmp))?;
             let target = cstr(OsStr::new(name))?;
-            if unsafe {
-                libc::linkat(
-                    self.dir.as_raw_fd(),
-                    source.as_ptr(),
-                    self.dir.as_raw_fd(),
-                    target.as_ptr(),
-                    0,
-                )
-            } != 0
-            {
+            let published = unsafe {
+                if replace {
+                    libc::renameat(
+                        self.dir.as_raw_fd(),
+                        source.as_ptr(),
+                        self.dir.as_raw_fd(),
+                        target.as_ptr(),
+                    )
+                } else {
+                    libc::linkat(
+                        self.dir.as_raw_fd(),
+                        source.as_ptr(),
+                        self.dir.as_raw_fd(),
+                        target.as_ptr(),
+                        0,
+                    )
+                }
+            };
+            if published != 0 {
                 return Err(last_error());
             }
             Ok(())
@@ -964,7 +1156,7 @@ fn native_shell(args: &[OsString]) -> io::Result<i32> {
     let request = serde_json::json!({"version":1,"id":id,"cid":inbox.cid,"token":inbox.token,
         "owner_pane":owner,"pane":pane,"helper":json_text(&bridge,"helper")?,
         "cwd":utf8(cwd.as_os_str())?,"argv":argv,"env":environment,"wait":true,"umask":umask});
-    let file = inbox.atomic_json(&name, &request)?;
+    let file = inbox.atomic_json(&name, &request, false)?;
     let pending = NativeRequest {
         inbox: &inbox,
         name,
@@ -1046,6 +1238,7 @@ impl NativeResult<'_> {
             self.inbox.atomic_json(
                 &format!("native-shell-{}.result", self.id),
                 &serde_json::json!({"id":self.id,"status":status}),
+                false,
             )?;
             Ok(())
         })();
@@ -1427,7 +1620,6 @@ fn native_terminal(path: &Path) -> io::Result<i32> {
 }
 
 fn run() -> io::Result<i32> {
-    let mut input = env::args_os().skip(1);
     let first = env::args_os().next();
     if first.as_deref().and_then(|v| Path::new(v).file_name()) == Some(OsStr::new("sh")) {
         return native_shell(&env::args_os().skip(1).collect::<Vec<_>>());
@@ -1447,31 +1639,22 @@ fn run() -> io::Result<i32> {
         }
         _ => {}
     }
-    if input.next().as_deref() != Some(OsStr::new("--real")) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "expected --real ORIGINAL -- [Yazi arguments]",
-        ));
-    }
-    let real = input.next().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "missing original Yazi binary")
-    })?;
-    if input.next().as_deref() != Some(OsStr::new("--")) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "expected -- before Yazi arguments",
-        ));
-    }
-    let args: Vec<OsString> = input.collect();
+    let LaunchArgs {
+        real,
+        args,
+        standalone_pane,
+    } = launch_args(env::args_os().skip(1))?;
     let native = env::var_os("TERN_PANE").is_some_and(|v| !v.is_empty());
-    if !native {
+    if standalone_pane.is_none() && !native {
         return passthrough(&real, &args);
     }
     for arg in &args {
         if arg == "--" {
             break;
         }
-        if arg == "--help" || arg == "--version" || arg == "-h" || arg == "-V" {
+        if standalone_pane.is_none()
+            && (arg == "--help" || arg == "--version" || arg == "-h" || arg == "-V")
+        {
             return passthrough(&real, &args);
         }
         if arg == "--client-id" || arg.as_bytes().starts_with(b"--client-id=") {
@@ -1488,11 +1671,18 @@ fn run() -> io::Result<i32> {
             "original Yazi must be a different executable file",
         ));
     }
-    let pane = env::var("TERN_PANE")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|v| *v > 0)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid TERN_PANE"))?;
+    let owner = if let Some(pane) = standalone_pane {
+        Owner::Standalone(pane)
+    } else {
+        Owner::Shell(
+            env::var("TERN_PANE")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|v| *v > 0)
+                .ok_or_else(|| invalid("invalid TERN_PANE"))?,
+        )
+    };
+    let pane = owner.pane();
     let cwd = env::current_dir()?;
     let caller_umask = unsafe { libc::umask(0o077) };
     unsafe {
@@ -1519,6 +1709,9 @@ fn run() -> io::Result<i32> {
             .as_deref()
             .unwrap_or_else(|| OsStr::new("/usr/local/bin:/usr/bin:/bin")),
     );
+    let binding = standalone_pane
+        .map(|pane| StandaloneBinding::new(&inbox, pane, &cwd))
+        .transpose()?;
     let mut backend = Backend::spawn(
         real_path.as_os_str(),
         &args,
@@ -1541,6 +1734,9 @@ fn run() -> io::Result<i32> {
             backend.signal(signal);
             break Ok(128 + signal);
         }
+        if standalone_pane.is_some() && published.is_none() && inbox.stop_requested() {
+            break Ok(0);
+        }
         if let Err(error) = backend.drain() {
             break Err(error);
         }
@@ -1562,7 +1758,7 @@ fn run() -> io::Result<i32> {
             match inbox.ready() {
                 Ok(true) => {
                     seq += 1;
-                    if let Err(error) = inbox.heartbeat(pane, &cwd, seq) {
+                    if let Err(error) = inbox.heartbeat(owner, &cwd, seq) {
                         break Err(error);
                     }
                     published = Some(now);
@@ -1579,15 +1775,13 @@ fn run() -> io::Result<i32> {
         if let Some(published_at) = published {
             if now.duration_since(heartbeat) >= Duration::from_millis(500) {
                 seq += 1;
-                if let Err(error) = inbox.heartbeat(pane, &cwd, seq) {
+                if let Err(error) = inbox.heartbeat(owner, &cwd, seq) {
                     break Err(error);
                 }
                 heartbeat = now;
             }
-            if let Ok((bytes, _)) = inbox.read(&format!("managed-{}.stop", inbox.cid), 1024, true) {
-                if std::str::from_utf8(&bytes).is_ok_and(|text| text.trim() == inbox.token) {
-                    break Ok(0);
-                }
+            if inbox.stop_requested() {
+                break Ok(0);
             }
             if let Ok((bytes, modified)) =
                 inbox.read(&format!("managed-{}.lease", inbox.cid), 1024, true)
@@ -1598,7 +1792,9 @@ fn run() -> io::Result<i32> {
                         && fields
                             .next()
                             .and_then(|v| v.parse::<u64>().ok())
-                            .is_some_and(|v| v > 0)
+                            .is_some_and(|v| {
+                                v > 0 && standalone_pane.map_or(true, |pane| v == pane)
+                            })
                     {
                         let size = (
                             fields
@@ -1669,6 +1865,7 @@ fn run() -> io::Result<i32> {
         }
     }
     drop(backend);
+    drop(binding);
     drop(inbox);
     result
 }
@@ -1682,4 +1879,273 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::sync::atomic::AtomicU32;
+
+    struct Fixture {
+        inbox: Inbox,
+        path: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let path = env::temp_dir().join(format!(
+                "tern-yazi-unit-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+            Self {
+                inbox: Inbox {
+                    dir: private_dir(&path).unwrap(),
+                    cid: "12345".to_owned(),
+                    token: "a".repeat(32),
+                    cleanup: false,
+                },
+                path,
+            }
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.path).unwrap();
+        }
+    }
+
+    fn parse(args: &[&str]) -> io::Result<LaunchArgs> {
+        launch_args(args.iter().map(|arg| OsString::from(*arg)))
+    }
+
+    #[test]
+    fn standalone_argv_keeps_native_identity_separate_from_yazi_arguments() {
+        let launch = parse(&[
+            "--standalone-pane",
+            "42",
+            "--real",
+            "/usr/bin/yazi",
+            "--",
+            "--cwd-file",
+            "/tmp/path with spaces",
+            "/tmp/files",
+        ])
+        .unwrap();
+        assert_eq!(launch.standalone_pane, Some(42));
+        assert_eq!(launch.real, OsStr::new("/usr/bin/yazi"));
+        assert_eq!(
+            launch.args,
+            ["--cwd-file", "/tmp/path with spaces", "/tmp/files"].map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn shell_argv_preserves_existing_interface_and_non_utf8_arguments() {
+        let path = OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff]);
+        let launch = launch_args(
+            [
+                OsString::from("--real"),
+                OsString::from("/usr/bin/yazi"),
+                OsString::from("--"),
+                path.clone(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(launch.standalone_pane, None);
+        assert_eq!(launch.args, vec![path]);
+    }
+
+    #[test]
+    fn standalone_argv_rejects_missing_invalid_identity_or_delimiters() {
+        for pane in ["0", "-1", "native", "18446744073709551616"] {
+            assert!(parse(&["--standalone-pane", pane, "--real", "/usr/bin/yazi", "--"]).is_err());
+        }
+        for args in [
+            vec!["--standalone-pane"],
+            vec!["--standalone-pane", "42"],
+            vec!["--standalone-pane", "42", "/usr/bin/yazi", "--"],
+            vec!["--standalone-pane", "42", "--real"],
+            vec!["--standalone-pane", "42", "--real", "/usr/bin/yazi"],
+        ] {
+            assert!(parse(&args).is_err());
+        }
+    }
+
+    #[test]
+    fn health_distinguishes_native_owned_and_shell_owned_supervisors() {
+        let fixture = Fixture::new();
+        let shell = fixture
+            .inbox
+            .identity(Owner::Shell(17), Path::new("/tmp/files"));
+        assert_eq!(shell["owner_pane"], 17);
+        assert_eq!(shell["owner_kind"], "shell");
+        assert!(shell.get("native_pane").is_none());
+        fixture
+            .inbox
+            .heartbeat(Owner::Standalone(42), Path::new("/tmp/files"), 7)
+            .unwrap();
+        let (bytes, _) = fixture
+            .inbox
+            .read("managed-12345.json", NATIVE_CAP, true)
+            .unwrap();
+        let health: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(health["client_id"], fixture.inbox.cid);
+        assert_eq!(health["token"], fixture.inbox.token);
+        assert_eq!(health["owner_pane"], 42);
+        assert_eq!(health["native_pane"], 42);
+        assert_eq!(health["owner_kind"], "standalone");
+        assert_eq!(health["cwd"], "/tmp/files");
+        assert_eq!(health["seq"], 7);
+    }
+
+    #[test]
+    fn native_binding_is_private_and_serializes_reload_starts() {
+        let fixture = Fixture::new();
+        let binding = StandaloneBinding::new(&fixture.inbox, 42, Path::new("/tmp/files")).unwrap();
+        let (bytes, _) = fixture
+            .inbox
+            .read("native-42.json", NATIVE_CAP, true)
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["client_id"], fixture.inbox.cid);
+        assert_eq!(value["token"], fixture.inbox.token);
+        assert_eq!(value["owner_kind"], "standalone");
+        assert_eq!(value["owner_pane"], 42);
+        assert_eq!(value["native_pane"], 42);
+        assert_eq!(value["source_cwd"], "/tmp/files");
+        assert_eq!(
+            fs::metadata(fixture.path.join("native-42.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let error = StandaloneBinding::new(&fixture.inbox, 42, Path::new("/tmp/files"))
+            .err()
+            .expect("a reload must not acquire an already owned native pane");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        drop(binding);
+        assert!(!fixture.inbox.exists("native-42.json"));
+        assert!(fixture.inbox.exists("native-42.lock"));
+        let next = StandaloneBinding::new(&fixture.inbox, 42, Path::new("/tmp/files")).unwrap();
+        drop(next);
+        assert!(!fixture.inbox.exists("native-42.json"));
+    }
+
+    #[test]
+    fn native_binding_cleanup_does_not_remove_another_session_token() {
+        let fixture = Fixture::new();
+        let binding = StandaloneBinding::new(&fixture.inbox, 42, Path::new("/tmp/files")).unwrap();
+        let mut replacement = fixture
+            .inbox
+            .identity(Owner::Standalone(42), Path::new("/tmp/files"));
+        replacement["token"] = "b".repeat(32).into();
+        fixture
+            .inbox
+            .atomic_json("native-42.json", &replacement, true)
+            .unwrap();
+        drop(binding);
+        assert!(fixture.inbox.exists("native-42.json"));
+    }
+
+    #[test]
+    fn initial_snapshot_waits_for_matching_listing_epoch_and_revision() {
+        let fixture = Fixture::new();
+        let state = serde_json::json!({
+            "client_id": fixture.inbox.cid, "seq": 1,
+            "listing_epoch": "current", "listing_revision": 2
+        });
+        fixture.inbox.atomic_json("state-12345.json", &state, false).unwrap();
+        assert!(!fixture.inbox.ready().unwrap());
+        let mut listing = serde_json::json!({
+            "epoch": "current", "revision": 1, "cwd": "/tmp/files", "files": ["alpha.txt"]
+        });
+        fixture.inbox.atomic_json("listing-12345.json", &listing, false).unwrap();
+        assert!(!fixture.inbox.ready().unwrap());
+        listing["epoch"] = "previous".into();
+        listing["revision"] = 2.into();
+        fixture.inbox.atomic_json("listing-12345.json", &listing, true).unwrap();
+        assert!(!fixture.inbox.ready().unwrap());
+        listing["epoch"] = "current".into();
+        fixture.inbox.atomic_json("listing-12345.json", &listing, true).unwrap();
+        assert!(fixture.inbox.ready().unwrap());
+    }
+
+    #[test]
+    fn native_binding_replaces_crashed_owner_record_and_partial_write() {
+        let fixture = Fixture::new();
+        let mut previous = fixture
+            .inbox
+            .identity(Owner::Standalone(42), Path::new("/tmp/previous"));
+        previous["token"] = "b".repeat(32).into();
+        fixture
+            .inbox
+            .atomic_json("native-42.json", &previous, false)
+            .unwrap();
+        drop(fixture.inbox.create("native-42.json.tmp").unwrap());
+        let binding =
+            StandaloneBinding::new(&fixture.inbox, 42, Path::new("/tmp/current")).unwrap();
+        let (bytes, _) = fixture
+            .inbox
+            .read("native-42.json", NATIVE_CAP, true)
+            .unwrap();
+        let current: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(current["token"], fixture.inbox.token);
+        assert_eq!(current["source_cwd"], "/tmp/current");
+        assert!(!fixture.inbox.exists("native-42.json.tmp"));
+        drop(binding);
+        assert!(!fixture.inbox.exists("native-42.json"));
+    }
+
+    #[test]
+    fn native_handoff_publication_does_not_replace_an_existing_request() {
+        let fixture = Fixture::new();
+        let first = serde_json::json!({"id": "first", "argv": ["echo", "first"]});
+        let second = serde_json::json!({"id": "second", "argv": ["echo", "second"]});
+        fixture
+            .inbox
+            .atomic_json("native-shell-test.json", &first, false)
+            .unwrap();
+        let error = fixture
+            .inbox
+            .atomic_json("native-shell-test.json", &second, false)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        let (bytes, _) = fixture
+            .inbox
+            .read("native-shell-test.json", NATIVE_CAP, true)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            first
+        );
+        assert!(!fixture.inbox.exists("native-shell-test.json.tmp"));
+    }
+
+    #[test]
+    fn stop_before_initial_snapshot_requires_the_allocated_token() {
+        let fixture = Fixture::new();
+        assert!(!fixture.inbox.stop_requested());
+        let name = "managed-12345.stop";
+        fixture
+            .inbox
+            .create(name)
+            .unwrap()
+            .write_all(b"wrong-token\n")
+            .unwrap();
+        assert!(!fixture.inbox.stop_requested());
+        fixture.inbox.remove(name);
+        let mut file = fixture.inbox.create(name).unwrap();
+        writeln!(file, "{}", fixture.inbox.token).unwrap();
+        drop(file);
+        assert!(fixture.inbox.stop_requested());
+    }
 }

@@ -3,10 +3,11 @@ local ui = tern.ui
 local path = require('../shared/path')
 local model = require('../backend/model')
 local format = require('./format')
+local theme = require('./theme')
 local basename, join_path = path.basename, path.join_path
-local fmt_size, file_icon = format.fmt_size, format.file_icon
+local fmt_size, file_icon, virtual_icon = format.fmt_size, format.file_icon, format.virtual_icon
+local fmt_permissions, preview_kind = format.fmt_permissions, format.preview_kind
 local compute_parent, compute_directory = model.compute_parent, model.compute_directory
-local file_is_dir = model.file_is_dir
 type YaziState = model.YaziState
 local M = {}
 
@@ -39,9 +40,9 @@ local function build_rich_preview(data: any, active_name: string, cx: any): Node
 			for i = 1, math.min(18, #cached) do
 				local item_name = cached[i]
 				local is_sub_dir = (item_name:sub(-1) == "/")
-				local sym, tone = file_icon(item_name, is_sub_dir)
+				local sym, tone = virtual_icon(item_name, is_sub_dir)
 				table.insert(entry_nodes, ui.text({
-					ui.span(sym .. " ", tone),
+					ui.span(sym, tone),
 					ui.span(item_name),
 				}))
 			end
@@ -101,25 +102,239 @@ local function build_rich_preview(data: any, active_name: string, cx: any): Node
 	return ui.code(content, data.lang)
 end
 
--- Keep native selection reveal enabled; CSS fits the scroller to the column's
--- remaining height. List rows are taller than terminal cells, so never pad them.
-local function viewport_list(items: { any }, max_lines: number, key: string, selected: number?): Node
-	local node = ui.list(items)
-	node.p = node.p or {}
-	node.p.max = { lines = max_lines }
-	node.p.key = key
-	for i, row in ipairs(node.c or {}) do
-		row.p.key = items[i].name
-		row.p.title = items[i].url
+
+local function selection_tray(selected_paths: { [string]: boolean }): Node?
+	local paths = {}
+	for selected_path, selected in pairs(selected_paths) do
+		if selected then table.insert(paths, selected_path) end
 	end
-	if selected and items[selected] then
-		node.p.selected = LIST_IDS[key] .. "." .. items[selected].name
+	if #paths == 0 then return nil end
+	table.sort(paths)
+	local chips = {}
+	for index = 1, math.min(6, #paths) do
+		local selected_path = paths[index]
+		table.insert(chips, ui.node("text", {
+			key = selected_path, role = "yazi.selection-chip", title = selected_path,
+			text = basename(selected_path), wrap = "none", truncate = "end",
+		}))
 	end
-	return node
+	if #paths > 6 then
+		table.insert(chips, ui.node("text", {
+			key = "overflow", role = "yazi.selection-overflow", text = "+" .. tostring(#paths - 6),
+		}))
+	end
+	return ui.node("row", { key = "selection", role = "yazi.selection-tray", gap = "xs" }, chips)
 end
 
-local function selection_mark(paths: { [string]: boolean }, path: string): any
-	return ui.span(paths[path] and "✓ " or "  ", paths[path] and "success" or "muted")
+
+local EMPTY_PATHS = {}
+
+-- Every native list frame retains complete identities and real filenames.
+-- Cached heavy row presentation and its spans are immutable after construction.
+local HYDRATE_ORDER = { "files_list", "parent_list", "child_list" }
+local HYDRATE_BATCH = 256
+local HYDRATE_BUDGET_MS = 8
+local LIST_OVERSCAN = 6
+
+local function queue_row(cache: any, index: number)
+	if cache.pending[index] then return end
+	cache.pending[index] = true
+	cache.pending_count += 1
+	table.insert(cache.queue, index)
+end
+
+local function hydrate_row(cache: any, index: number): boolean
+	if not cache.pending[index] then return false end
+	cache.pending[index] = nil
+	cache.pending_count -= 1
+	local name, url = cache.files[index], cache.urls[index]
+	local icon = cache.overrides and cache.overrides[name]
+	if icon == nil then icon = cache.icons and cache.icons[name] end
+	local is_dir = cache.dirs and cache.dirs[name]
+	if is_dir == nil and cache.hovered_url == url then is_dir = cache.hovered_dir end
+	local sym, tone = file_icon(icon, name, is_dir)
+	local selected = cache.selected_paths and cache.selected_paths[url] == true or false
+	local mark = cache.marked_paths and cache.marked_paths[url] and (cache.mode == "unset" and "- " or "+ ") or ""
+	local active = cache.key == "parent_list" and name == cache.selected_name
+	local previous = cache.items[index]
+	if previous and previous.sym == sym and previous.icon_tone == tone
+		and previous.selected == selected and previous.mark == mark and previous.active == active then
+		return false
+	end
+	local labels = { ui.span(selected and "✓ " or "  ", selected and "success" or "muted") }
+	if cache.key == "files_list" then table.insert(labels, ui.span(mark, "warn")) end
+	table.insert(labels, ui.span(cache.key == "parent_list" and cache.layout == "editorial" and "" or sym, tone))
+	table.insert(labels, ui.span(name, cache.key == "parent_list" and active and "strong" or nil))
+	if cache.layout == "amber" then table.insert(labels, 1, ui.span(string.format("%02d ", index), "muted")) end
+	local child = cache.children[index]
+	if not child then
+		child = {
+			k = "item",
+			p = {
+				key = name,
+				title = url,
+				label = labels,
+			},
+		}
+		cache.children[index] = child
+	else
+		child.p.label = labels
+	end
+	cache.items[index] = { sym = sym, icon_tone = tone, selected = selected, mark = mark, active = active }
+	return true
+end
+
+local function finish_rows(cache: any)
+	if cache.pending_count == 0 then cache.queue, cache.queue_head = {}, 1 end
+end
+
+local function hydration_pending(state: any): boolean
+	for _, key in ipairs(HYDRATE_ORDER) do
+		local cache = state.active_list_caches and state.active_list_caches[key]
+		if cache and cache.pending_count > 0 then return true end
+	end
+	return false
+end
+
+-- Called only by the owning host's finite timer, using the latest visible caches.
+local function hydrate(state: any): boolean
+	local deadline, count, changed = tern.now() + HYDRATE_BUDGET_MS, 0, false
+	for _, key in ipairs(HYDRATE_ORDER) do
+		local cache = state.active_list_caches and state.active_list_caches[key]
+		if cache then
+			while cache.pending_count > 0 and cache.queue_head <= #cache.queue
+				and count < HYDRATE_BATCH and tern.now() < deadline do
+				local index = cache.queue[cache.queue_head]
+				cache.queue_head += 1
+				if cache.pending[index] then
+					if hydrate_row(cache, index) then changed = true end
+					count += 1
+				end
+			end
+			finish_rows(cache)
+		end
+		if count >= HYDRATE_BATCH or tern.now() >= deadline then break end
+	end
+	return changed
+end
+
+local function directory_list(state: any, folder: any, cwd: string, max_lines: number, key: string,
+	selected_name: string?, selected_paths: any, marked_paths: any, mode: string?, layout: string): Node
+	local files = folder.files
+	local caches = state.list_cache or {}
+	state.list_cache = caches
+	local cache = caches[key]
+	local rebuild = not cache or cache.files ~= files or cache.cwd ~= cwd or cache.layout ~= layout
+	if rebuild then
+		cache = { files = files, cwd = cwd, layout = layout, key = key, indices = {}, names_by_url = {},
+			urls = {}, items = {}, children = {}, pending = {}, pending_count = 0, queue = {}, queue_head = 1 }
+		for index, name in ipairs(files) do
+			local url = join_path(cwd, name)
+			cache.indices[name], cache.names_by_url[url], cache.urls[index] = index, name, url
+			queue_row(cache, index)
+		end
+		caches[key] = cache
+	end
+	state.active_list_caches[key] = cache
+	local function dirty_name(name: string?)
+		local index = name and cache.indices[name]
+		if index then queue_row(cache, index) end
+	end
+	local function named_changes(previous: any, current: any, urls: boolean?)
+		if previous == current then return end
+		previous, current = previous or EMPTY_PATHS, current or EMPTY_PATHS
+		for name, value in pairs(previous) do
+			if value ~= current[name] then
+				if urls then dirty_name(cache.names_by_url[name]) else dirty_name(name) end
+			end
+		end
+		for name, value in pairs(current) do
+			if value ~= previous[name] then
+				if urls then dirty_name(cache.names_by_url[name]) else dirty_name(name) end
+			end
+		end
+	end
+	local hovered_url = folder.hovered and folder.hovered.url
+	local hovered_dir = folder.hovered and folder.hovered.dir
+	if not rebuild then
+		named_changes(cache.dirs, folder.file_dirs)
+		named_changes(cache.icons, folder.file_icons)
+		named_changes(cache.overrides, folder.icon_overrides)
+		named_changes(cache.selected_paths, selected_paths, true)
+		named_changes(cache.marked_paths, marked_paths, true)
+		if cache.mode ~= mode then
+			for url in pairs(marked_paths or EMPTY_PATHS) do dirty_name(cache.names_by_url[url]) end
+		end
+		if cache.selected_name ~= selected_name then
+			dirty_name(cache.selected_name)
+			dirty_name(selected_name)
+		end
+		if cache.hovered_url ~= hovered_url or cache.hovered_dir ~= hovered_dir then
+			dirty_name(cache.hovered_url and cache.names_by_url[cache.hovered_url])
+			dirty_name(hovered_url and cache.names_by_url[hovered_url])
+		end
+	end
+	cache.dirs, cache.icons, cache.overrides = folder.file_dirs, folder.file_icons, folder.icon_overrides
+	cache.selected_paths, cache.marked_paths, cache.mode = selected_paths, marked_paths, mode
+	cache.selected_name = selected_name
+	cache.hovered_url, cache.hovered_dir = hovered_url, hovered_dir
+	local selected_index = selected_name and cache.indices[selected_name] or 1
+	-- Native reveal uses the least scroll distance, placing the cursor at either
+	-- edge. Cover both possible viewports plus its six-row overscan, cursor first.
+	-- The public list API has no scroll-offset event; wheel-only rows keep their
+	-- real filenames until the bounded background queue supplies their details.
+	local radius = math.ceil(max_lines) + LIST_OVERSCAN
+	if #files > 0 then hydrate_row(cache, selected_index) end
+	for distance = 1, math.min(radius, math.max(selected_index - 1, #files - selected_index)) do
+		if selected_index - distance >= 1 then hydrate_row(cache, selected_index - distance) end
+		if selected_index + distance <= #files then hydrate_row(cache, selected_index + distance) end
+	end
+	finish_rows(cache)
+	local function get_child(i: number)
+		local child = cache.children[i]
+		if not child then
+			local name, url = cache.files[i], cache.urls[i]
+			child = {
+				k = "item",
+				p = {
+					key = name,
+					title = url,
+					label = { { t = name } },
+				},
+			}
+			cache.children[i] = child
+		end
+		return child
+	end
+	local children
+	if #files <= 150 then
+		children = table.create(#files)
+		for i = 1, #files do
+			children[i] = get_child(i)
+		end
+	else
+		local win_size = 120
+		local half = math.floor(win_size / 2)
+		local start_idx = math.max(1, selected_index - half)
+		local end_idx = math.min(#files, start_idx + win_size - 1)
+		start_idx = math.max(1, end_idx - win_size + 1)
+		children = table.create(end_idx - start_idx + 1)
+		local pos = 1
+		for i = start_idx, end_idx do
+			children[pos] = get_child(i)
+			pos += 1
+		end
+	end
+	return {
+		k = "list",
+		p = {
+			key = key,
+			max = { lines = max_lines },
+			selected = selected_name and cache.indices[selected_name]
+				and (LIST_IDS[key] .. "." .. selected_name) or nil,
+		},
+		c = children,
+	}
 end
 
 local function path_segments(cwd: string): { any }
@@ -142,8 +357,8 @@ local function path_header(state: any, cwd: string, cx: any): (any, any)
 		table.insert(children, ui.node("input", { key = "field", role = "yazi.path-input",
 			text = state.path_query or "", cursor = state.path_cursor, anchor = state.path_anchor,
 			placeholder = "Directory path", sendable = true, grow = 1, min = { w = 0 } }))
-		table.insert(children, clickable(ui.el("button", { key = "go" }, { ui.text("Go") }), "path_submit"))
-		table.insert(children, clickable(ui.el("button", { key = "cancel" }, { ui.text("Cancel") }), "path_cancel"))
+		table.insert(children, clickable(ui.el("button", { key = "go", role = "yazi.path-go" }, { ui.text("Go") }), "path_submit"))
+		table.insert(children, clickable(ui.el("button", { key = "cancel", role = "yazi.path-cancel" }, { ui.text("Cancel") }), "path_cancel"))
 	else
 		local segments = path_segments(cwd)
 		local budget = math.max(8, (cx.cols or 80) - 12)
@@ -176,7 +391,7 @@ local function path_header(state: any, cwd: string, cx: any): (any, any)
 		if state.path_menu then
 			local ancestors = {}
 			for index = 2, first - 1 do table.insert(ancestors, crumb(segments[index], index)) end
-			table.insert(ancestors, clickable(ui.el("button", { key = "cancel" }, { ui.text("Cancel [Esc]") }), "path_cancel"))
+			table.insert(ancestors, clickable(ui.el("button", { key = "cancel", role = "yazi.path-cancel" }, { ui.text("Cancel [Esc]") }), "path_cancel"))
 			layer = ui.col({ ui.node("card", { key = "ancestors", role = "yazi.path-ancestors" }, {
 				ui.text("Ancestor directories"), ui.col(ancestors),
 			}) })
@@ -191,8 +406,8 @@ end
 
 -- Left Column: Parent directory as a scrollable list; the current
 -- directory row is the list selection (native active capsule).
-local function build_parent_column(yz: YaziState?, cur_cwd: string, max_lines: number, selected_paths: { [string]: boolean }): Node
-	local parent_files, parent_cwd, parent_dirs = compute_parent(yz, cur_cwd)
+local function build_parent_column(state: any, yz: YaziState?, cur_cwd: string, max_lines: number, selected_paths: { [string]: boolean }, layout: string): Node
+	local parent_files, parent_cwd = compute_parent(yz, cur_cwd)
 	if not parent_files then
 		return ui.card(
 			{ ui.span("Parent", "muted") },
@@ -200,72 +415,50 @@ local function build_parent_column(yz: YaziState?, cur_cwd: string, max_lines: n
 		)
 	end
 
-	local cur_dirname = basename(cur_cwd)
-	local items = {}
-	local selected = nil
-	for _, fname in ipairs(parent_files) do
-		local is_cur = (fname == cur_dirname)
-		if is_cur then
-			selected = #items + 1
-		end
-		local is_dir = parent_dirs and parent_dirs[fname]
-		local sym, tone = file_icon(fname, is_dir)
-		table.insert(items, {
-			name = fname,
-			url = join_path(parent_cwd, fname),
-			label = { selection_mark(selected_paths, join_path(parent_cwd, fname)), ui.span(sym .. " ", tone), ui.span(fname, is_cur and "strong" or nil) },
-		})
-	end
+	local folder = compute_directory(yz, parent_cwd)
+	local list = directory_list(state, folder, parent_cwd, max_lines, "parent_list", basename(cur_cwd), selected_paths, EMPTY_PATHS, nil, layout)
 
 	local parent_title = (parent_cwd and basename(parent_cwd) ~= "") and basename(parent_cwd) or "/"
-	local card = ui.card(
-		{ ui.span(parent_title, "muted") },
-		{ viewport_list(items, max_lines, "parent_list", selected) }
-	)
+	local card = { k = "card", p = { head = { ui.span(parent_title, "muted") } }, c = { list } }
 	card.p.title = parent_cwd or "/"
 	return card
 end
 
 -- Right Column child preview: Expand subfolder contents as a scrollable list
-local function render_child_directory_preview(yz: YaziState, full_url: string, dir_name: string, max_lines: number, selected_paths: { [string]: boolean }): Node
+local function render_child_directory_preview(state: any, yz: YaziState, full_url: string, dir_name: string, max_lines: number, selected_paths: { [string]: boolean }, layout: string): Node
 	local folder = compute_directory(yz, full_url)
 	local list = folder and folder.files
-	if not list then
-		return ui.card(
-			{ ui.span("[" .. dir_name .. "]", "accent") },
-			{ ui.text({ ui.span("Waiting for Yazi directory preview...", "muted") }) }
-		)
+	local count = folder and folder.file_count
+	local heading = { ui.span(dir_name, "strong"), ui.span(count ~= nil
+		and string.format(" · %d %s", count, count == 1 and "entry" or "entries") or " · — entries", "muted") }
+	if not list or count == nil and #list == 0 then
+		return ui.card(heading, { ui.text({ ui.span("Waiting for Yazi directory preview...", "muted") }) })
 	end
-	if #list == 0 then
-		return ui.card(
-			{ ui.span("[" .. dir_name .. "]", "accent") },
-			{ ui.text({ ui.span("(empty directory)", "muted") }) }
-		)
+	if count == 0 then
+		return ui.card(heading, { ui.text({ ui.span("(empty directory)", "muted") }) })
 	end
-	local child_items = {}
-	for _, cname in ipairs(list) do
-		local sub_path = join_path(full_url, cname)
-		local sym, tone = file_icon(cname, folder.file_dirs and folder.file_dirs[cname])
-		table.insert(child_items, {
-			name = cname,
-			url = sub_path,
-			label = { selection_mark(selected_paths, sub_path), ui.span(sym .. " ", tone), cname },
-		})
-	end
-	return ui.card(
-		{ ui.span("[" .. dir_name .. "]", "accent") },
-		{ viewport_list(child_items, max_lines, "child_list", 1) }
-	)
+	local node = directory_list(state, folder, full_url, max_lines, "child_list", list[1], selected_paths, EMPTY_PATHS, nil, layout)
+	return { k = "card", p = { head = heading }, c = { node } }
 end
 
 local function render(state: any, cx: any, yz: YaziState?, prepared: any?, preview_data: any?): any
+	state.active_list_caches = {}
+		if state.snapshot_error or (state.snapshot_waiting and not yz) then
+			return theme.regions({ main = ui.card(
+				{ ui.span(state.snapshot_error and "Yazi snapshot unavailable" or "Waiting for Yazi snapshot", "warn") },
+				{ ui.text(state.snapshot_error or "The listing and cursor snapshots are changing; waiting for one matching generation."),
+					ui.text("File actions are disabled until the complete snapshot is available. Press q or Esc to close.") }
+			) }, state, cx)
+		end
 		if not yz or not state.live then
-			return {
+			return theme.regions({
 				main = ui.card(
-					{ ui.span(yz and "Yazi is offline" or "Connect to Yazi", "warn") },
+					{ ui.span(state.startup_error and "Cannot start Yazi" or ((yz or state.token) and "Yazi is offline"
+						or (state.owner_kind == "standalone" and "Starting Yazi" or "Connect to Yazi")), "warn") },
 					{
-						ui.text(state.token and "The managed backend stopped or is not responding. File actions are disabled."
-							or "Explicit attach requires a running Yazi with the tern.yazi plugin; checking actor acknowledgement."),
+						ui.text(state.startup_error or (state.token and "The managed backend stopped or is not responding. File actions are disabled."
+							or (state.owner_kind == "standalone" and "Waiting for the real Yazi backend and native attachment."
+								or "Explicit attach requires a running Yazi with the tern.yazi plugin; checking actor acknowledgement."))),
 						ui.text(state.cid and ("Client " .. state.cid) or "No Yazi snapshot is available."),
 						ui.text("Press q or Esc to close this panel."),
 					}
@@ -273,10 +466,11 @@ local function render(state: any, cx: any, yz: YaziState?, prepared: any?, previ
 				dock = ui.row({
 					clickable(ui.el("button", {}, { ui.text("Check Again") }), "poll"),
 				}),
-			}
+			}, state, cx)
 		end
 
 	local cur_cwd = prepared.cur_cwd
+	local layout = state.layout_theme or "current"
 		local top_rows = {}
 		local header, path_layer = path_header(state, cur_cwd, cx)
 		table.insert(top_rows, header)
@@ -308,6 +502,15 @@ local function render(state: any, cx: any, yz: YaziState?, prepared: any?, previ
 				clickable(ui.badge("Clear [Esc]", "muted"), "clear_filter"),
 			})
 		end
+		local input_kind = state.cmd_mode and "shell" or (state.find_mode and "find" or (state.filter_mode and "filter" or nil))
+		if input_kind then
+			-- Presentation hooks keep the existing widgets, positional keys and actions.
+			for index, role in ipairs({ "yazi.command-label", "yazi.command-bubble." .. input_kind, "yazi.command-cancel" }) do
+				local part = input_bar.c[index]
+				part.p = part.p or {}
+				part.p.role = role
+			end
+		end
 		input_bar.p = input_bar.p or {}
 		input_bar.p.key = "input"
 		input_bar.p.role = "yazi.input-row"
@@ -315,54 +518,29 @@ local function render(state: any, cx: any, yz: YaziState?, prepared: any?, previ
 		input_bar.p.max = { h = "1.5lines" }
 		table.insert(top_rows, input_bar)
 
-		-- 2. Task progress (if background tasks are running)
-		if yz.tasks and yz.tasks.total and yz.tasks.total > 0 then
-			local t = yz.tasks
-			local done = (t.succ or 0) + (t.fail or 0)
-			local running = t.total - done
-			if running > 0 then
-				local ratio = t.total > 0 and (done / t.total) or 0
-				local task_card = ui.card(
-					{ ui.span(string.format("Tasks: %d active / %d total", running, t.total), "warn") },
-					{ ui.progress(ratio, string.format("%d of %d done", done, t.total)) }
-				)
-				table.insert(top_rows, task_card)
-			end
-		end
-
-
 		local file_list = prepared.file_list
 		local selected_paths, marked_paths = prepared.selected_paths, prepared.marked_paths
 		local active_name, cur_idx = prepared.active_name, prepared.cur_idx
 		local active_full_url, is_active_dir = prepared.active_full_url, prepared.is_active_dir
+		local active_hovered = prepared.active_hovered
+		local active_size = active_hovered and active_hovered.size or nil
 
 		-- This is only the native list ceiling, not a terminal-to-list row conversion.
 		-- The columns and their scrollers take the actual remaining pane height.
 		local col_lines = math.max(1, cx.rows or 24)
 
-		-- ---------------- Left Column (Parent Directory)
-		local left_col_card = build_parent_column(yz, cur_cwd, col_lines, selected_paths)
-
 		-- ---------------- Middle Column (Current Directory, scrollable)
-		local middle_items = {}
-		for _, fname in ipairs(file_list) do
-			local is_active = (fname == active_name)
-			local item_path = join_path(cur_cwd, fname)
-			local sym, tone = file_icon(fname, file_is_dir(yz, cur_cwd, fname))
-			table.insert(middle_items, {
-				name = fname,
-				url = item_path,
-				label = { selection_mark(selected_paths, item_path), ui.span(marked_paths[item_path] and (yz.mode == "unset" and "- " or "+ ") or "", "warn"), ui.span(sym .. " ", tone), fname },
-				tone = is_active and "accent" or nil,
-			})
-		end
+		local current_folder = compute_directory(yz, cur_cwd)
+		local middle_list = #file_list > 0 and directory_list(state, current_folder, cur_cwd, col_lines,
+			"files_list", active_name, selected_paths, marked_paths, yz.mode, layout)
+
+		-- ---------------- Left Column (Parent Directory)
+		local left_col_card = build_parent_column(state, yz, cur_cwd, col_lines, selected_paths, layout)
 
 		local middle_title = string.format("%s (%d/%d)", basename(cur_cwd), cur_idx, #file_list)
-		local middle_col_card = ui.card(
-			{ ui.span(middle_title, "strong") },
-			{ #middle_items > 0 and viewport_list(middle_items, col_lines, "files_list", cur_idx)
-				or ui.text({ ui.span(cur_cwd == yz.cwd and "(empty directory)" or "Waiting for Yazi directory metadata...", "muted") }) }
-		)
+		local middle_col_card = ui.card({ ui.span(middle_title, "strong") }, {
+			middle_list or ui.text({ ui.span(cur_cwd == yz.cwd and "(empty directory)" or "Waiting for Yazi directory metadata...", "muted") }),
+		})
 
 		-- ---------------- Right Column (Preview / Child Subfolder Expansion)
 		local right_col_card
@@ -373,7 +551,7 @@ local function render(state: any, cx: any, yz: YaziState?, prepared: any?, previ
 			)
 		elseif is_active_dir then
 			-- Child Directory Content Expansion (exactly like Yazi right pane!)
-			right_col_card = render_child_directory_preview(yz, active_full_url, active_name, col_lines, selected_paths)
+			right_col_card = render_child_directory_preview(state, yz, active_full_url, active_name, col_lines, selected_paths, layout)
 		elseif is_active_dir == nil then
 			right_col_card = ui.card({ ui.span(active_name, "strong") }, {
 				ui.text({ ui.span("Waiting for Yazi file metadata...", "muted") }),
@@ -390,6 +568,11 @@ local function render(state: any, cx: any, yz: YaziState?, prepared: any?, previ
 			right_col_card = ui.card(
 				{ ui.span(active_name, "strong") },
 				{
+					ui.node("row", { key = "metadata", role = "yazi.preview-metadata", gap = "xs", wrap = true }, {
+						ui.text({ ui.span(preview_kind(active_name, preview_data), "muted") }),
+						ui.node("text", { role = "yazi.preview-size", text = fmt_size(active_size) }),
+						ui.node("text", { role = "yazi.preview-permissions", text = fmt_permissions(active_hovered and active_hovered.permissions), tone = "muted" }),
+					}),
 					ui.node("col", { role = "yazi.preview", gap = "none" }, { preview_content }),
 					ui.node("row", { role = "yazi.preview-actions", gap = "xs", wrap = true }, act_buttons),
 				}
@@ -406,9 +589,7 @@ local function render(state: any, cx: any, yz: YaziState?, prepared: any?, previ
 		right_col_card.p.key = "preview"
 		right_col_card.p.title = active_name and active_full_url or "Preview"
 		local miller_columns = ui.node("row", { role = "yazi.columns", key = "columns" }, {
-			left_col_card,
-			middle_col_card,
-			right_col_card,
+			left_col_card, middle_col_card, right_col_card,
 		})
 		table.insert(top_rows, miller_columns)
 
@@ -422,10 +603,13 @@ local function render(state: any, cx: any, yz: YaziState?, prepared: any?, previ
 
 		local status_bar = ui.node("row", { role = "yazi.status", gap = "xs" }, {
 			ui.badge(mode_str, mode_tone),
-			ui.badge(string.format("%d sel", yz.selected or 0), (yz.selected or 0) > 0 and "warn" or "muted"),
+			ui.node("text", { role = "yazi.status-size", text = fmt_size(active_size), tone = "muted" }),
 			ui.node("text", { role = "yazi.status-name", spans = { ui.span(active_name or "", "strong") } }),
-			ui.text({ ui.span(" " .. pct_str .. " ", "muted") }),
-			ui.badge(pos_str, "accent"),
+			ui.node("row", { role = "yazi.status-right", gap = "xs" }, {
+				ui.node("text", { role = "yazi.status-permissions", text = fmt_permissions(active_hovered and active_hovered.permissions), tone = "muted" }),
+				ui.text({ ui.span(" " .. pct_str .. " ", "muted") }),
+				ui.badge(pos_str, "accent"),
+			}),
 		})
 		local trash_layer = nil
 		if state.trash then
@@ -443,15 +627,24 @@ local function render(state: any, cx: any, yz: YaziState?, prepared: any?, previ
 				}),
 			}) })
 		end
+		local dock_rows = { status_bar }
+		if layout == "amber" then
+			local tray = selection_tray(selected_paths)
+			if tray then table.insert(dock_rows, tray) end
+		end
 
-		return {
-			main = ui.col({ ui.node("col", { role = "yazi.browser", key = "browser", gap = "sm" }, top_rows) }),
+		return theme.regions({
+			main = ui.col({
+				ui.node("col", { role = "yazi.browser", key = "browser", gap = "sm" }, top_rows),
+			}),
 			-- Region roots are stripped; preserve the row as a child of the dock.
-			dock = ui.col({ status_bar }),
+			dock = ui.col(dock_rows),
 			layer = trash_layer or path_layer,
-		}
+		}, state, cx)
 
 end
 
 M.render = render
+M.hydrate = hydrate
+M.hydration_pending = hydration_pending
 return M

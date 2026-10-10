@@ -68,6 +68,203 @@
     color: var(--t1);
 }
 
+/* Roles live on the native buttons, not on a non-interactive text wrapper. */
+[data-surface="plugin.tern-yazi.companion"] :is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]) {
+    background: rgb(from var(--t1) r g b / 4%);
+    border: 1px solid var(--l2);
+    padding: 2px 8px;
+    color: var(--t2);
+    pointer-events: auto;
+}
+
+[data-surface="plugin.tern-yazi.companion"] :is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]) .sf-text {
+    color: inherit;
+}
+
+[data-surface="plugin.tern-yazi.companion"] :is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]):hover {
+    background: rgb(from var(--t1) r g b / 20%);
+    border-color: var(--t2);
+    color: var(--t1);
+}
+
+/* Only active input parts receive chrome; the reserved row keeps its height. */
+.sf-main[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.input-row"] {
+    align-items: center;
+    flex-wrap: nowrap;
+    min-width: 0;
+    gap: 6px;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"] :is([data-role="yazi.command-label"], [data-role="yazi.command-cancel"]) {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.command-bubble."] {
+    display: flex;
+    align-items: center;
+    flex: 1 1 0;
+    min-width: 0;
+    max-height: 100%;
+    box-sizing: border-box;
+    padding: 2px 8px;
+    border: 1px solid var(--l2);
+    border-radius: 6px;
+    background: rgb(from var(--t1) r g b / 3%);
+    font-family: var(--tv-font, var(--mono));
+    font-size: 12px;
+    line-height: 1.3;
+    white-space: nowrap;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.command-bubble."] > .sf-t-strong {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-weight: 400;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.command-bubble."] > :last-child {
+    flex: 0 0 auto;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.command-cancel"] {
+    pointer-events: auto;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.command-cancel"]:hover {
+    background: rgb(from var(--t1) r g b / 20%);
+    border-color: var(--t2);
+    color: var(--t1);
+}
+
+/* Aurora separates soft capsule controls from the rounded command surface. */
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.input-row"] {
+    gap: 10px;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role^="yazi.command-bubble."] {
+    padding: 2px 12px;
+    border-color: rgb(from var(--accent) r g b / 25%);
+    border-radius: 999px;
+    background: rgb(from var(--accent) r g b / 5%);
+    font-size: 12.5px;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] :is([data-role="yazi.command-label"], [data-role="yazi.command-cancel"]) {
+    padding: 3px 9px;
+    border-radius: 999px;
+    font-family: var(--sans);
+    font-size: 11px;
+}
+
+[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] :is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]) {
+    border-radius: 999px;
+    background: rgb(from var(--accent) r g b / 5%);
+}
+
+[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] :is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]):hover,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.command-cancel"]:hover {
+    background: rgb(from var(--accent) r g b / 24%);
+    border-color: var(--accent);
+    color: var(--t1);
+}
+
+/* Editorial uses a fine writing rule and an independent serif mode heading. */
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.input-row"] {
+    gap: 12px;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role^="yazi.command-bubble."] {
+    padding: 2px 0;
+    border: 0;
+    border-bottom: 1px solid var(--l3);
+    border-radius: 0;
+    background: transparent;
+    font-size: 13px;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.command-label"] {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--ink-pen);
+    font-family: serif;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.command-cancel"] {
+    padding: 2px 8px;
+    border: 0;
+    border-left: 1px solid var(--l3);
+    border-radius: 0;
+    background: transparent;
+    font-family: var(--sans);
+    font-size: 11px;
+}
+
+[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] :is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]) {
+    border-radius: 0;
+    background: transparent;
+}
+
+[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] :is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]):hover,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.command-cancel"]:hover {
+    background: rgb(from var(--ink-pen) r g b / 18%);
+    border-color: var(--ink-pen);
+    color: var(--t1);
+}
+
+/* Amber joins compact monospaced controls into a ruled ledger entry. */
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.input-row"] {
+    gap: 0;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role^="yazi.command-bubble."] {
+    padding: 2px 8px;
+    border-color: var(--l3);
+    border-left: 0;
+    border-right: 0;
+    border-radius: 0;
+    background: rgb(from var(--warn) r g b / 6%);
+    font-size: 12px;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] :is([data-role="yazi.command-label"], [data-role="yazi.command-cancel"]) {
+    padding: 3px 7px;
+    border: 1px solid var(--l3);
+    border-radius: 0;
+    background: rgb(from var(--warn) r g b / 10%);
+    font-family: var(--tv-font, var(--mono));
+    font-size: 11px;
+    line-height: 1.3;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.command-label"] {
+    border-radius: 3px 0 0 3px;
+    font-weight: 700;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.command-cancel"] {
+    border-radius: 0 3px 3px 0;
+}
+
+[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] :is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]) {
+    border-radius: 3px;
+    background: rgb(from var(--warn) r g b / 6%);
+}
+
+[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] :is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]):hover,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.command-cancel"]:hover {
+    background: rgb(from var(--warn) r g b / 26%);
+    border-color: var(--warn);
+    color: var(--t1);
+}
+
 [data-surface="plugin.tern-yazi.companion"] [data-role="yazi.columns"] {
     display: grid;
     grid-template-columns: minmax(0, 4fr) minmax(0, 9fr) minmax(0, 7fr);
@@ -131,6 +328,13 @@
     overflow: auto;
 }
 
+/* Metadata stays above the independent preview scroller. */
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.preview-metadata"] {
+    flex: 0 0 auto;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
 [data-surface="plugin.tern-yazi.companion"] [data-role="yazi.preview-actions"] {
     flex-shrink: 0;
 }
@@ -178,6 +382,22 @@
     text-overflow: ellipsis;
 }
 
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.status-right"] {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    align-items: center;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.status-size"] {
+    white-space: nowrap;
+}
+
+/* Ordinary rwx stays lowercase without corrupting special-bit S/T semantics. */
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.status-permissions"],
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.preview-permissions"] {
+    text-transform: none;
+}
+
 /* Confirmation must obscure the underlying file rows without restyling them. */
 .sf-layer[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.trash-confirm"] {
     background: rgb(from var(--card) r g b / 100%);
@@ -193,4 +413,608 @@
     margin-top: 12px;
     padding-top: 8px;
     border-top: 1px solid var(--l2);
+}
+
+/* Demo profiles decorate the existing native regions; Current has no overrides. */
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"],
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"],
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] {
+    --yazi-parent-width: 172px;
+    --yazi-current-width: 264px;
+    --yazi-column-gap: 12px;
+    --yazi-panel-radius: 14px;
+    --yazi-panel-border: 1px solid var(--l2);
+    --yazi-panel-background: var(--card);
+    --yazi-path-padding: 14px 18px;
+    --yazi-path-radius: 14px;
+    --yazi-path-gap: 7px;
+    --yazi-crumb-padding: 3px 9px;
+    --yazi-crumb-radius: 999px;
+    --yazi-heading-height: 40px;
+    --yazi-heading-padding: 12px;
+    --yazi-heading-size: 11.5px;
+    --yazi-heading-weight: 700;
+    --yazi-body-padding: 8px;
+    --yazi-row-height: 29px;
+    --yazi-row-padding: 12px;
+    --yazi-row-radius: 8px;
+    --yazi-entry-size: 13px;
+    --yazi-preview-title-padding: 16px 18px 12px;
+    --yazi-preview-title-size: 15px;
+    --yazi-preview-title-weight: 600;
+    --yazi-metadata-padding: 0 18px 14px;
+    --yazi-preview-padding: 14px 18px 18px;
+    --yazi-status-height: 34px;
+    --yazi-status-padding: 12px;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"],
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"],
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] {
+    --yazi-parent-width: 150px;
+    --yazi-current-width: 254px;
+    --yazi-column-gap: 0px;
+    --yazi-panel-radius: 0px;
+    --yazi-panel-border: 0px solid transparent;
+    --yazi-panel-background: transparent;
+    --yazi-path-padding: 18px 22px;
+    --yazi-path-radius: 0px;
+    --yazi-path-gap: 9px;
+    --yazi-crumb-padding: 3px 0px;
+    --yazi-crumb-radius: 0px;
+    --yazi-heading-height: 38px;
+    --yazi-heading-padding: 16px;
+    --yazi-heading-size: 11px;
+    --yazi-heading-weight: 600;
+    --yazi-body-padding: 6px 0px;
+    --yazi-row-height: 28px;
+    --yazi-row-padding: 16px;
+    --yazi-row-radius: 0px;
+    --yazi-entry-size: 13.5px;
+    --yazi-preview-title-padding: 22px 24px 10px;
+    --yazi-preview-title-size: 25px;
+    --yazi-preview-title-weight: 400;
+    --yazi-metadata-padding: 0 24px 16px;
+    --yazi-preview-padding: 18px 24px 22px;
+    --yazi-status-height: 34px;
+    --yazi-status-padding: 16px;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"],
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"],
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] {
+    --yazi-parent-width: 186px;
+    --yazi-current-width: 268px;
+    --yazi-column-gap: 12px;
+    --yazi-panel-radius: 8px;
+    --yazi-panel-border: 1px solid var(--l2);
+    --yazi-panel-background: var(--card);
+    --yazi-path-padding: 12px 16px;
+    --yazi-path-radius: 8px;
+    --yazi-path-gap: 6px;
+    --yazi-crumb-padding: 3px 5px;
+    --yazi-crumb-radius: 4px;
+    --yazi-heading-height: 34px;
+    --yazi-heading-padding: 11px;
+    --yazi-heading-size: 11px;
+    --yazi-heading-weight: 700;
+    --yazi-body-padding: 6px;
+    --yazi-row-height: 26px;
+    --yazi-row-padding: 11px;
+    --yazi-row-radius: 4px;
+    --yazi-entry-size: 12.5px;
+    --yazi-preview-title-padding: 14px 15px 10px;
+    --yazi-preview-title-size: 13.5px;
+    --yazi-preview-title-weight: 700;
+    --yazi-metadata-padding: 12px 15px;
+    --yazi-preview-padding: 12px 15px 16px;
+    --yazi-status-height: 32px;
+    --yazi-status-padding: 11px;
+}
+
+/* Explicit pane markers, not viewport media queries, determine the layout. */
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.columns"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.columns"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.columns"] {
+    grid-template-columns: var(--yazi-parent-width) var(--yazi-current-width) minmax(0, 1fr);
+    gap: var(--yazi-column-gap);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role="yazi.theme.aurora.narrow"] [data-role="yazi.columns"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role="yazi.theme.editorial.narrow"] [data-role="yazi.columns"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role="yazi.theme.amber.narrow"] [data-role="yazi.columns"] {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role="yazi.theme.aurora.narrow"] [data-role="yazi.column.parent"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role="yazi.theme.editorial.narrow"] [data-role="yazi.column.parent"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role="yazi.theme.amber.narrow"] [data-role="yazi.column.parent"] {
+    display: none;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.browser"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.browser"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.browser"] {
+    min-width: 0;
+    gap: 0;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.path-header"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.path-header"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.path-header"] {
+    margin: 0;
+    border: var(--yazi-panel-border);
+    border-radius: var(--yazi-path-radius);
+    background: var(--yazi-panel-background);
+    box-shadow: none;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.path-header"] > .sf-card-body,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.path-header"] > .sf-card-body,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.path-header"] > .sf-card-body {
+    padding: var(--yazi-path-padding);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.path-content"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.path-content"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.path-content"] {
+    gap: var(--yazi-path-gap);
+    font-size: 12px;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.path-segment"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.path-segment"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.path-segment"] {
+    padding: var(--yazi-crumb-padding);
+    border-radius: var(--yazi-crumb-radius);
+    font-variant-numeric: normal;
+    text-transform: none;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role^="yazi.column."],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role^="yazi.column."],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role^="yazi.column."] {
+    margin: 0;
+    border: var(--yazi-panel-border);
+    border-radius: var(--yazi-panel-radius);
+    background: var(--yazi-panel-background);
+    box-shadow: none;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role^="yazi.column."] > .sf-card-head,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role^="yazi.column."] > .sf-card-head,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role^="yazi.column."] > .sf-card-head {
+    height: var(--yazi-heading-height);
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    padding: 0 var(--yazi-heading-padding);
+    border-bottom: 1px solid var(--l2);
+    font-size: var(--yazi-heading-size);
+    font-weight: var(--yazi-heading-weight);
+    font-variant-numeric: normal;
+    text-transform: none;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role^="yazi.column."] > .sf-card-body,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role^="yazi.column."] > .sf-card-body,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role^="yazi.column."] > .sf-card-body {
+    padding: var(--yazi-body-padding);
+    gap: 0;
+}
+
+/* File title and real metadata stay fixed above the existing preview scroller. */
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.column.preview"] > .sf-card-head,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.column.preview"] > .sf-card-head,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.column.preview"] > .sf-card-head {
+    height: auto;
+    min-height: var(--yazi-heading-height);
+    padding: var(--yazi-preview-title-padding);
+    font-size: var(--yazi-preview-title-size);
+    font-weight: var(--yazi-preview-title-weight);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.column.preview"] > .sf-card-body,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.column.preview"] > .sf-card-body,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.column.preview"] > .sf-card-body {
+    padding: 0;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.preview-metadata"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.preview-metadata"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.preview-metadata"] {
+    padding: var(--yazi-metadata-padding);
+    gap: 12px;
+    border-bottom: 1px solid var(--l2);
+    font-size: 11.5px;
+    font-variant-numeric: normal;
+    text-transform: none;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.preview"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.preview"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.preview"] {
+    padding: var(--yazi-preview-padding);
+    box-sizing: border-box;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.preview-actions"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.preview-actions"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.preview-actions"] {
+    display: none;
+}
+
+/* Region roots are stripped by Tern, so dock ordering lives on the region. */
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"],
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"],
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 0;
+    padding: 0;
+    background: var(--card);
+    border-top: 1px solid var(--l2);
+}
+
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.status"],
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.status"],
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.status"] {
+    flex: 0 0 auto;
+    align-items: center;
+    height: var(--yazi-status-height);
+    box-sizing: border-box;
+    padding: 0 var(--yazi-status-padding);
+    gap: 10px;
+    overflow: hidden;
+    font-size: 11.5px;
+    font-variant-numeric: normal;
+    text-transform: none;
+}
+
+/* Never apply the reference's small caps to real paths, names or permissions. */
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.status-name"],
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.status-name"],
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.status-name"],
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.status-permissions"],
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.status-permissions"],
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.status-permissions"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.preview-permissions"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.preview-permissions"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.preview-permissions"] {
+    font-variant-numeric: normal;
+    text-transform: none;
+    letter-spacing: normal;
+}
+
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.selection-tray"] {
+    order: -1;
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+    align-items: center;
+    min-width: 0;
+    height: 40px;
+    max-height: 40px;
+    box-sizing: border-box;
+    padding: 8px 15px;
+    gap: 8px;
+    overflow: hidden;
+    border-bottom: 1px solid var(--l2);
+    background: rgb(from var(--t1) r g b / 3%);
+}
+
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.selection-chip"] {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 150px;
+    padding: 3px 9px;
+    border: 1px solid var(--l3);
+    border-radius: 4px;
+    font-size: 11.5px;
+    font-variant-numeric: normal;
+    text-transform: none;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.selection-overflow"] {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    font-size: 11.5px;
+}
+
+/* Opaque native popovers retain hit testing and their existing scroll limits. */
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.path-ancestors"],
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.path-ancestors"],
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.path-ancestors"],
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.trash-confirm"],
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.trash-confirm"],
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.trash-confirm"] {
+    min-width: 0;
+    padding: 0;
+    background: rgb(from var(--card) r g b / 100%);
+    color: var(--t1);
+    border: 1px solid var(--l3);
+    border-radius: var(--yazi-panel-radius);
+    box-shadow: none;
+    pointer-events: auto;
+}
+
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.path-ancestors"] > .sf-card-body,
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.path-ancestors"] > .sf-card-body,
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.path-ancestors"] > .sf-card-body,
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.trash-confirm"] > .sf-card-body,
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.trash-confirm"] > .sf-card-body,
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.trash-confirm"] > .sf-card-body {
+    padding: var(--yazi-path-padding);
+}
+
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.path-segment"],
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.path-segment"],
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.path-segment"] {
+    padding: var(--yazi-crumb-padding);
+    border-radius: var(--yazi-crumb-radius);
+    font-variant-numeric: normal;
+    text-transform: none;
+}
+
+/* Native rows keep their keys, cursor reveal and authoritative mark spans. */
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role^="yazi.column."] .sf-item,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role^="yazi.column."] .sf-item,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role^="yazi.column."] .sf-item {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    height: var(--yazi-row-height);
+    min-height: var(--yazi-row-height);
+    max-height: var(--yazi-row-height);
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 0 var(--yazi-row-padding);
+    border: 1px solid transparent;
+    border-radius: var(--yazi-row-radius);
+    font-size: var(--yazi-entry-size);
+    font-variant-numeric: normal;
+    text-transform: none;
+    overflow: hidden;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.column.preview"] > .sf-card-body > .sf-list,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.column.preview"] > .sf-card-body > .sf-list,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.column.preview"] > .sf-card-body > .sf-list {
+    padding: var(--yazi-body-padding);
+}
+
+/* Aurora: separated, rounded cards and quieter capsule navigation. */
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.path-segment"],
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.path-segment"] {
+    border: 1px solid var(--l2);
+    background: rgb(from var(--t1) r g b / 4%);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role^="yazi.column."] > .sf-card-head {
+    background: rgb(from var(--t1) r g b / 3%);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.column.preview"] > .sf-card-head {
+    border-bottom: 0;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role^="yazi.column."] .sf-item.sel {
+    border-color: rgb(from var(--accent) r g b / 40%);
+    background: rgb(from var(--accent) r g b / 12%);
+    box-shadow: none;
+}
+
+/* Editorial: one flat reading plane, fine rules and a larger preview title. */
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.path-header"] {
+    border-bottom: 1px solid var(--l3);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.path-segment"],
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.path-segment"] {
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.column.current"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.column.preview"] {
+    border-left: 1px solid var(--l2);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role="yazi.theme.editorial.narrow"] [data-role="yazi.column.current"] {
+    border-left: 0;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role^="yazi.column."] > .sf-card-head {
+    background: transparent;
+    border-bottom-color: var(--l3);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.column.preview"] > .sf-card-head {
+    border-bottom: 0;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role^="yazi.column."] .sf-item {
+    border-left: 3px solid transparent;
+    border-bottom: 1px solid var(--l2);
+    background: transparent;
+    box-shadow: none;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role^="yazi.column."] .sf-item.sel {
+    border-left-color: var(--ink-pen);
+    background: rgb(from var(--ink-pen) r g b / 6%);
+}
+
+/* Ledger: compact ruled rows; ordinals remain the actual ordered-list text. */
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role^="yazi.column."] > .sf-card-head,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.preview-metadata"] {
+    background: rgb(from var(--t1) r g b / 4%);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role^="yazi.column."] .sf-item {
+    border-bottom: 1px dotted var(--l2);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role^="yazi.column."] .sf-item:nth-child(odd) {
+    background: rgb(from var(--t1) r g b / 3%);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role^="yazi.column."] .sf-item.sel {
+    border: 1px solid rgb(from var(--warn) r g b / 45%);
+    background: rgb(from var(--warn) r g b / 13%);
+    box-shadow: none;
+}
+
+/* These inner parts and semantic span classes are documented native hooks. */
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role^="yazi.column."] .sf-item-label,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role^="yazi.column."] .sf-item-label,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role^="yazi.column."] .sf-item-label {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: var(--yazi-entry-size);
+    line-height: 1.3;
+    text-transform: none;
+    color: var(--t2);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role^="yazi.column."] .sf-item.sel .sf-item-label,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role^="yazi.column."] .sf-item.sel .sf-item-label,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role^="yazi.column."] .sf-item.sel .sf-item-label {
+    color: var(--t1);
+    font-weight: 600;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role^="yazi.column."] > .sf-card-head > .sf-head,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role^="yazi.column."] > .sf-card-head > .sf-head,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role^="yazi.column."] > .sf-card-head > .sf-head {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: inherit;
+    font-weight: inherit;
+    line-height: 1.3;
+    text-transform: none;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role^="yazi.column."] > .sf-card-head > .sf-head > .sf-t-strong,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role^="yazi.column."] > .sf-card-head > .sf-head > .sf-t-strong,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role^="yazi.column."] > .sf-card-head > .sf-head > .sf-t-strong {
+    font-weight: inherit;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.column.preview"] > .sf-card-head > .sf-head > .sf-t-muted,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.column.preview"] > .sf-card-head > .sf-head > .sf-t-muted,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.column.preview"] > .sf-card-head > .sf-head > .sf-t-muted {
+    font-family: var(--sans);
+    font-size: 11.5px;
+    font-weight: 400;
+}
+
+/* Typography changes stop at navigation and lists, never at code or images. */
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.path-content"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.path-content"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role^="yazi.column."] .sf-item-label,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role^="yazi.column."] .sf-item-label,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role^="yazi.column."] > .sf-card-head > .sf-head {
+    font-family: var(--sans);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.column.preview"] > .sf-card-head > .sf-head {
+    font-family: serif;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.path-content"],
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role^="yazi.column."] .sf-item-label,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role^="yazi.column."] > .sf-card-head > .sf-head,
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.status"],
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.selection-tray"] {
+    font-family: var(--tv-font, var(--mono));
+    font-variant-numeric: tabular-nums;
+}
+
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.selection-chip"] {
+    border-color: rgb(from var(--warn) r g b / 40%);
+    background: rgb(from var(--warn) r g b / 8%);
+    color: var(--t1);
+}
+
+/* Native label spans retain terminal glyph fallback, independent of their tone. */
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role^="yazi.column."] .sf-item-label > span:not(.sf-t-strong),
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role^="yazi.column."] .sf-item-label > span:not(.sf-t-strong) {
+    font-family: var(--tv-font, var(--mono));
+}
+
+/* Fold/edit affordances remain distinct hit targets, without toolbar chrome. */
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] :is([data-role="yazi.path-more"], [data-role="yazi.path-edit"]),
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] :is([data-role="yazi.path-more"], [data-role="yazi.path-edit"]),
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] :is([data-role="yazi.path-more"], [data-role="yazi.path-edit"]) {
+    padding: var(--yazi-crumb-padding);
+    border: 1px solid transparent;
+    border-radius: var(--yazi-crumb-radius);
+    background: transparent;
+    box-shadow: none;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.path-segment"]:hover,
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.path-segment"]:hover {
+    background: rgb(from var(--accent) r g b / 10%);
+    border-color: rgb(from var(--accent) r g b / 30%);
+    color: var(--t1);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.path-segment"]:hover,
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.path-segment"]:hover {
+    background: rgb(from var(--ink-pen) r g b / 6%);
+    color: var(--t1);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.path-segment"]:hover,
+.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.path-segment"]:hover {
+    background: rgb(from var(--warn) r g b / 10%);
+    color: var(--t1);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] :is([data-role="yazi.path-more"], [data-role="yazi.path-edit"]):hover,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] :is([data-role="yazi.path-more"], [data-role="yazi.path-edit"]):hover,
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] :is([data-role="yazi.path-more"], [data-role="yazi.path-edit"]):hover {
+    background: rgb(from var(--t1) r g b / 6%);
+    color: var(--t1);
+}
+
+/* Footer presentation differs without moving or replacing its real fields. */
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.status"] .sf-badge {
+    border-radius: 999px;
+    font-size: 11.5px;
+}
+
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.status"] .sf-badge {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    color: var(--t1);
+    font-size: 11.5px;
+}
+
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.status"] > .sf-badge {
+    color: var(--ink-pen);
+    font-weight: 700;
+}
+
+.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.status"] .sf-badge {
+    padding: 2px 7px;
+    border-radius: 3px;
+    border-color: rgb(from var(--warn) r g b / 25%);
+    background: rgb(from var(--warn) r g b / 10%);
+    color: var(--t1);
+    font-size: 11.5px;
 }
