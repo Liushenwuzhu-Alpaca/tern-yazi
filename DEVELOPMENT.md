@@ -6,7 +6,7 @@ This document describes the native `tern-yazi` implementation: a Rust PTY superv
 
 ### Runtime reference
 
-The current Linux interactive verification environment uses:
+The recorded Linux interactive verification environment uses:
 
 | Component | Observed version | Responsibility |
 | --- | --- | --- |
@@ -93,8 +93,21 @@ Configure `luau-lsp.types.definitionFiles` to include the resulting `tern.d.luau
 | File | Responsibility |
 | --- | --- |
 | [`plugin.toml`](plugin.toml) | Plugin identity, host/window entry points, stylesheet, palette-visible companion block |
-| [`host.luau`](host.luau) | Persisted client/token binding, 500 ms block-owned health/lease polling, liveness gating, view/events, keys, serialized requests, previews, confirmation |
-| [`window.luau`](window.luau) | Managed visual zoom overlay creation/adoption, owner zoom and terminal return mappings in KV, token/nonce lease handshake, shell terminal handoff challenge, close handling, layouts, commands, 500 ms health/configuration polling |
+| [`host.luau`](host.luau) | Thin host entry: requires `frontend/host` and calls `register()` |
+| [`window.luau`](window.luau) | Thin window entry: requires `frontend/window` and calls `register()` |
+| [`frontend/host.luau`](frontend/host.luau) | Block lifecycle/presentation coordinator; owns native effect contexts and applies backend results to the block |
+| [`frontend/view.luau`](frontend/view.luau) | Native UI tree, stable node IDs/keys, regions, and preview presentation |
+| [`frontend/format.luau`](frontend/format.luau) | Presentation-only `fmt_size` labels and `file_icon` glyph/tone policy, using backend semantic file classification |
+| [`frontend/input.luau`](frontend/input.luau) | Native key/event handling and local input editing, including UTF-16 caret semantics |
+| [`frontend/window.luau`](frontend/window.luau) | Window presentation coordinator: native layouts, pane focus/zoom, routes, and terminal/block presentation |
+| [`backend/session.luau`](backend/session.luau) | Pinned snapshots, identity, health/lease polling, liveness, and session lifecycle data |
+| [`backend/actions.luau`](backend/actions.luau) | Serialized Yazi actor requests, process dispatch, replies, and action completion data |
+| [`backend/model.luau`](backend/model.luau) | Pure snapshot types, ordered listing/selection projection, and semantic extension/language/MIME/archive classification; no display labels, icons, tones, or native UI construction |
+| [`backend/preview.luau`](backend/preview.luau) | Preview settings, bounded file reads, archive listing data, and data-only preview results |
+| [`backend/preview_policy.luau`](backend/preview_policy.luau) | Pure shared byte-limit map and defaults for preview reads and the window settings command |
+| [`backend/window.luau`](backend/window.luau) | Managed record/lease reconciliation, reload identity, shell handoff, and window lifecycle bookkeeping |
+| [`backend/inbox.luau`](backend/inbox.luau) | Shared runtime inbox resolution, capped JSON reads, and lease-hint parsing |
+| [`shared/path.luau`](shared/path.luau) | Pure `basename`, `safe_cid`, and `join_path` helpers; no runtime state or I/O |
 | [`companion.css`](companion.css) | Three-column geometry, pane-contained list/preview scrolling, image containment, footer and confirmation styling |
 | [`yazi-plugin/tern.yazi/main.lua`](yazi-plugin/tern.yazi/main.lua) | Yazi telemetry hooks, atomic snapshots/replies, request decoding, actor dispatch, target selection guard |
 | [`launcher/src/main.rs`](launcher/src/main.rs) | Invisible PTY, generated client/token, startup checks, heartbeat/lease/stop handling, process-group termination and owned runtime cleanup |
@@ -116,23 +129,32 @@ shell: yazi [args]
                           |
                           +-- invisible PTY --> original Yazi --client-id CID [args]
                           |                          |
-                          |                 tern.yazi/main.lua
+                          |                 tern.yazi/main.lua (authoritative actor)
                           |                          |
                           |                 atomic state-CID.json / replies
                           |
                           +-- managed-CID.json heartbeat every 500 ms
                                        |
-                             window.luau polls every 500 ms
+                          backend/window + backend/session
+                          (health, snapshots, leases, identity)
                                        |
-                             native visual zoom overlay preserving owner shell and split tree
-                                       |
-                             host.luau pinned to CID + token; 500 ms poll
-                                       |
-                             serialized ya emit-to CID plugin tern <JSON>
-                                       |
-                             Yazi actor --> reply + next snapshot
+                   frontend/window             frontend/host
+                   (layout/pane effects)        (block presentation coordinator)
+                                       |                    |
+                             managed visual zoom       frontend/view + input
+                             preserving owner shell    (native UI/input)
+                                                            |
+                                                  backend/actions
+                                                  (serialized ya emit-to)
+                                                            |
+                                                  Yazi actor --> reply + snapshot
 
-host/window --> token-bound lease / stop --> supervisor --> terminate + reap
+backend/session + backend/window --> token-bound lease / stop
+                                 --> supervisor --> terminate + reap
+backend/preview --> plain preview data --> frontend native preview/blob adapter
+
+host.luau / window.luau: explicit registrations only
+frontend --> backend --> shared/path; no reverse UI dependency
 ```
 
 ### Yazi setup and snapshot production
@@ -229,10 +251,10 @@ A representative snapshot is:
 }
 ```
 
-`files` preserves Yazi's filtered/sorted current listing; `file_dirs` maps visible entry names to directory booleans without filesystem scanning. `parent` and `preview` provide bounded directory snapshots (at most 30 entries each). `filter` is an authoritative string when an active filter is applied, `false` when inactive, or `null` if unexposed; it is included in snapshot deduplication, and `sync_hover()` syncs `filter_query` when not actively editing in filter mode and no requests are queued. Persistent `selected_urls` are sorted absolute paths. `mode` is `normal`, `select`, or `unset`. `marked_urls` carries visual-range marks, separate from persistent selection. Hover and parent objects can be absent; protected task reads fall back to zero counters on failure. `client_id` comes from `YAZI_ID`, with `default` as fallback. Managed startup supplies its generated numeric ID; ordinary attach fixtures should use the original executable, for example `/usr/bin/yazi --client-id 987654323`, because the managed wrapper reserves that option. Host attach discovery accepts numeric filenames.
+`files` preserves Yazi's filtered/sorted current listing; `file_dirs` maps visible entry names to directory booleans without filesystem scanning. `parent` and `preview` provide bounded directory snapshots (at most 30 entries each). `filter` is an authoritative string when an active filter is applied, `false` when inactive, or `null` if unexposed; it is included in snapshot deduplication. `frontend/input.sync_hover()` syncs `filter_query` unless local filter editing or `backend/actions.pending_filter(state)` indicates a pending filter mutation. Unrelated escape/action acknowledgements do not block authoritative filter synchronization. Persistent `selected_urls` are sorted absolute paths. `mode` is `normal`, `select`, or `unset`. `marked_urls` carries visual-range marks, separate from persistent selection. Hover and parent objects can be absent; protected task reads fall back to zero counters on failure. `client_id` comes from `YAZI_ID`, with `default` as fallback. Managed startup supplies its generated numeric ID; ordinary attach fixtures should use the original executable, for example `/usr/bin/yazi --client-id 987654323`, because the managed wrapper reserves that option. Host attach discovery accepts numeric filenames.
 ### Request serialization
 
-The host maintains a FIFO queue and sends one request at a time. Each request freezes its pinned destination client at enqueue time. IDs combine an epoch from `tern.now()`, the pane identifier, and an incrementing counter; managed requests additionally prefix the client ID and session token, allowing the supervisor to clean up its own replies. Enqueue/dispatch check client identity and liveness. The Yazi executor validates IDs against `^[%w-]+$` before constructing reply paths.
+`backend/actions.luau` maintains the host VM's FIFO queue and sends one request at a time. Each request freezes its pinned destination client at enqueue time. IDs combine an epoch from `tern.now()`, the pane identifier supplied by the frontend coordinator, and an incrementing counter; managed requests additionally prefix the client ID and session token, allowing the supervisor to clean up its own replies. Enqueue/dispatch check client identity and liveness. The Yazi executor validates IDs against `^[%w-]+$` before constructing reply paths.
 
 The process invocation is an argv array:
 
@@ -242,7 +264,7 @@ ya emit-to <client-id> plugin tern <quoted-request-json>
 
 The JSON must additionally be quoted for Yazi's plugin-argument parser. `pump()` wraps the encoded JSON in single quotes and escapes embedded apostrophes independently of process argv boundaries. Keep this second parsing layer when changing serialization.
 
-Mixed Lua tables cannot safely encode both positional and named arguments as a JSON array. The host splits them into explicit wire members; Yazi reconstructs numeric and option keys before calling its actor:
+Mixed Lua tables cannot safely encode both positional and named arguments as a JSON array. The backend splits them into explicit wire members; Yazi reconstructs numeric and option keys before calling its actor:
 
 ```json
 {
@@ -276,7 +298,7 @@ Empty argument collections may encode as empty objects; the decoder treats missi
 
 Yazi writes a reply to `reply-<id>.json` by writing/closing a `.tmp` file and renaming it. Replies contain `id` and `ok`, plus `error` on failure, or operation-specific `paths`, `queued`, and `confirm_trash` fields.
 
-A successful `ya` exit only proves transport dispatch. After it exits successfully, the host polls the reply file immediately and then every 50 ms, up to 200 attempts (approximately 10 seconds). A matching reply ID is consumed and its file removed. The next queued request begins only after the current one finishes. A failure clears the remaining queue and optimistic cursor/cwd, and displays the actual error. Spawn errors, nonzero transport exits, invalid/missing replies, and timeout are not reported as success.
+A successful `ya` exit only proves transport dispatch. After it exits successfully, the backend polls the reply file immediately and then every 50 ms, up to 200 attempts (approximately 10 seconds). A matching reply ID is consumed and its file removed. The next queued request begins only after the current one finishes. A failure clears the remaining queue and optimistic cursor/cwd, and reports the actual error to the frontend for presentation. Spawn errors, nonzero transport exits, invalid/missing replies, and timeout are not reported as success.
 
 An `ok` reply acknowledges actor acceptance or the target pipeline's settled dispatch, not completion of an opener, shell process, trash job, or filesystem task. Inspect Yazi task results and fixture files for end-to-end outcomes. Timeout explicitly means the outcome is unknown; do not blindly retry a destructive request. Late/unconsumed replies can remain in the inbox.
 
@@ -285,8 +307,8 @@ An `ok` reply acknowledges actor acceptance or the target pipeline's settled dis
 Managed shell commands execute through a private `PATH` shim directory (`shim-<cid>-<token>`) created by the supervisor and placed at the head of Yazi's `PATH`. When Yazi dispatches a blocking shell execution, the shim script executes `tern-yazi-launch --native-shell [args]`:
 
 1. **Request creation**: `--native-shell` reads `managed-<cid>.json` and the active lease to verify the supervisor binding. It creates `native-shell-<id>.json` in the runtime inbox, where `id = <cid>-<token>-<pid>`, containing `{ version = 1, id = id, cid = cid, token = token, pane = pane, owner_pane = owner_pane, cwd = cwd, argv = argv }`.
-2. **Routing and verification**: `window.luau` (`tern.route.open`) claims the request path, verifying `id`, `pane`, `cid`, `token`, `owner_pane`, and the active lease. `host.luau` also monitors pending requests via `poll_native_shells` to ensure timely routing if the window route is delayed.
-3. **Terminal launch**: Upon verification, the window splits the companion pane to the right (`cx.layout:split`) running `tern-yazi-launch --native-terminal <id> <path>` in a real PTY terminal, and zooms the terminal pane.
+2. **Routing and verification**: The registered `tern.route.open` handler delegates to `frontend/window.luau`; `backend/window.luau` claims and verifies the request's `id`, `pane`, `cid`, `token`, `owner_pane`, and active lease. The host coordinator also calls `backend/actions.poll_native_shells` to monitor pending requests and report a plain open-path effect for timely routing if the window route is delayed.
+3. **Terminal launch**: Upon verification, the backend returns terminal launch data. The window frontend applies it by splitting the companion pane to the right (`cx.layout:split`) running `tern-yazi-launch --native-terminal <id> <path>` in a real PTY terminal, and zooms the terminal pane.
 4. **Execution and synchronization**:
    - When the terminal opens, it creates `native-shell-<id>.started` containing the request ID.
    - The terminal runs the command with full stdout, stderr, and interactive stdin.
@@ -309,11 +331,58 @@ The native companion does not run `ya sub` or use this DDS stream as its view tr
 
 ### UI architecture and boundaries
 
-The current UI and logic implementation is partially isolated: `host.luau` combines UI tree rendering, local action dispatching, and asynchronous IPC/RPC coordination in one module. CSS style (`companion.css`), window layout and lifecycle (`window.luau`), and authoritative file-manager state (`main.lua` and Yazi snapshots) are separated into distinct layers; no refactor is claimed.
+The native Luau implementation separates presentation from runtime coordination. Root `host.luau` and `window.luau` retain the manifest entry paths but only register their respective frontend handlers. Frontend modules render native UI, handle input, and apply block/window effects. Backend modules own snapshots, actor IPC, liveness, process/file I/O, preview data, and lifecycle bookkeeping. The Rust supervisor and Yazi Lua actor remain the external authorities described above; this is a module-boundary refactor, not another process, daemon, Python runtime, or Yazi core patch. The existing `companion.css`, UI behavior, protocol records, and timing remain the contract.
+
+The dependency direction is entry -> frontend -> backend -> shared helpers. Backend modules may use pure model/path helpers and other backend modules, but cannot import frontend modules. Shared helpers perform no I/O and do not depend on either runtime half. Keep the graph acyclic and reuse snapshot/string references rather than cloning data simply to cross a layer.
+
+- Frontend modules must not call `tern.fs` or `tern.process`, and must not read/write inbox protocol records themselves. They own `tern.ui` nodes, native input, `BlockCx`/`EffectCx`/window presentation contexts, and presentation effects such as toast, open, block creation/exit, focus, zoom, and layout.
+- Backend modules must not import `tern.ui`, construct `Node`/`ui.*`, or call presentation methods. Non-mutating pane metadata is supplied by the frontend or an explicit query callback. Completion is reported as plain results/events or `on_change` callbacks; the owning frontend coordinator decides which native effect or render to perform.
+- File-preview reads return data, not native nodes. Uploading image bytes through `cx:blob` remains a frontend presentation adapter; it is not backend file I/O. Short preview warnings are preserved without forwarding raw exceptions into the UI.
+
+Tern's verified [Packages and Manifests: Modules and `require`](https://docs.stencil.so/tern/concepts/packages.html#modules-and-require) contract supports package-local `require('./module')` and `require('../module')`, resolved relative to the calling file. For example, a frontend module imports `require('../backend/session')`, while backend modules can import `require('./inbox')` and `require('../shared/path')`. Paths cannot leave the package. Modules are cached by resolved file within each VM: the host and each window VM load independent instances, so a shared module is not a cross-VM singleton. Cross-VM state continues to flow through the existing inbox records and plugin-private `tern.kv` store, not module globals.
+
+### Shared module contracts
+
+`shared/path.luau` exports the existing pure helpers. `basename(path?)` returns the final path component, with `Yazi` for an absent/empty path. `safe_cid(value)` normalizes an ID to a string (numeric IDs use integer formatting); it is not numeric-ID validation. `join_path(dir?, name?)` combines the existing components without filesystem resolution or path normalization.
+
+`backend/inbox.luau` exports `state_dir()` for the shared runtime location, `read_json(path)` for capped 256 KiB reads returning a decoded table or `nil` on read/decode failure, and `lease_hint(cid)` returning `(token, pane, nonce)`. Lease-hint reads are capped at 4096 bytes; parsing retains the existing two-field fallback with no nonce. A parsed lease is still only a hint: matching identity and the current nonce acknowledgement are required for managed adoption.
+
+`backend/preview_policy.luau` exports the pure `limits` map (category `default` and `max`) and `defaults()` for the settings value. Both host preview reads and the window configuration command use this single unchanged policy; each VM still has its own module instance.
+
+### Callback and coordinator ownership
+
+The layers execute in the existing host/window VMs, not separate frontend/backend processes. Tern's [native callback lifecycle](https://docs.stencil.so/tern/concepts/runtime.html#timers-process-and-fetch-callbacks) serializes timer/process callbacks with other handlers in each VM. Processes run off the VM thread, but their completion callbacks return to that VM; pending callbacks end with the VM at reload.
+
+Frontend coordinators own presentation contexts and consume backend change/completion notifications. A backend completion can change model/request data or report a plain result, but does not render, show a toast, open a file, launch a native block, or alter pane layout. The block coordinator retains the latest context supplied by `view` for timer-driven effects and lease dimensions; the window coordinator owns pane/layout effects around backend identity and reconciliation decisions. This preserves the existing callback ordering, 500 ms polling, reload adoption, and exactly-once file/shell routing rather than introducing another scheduler.
+
+The host coordinator's `register()` owns block/hook registration. It assembles one block state with `session.new(args, saved, pane)`, `input.init(state)`, and `preview.init(state)`, then wires callbacks before `session.install(state)` starts polling:
+
+- `on_event(event)` consumes the backend events `toast`, `open`, `restore_command`, and `reset_input`; native toast/open effects stay in `frontend/host`, while input restoration/reset goes to `frontend/input`. A liveness/request failure reports `reset_input` with an optional `clear_trash` flag instead of having the backend mutate controller state.
+- `on_change()` renders through the current block context. `on_poll(yz)` coordinates shell discovery and managed lease refresh or an ordinary actor probe. `on_close()` clears owned action handoffs and releases the retained presentation context.
+- `session.read_latest_state`, `refresh_live`, `managed_poll`, `close`, and `save` own protocol/session operations. The frontend injects the read-only `state.pane_list` query; `managed_poll` receives plain `{pane, rows, cols}` metadata, never a native context. `start_discovery(can_open, on_open)` reports a verified managed-record path to the frontend's retained shell effect context; it does not open the path itself.
+- `actions.request(state, yz, body, done?)` and `action(state, yz, name, args)` own the serialized actor queue; request completion receives a plain reply. `open_selected`, `open_shell`, their handoff-event handlers, and `terminal_here` own I/O and report presentation/completion events rather than using a block context.
+- `actions.pending_filter(state)` returns whether the owned request queue contains a pending filter mutation, without allocating another queue/list. Input synchronization uses this narrower query rather than waiting for unrelated requests to settle.
+- `frontend/input` exports `init`, `close`, `reset`, `restore_command`, `sync_hover`, `key`, and `event`. It owns editing, optimistic cursor/cwd, and trash-confirmation controller state and calls action APIs. `frontend/view.render(state, cx, yz, prepared, preview_data)` owns every native node, consuming pure `model.presentation(state, yz)` data and the frontend-prepared preview payload.
+- `frontend/format` exports `fmt_size` and `file_icon` for display labels and glyph/tone selection. These presentation policies are separate from the backend model's semantic file classification.
+
+`frontend/view` depends on `frontend/format` and the pure model/path helpers; it does not call the preview backend. `frontend/format` uses only the backend model's semantic extension/archive classification. `frontend/host` coordinates `input`/`view` with `session`/`actions`/`model`/`preview`. On the backend side, `actions` depends on `session`/`inbox`, `session` on `model`/`inbox`, and `preview` on `model`/`session`/`preview_policy`; path helpers are shared without reverse dependencies.
+
+The block keeps a single state object across those modules; `session.current(state)` is the common ownership guard for asynchronous results. This is not a cloned frontend/backend state pair.
+
+### Window coordinator contract
+
+`frontend/window.register()` registers the managed/shell/files/native open routes, window-start and pane-close handlers, the 500 ms timer, toggle/preview-limit commands, and `Ctrl+Alt+Y`. It depends on `backend/window`, which in turn depends only on `inbox` and the pure `preview_policy`. The frontend supplies read-only `query.pane(id)`, `query.tab_of(id)`, and `query.zoomed(id)` callbacks; the backend never receives a `cx` or a presentation callback.
+
+- Managed discovery uses `discover_managed(panes)` and `next_managed(scan)` to consume candidates in order. For each candidate, `managed_launch_plan`/`managed_launched`, `managed_active`, `managed_lease`, and `managed_poll` surround the frontend's actual launch/adoption and event delivery. Preserve discovery -> frontend launch/adopt -> lease verification ordering; do not collect all candidates and delay their presentation until after the scan. `finish_managed_scan` returns offline pane IDs. `focused_managed`, `managed_closed`, and `managed_request` supply toggle, restoration, and wake decisions.
+- `shell_request`, `files_request`, and `native_request` return either no match or plain handled-route data: an unavailable/message result, an event to send, a terminal launch plan, or a frozen file batch. The frontend alone calls split/open/close/zoom/toast and sends native session events. `shell_completed`, `files_completed`, and `native_completed` record/report the outcome of those effects; a native request is persistently claimed before its launch plan is returned.
+- `expire_native_terminals` returns terminal pane IDs to close; `shell_closed` returns the previous restoration record; `expire_handoffs` returns events to deliver. Protocol bookkeeping and cleanup remain backend-owned, while layout restoration remains frontend-owned.
+- `preview_config_changed()` reports whether the frontend should send ordinary block poll events. `initialize_preview_limits()` uses `preview_policy.defaults()` before the frontend opens the settings file.
+
+The backend retains managed/closed clients, shell/file pending handoffs, reload nonces, and the `shell_terminals`/`native_shell_requests` KV registries. The frontend owns `managed_overlays` KV entries and local restoration flags because they represent UI intent, not protocol authority. These module tables remain VM-local; the existing shared inbox/KV contracts provide reload and cross-VM continuity.
 
 ### Authoritative versus optimistic state
 
-Yazi snapshots own the current directory listing, cursor, persistent selection, visual marks, and tasks. The host retains only local editing state, a provisional `active_file`/`optimistic_cwd`, pending trash paths, request queue, and archive cache.
+Yazi snapshots own the current directory listing, cursor, persistent selection, visual marks, and tasks. The companion retains only local editing state, a provisional `active_file`/`optimistic_cwd`, pending trash paths, request queue, and archive cache. Presentation/input state stays with the frontend; protocol coordination and preview data belong to backend modules, without creating another authoritative file-manager state.
 
 `sync_hover()` clears optimistic state when the source client, cwd, or hovered URL changes. A task-only or selection-only snapshot with those three values unchanged must not discard a click that is still being dispatched. This distinction is important for the click-then-keyboard regression: a click requests an actual Yazi `reveal`, and later `j`/`k` moves from that real cursor, not from a Tern-only highlight.
 
@@ -449,11 +518,28 @@ Edit the `preview_limits` member and save the file. Preserve other store keys:
 
 Values are positive, finite integer byte counts. Missing/invalid fields use their category defaults; values above the category maximum are clamped. A missing store is empty. Invalid JSON or an unreadable store displays the concise warning `Preview settings unavailable` instead of silently applying a different configuration.
 
-`tern.kv.get` rereads the file when it changes on disk, shared across the plugin's host/window VMs. The window's 500 ms configuration-stamp check sends a normal `poll` event to existing blocks when the encoded store value or error changes. Each block's own 500 ms timer also checks its configuration stamp, snapshot timestamp/sequence, and live state, rendering when those values change independently of window frames. The host resolves limits on each preview build, so saving a corrected configuration retries the read without needing a Yazi cursor move or source reload. These are plugin-private settings, not global Tern preferences.
+`tern.kv.get` rereads the file when it changes on disk, shared across the plugin's host/window VMs. The window's 500 ms configuration-stamp check sends a normal `poll` event to existing blocks when the encoded store value or error changes. Each block's own 500 ms timer also checks its configuration stamp, snapshot timestamp/sequence, and live state, rendering when those values change independently of window frames. The preview backend resolves limits on each preview build, so saving a corrected configuration retries the read without needing a Yazi cursor move or source reload. These are plugin-private settings, not global Tern preferences.
 
 `tern.fs.read(path, limit)` rejects a whole oversized file before allocating/reading its content. Its API requires a regular non-symlink target, bounds raced growth, and avoids blocking opens of nonregular targets. It does not return a truncated prefix. A bounded-read failure displays `Preview unavailable (<active limit> limit)` in `yazi.preview-unavailable`; settings and image-blob failures display concise unavailable warnings. Preview status never renders the raw runtime exception, traceback, `max_bytes` diagnostic, or internal source location. Preview byte caps do not modify image geometry or guarantee bounded rendered DOM complexity.
 
 The image cap matches Tern's documented [16 MiB single-blob limit](https://docs.stencil.so/tern/protocol/operations.html#security-and-limits). Successful bounded reads and blob creation do not guarantee that an image decoder accepts the content. In the observed runtime, a 10,837,739-byte PNG decoded into native image/zoom UI, and a 183-byte SVG decoded; a roughly 9 MiB SVG dominated by an XML comment remained a missing-image placeholder. Treat that SVG case as a renderer boundary rather than a plugin read-limit failure. Image byte settings cannot override native decoder/parser limits.
+
+### Data-only preview contract
+
+`backend/preview.init(state)` initializes the existing archive cache; `sync(state, yz)` maintains its snapshot stamp, and `config_stamp()` exposes the settings change marker. `prepare(state, path)` returns one plain tagged payload, never a UI node or blob handle:
+
+| `tag` | Data contract |
+| --- | --- |
+| `settings-unavailable` | Concise settings failure; no raw exception |
+| `unavailable` | Active byte `limit` for the bounded-read warning |
+| `archive` | `status` (`loading`, `ready`, or `empty`) and the existing cached `items` reference |
+| `image` | Bounded `content` bytes, `mime`, and `ext` |
+| `mermaid`, `markdown`, `binary` | Bounded `content` string |
+| `code` | Bounded `content` string and detected `lang` |
+
+For a non-empty `image` payload, `frontend/host` performs `cx:blob(content, mime)` under protection and adds the successful blob ID to that transient payload. `frontend/view` builds the image node, or the existing short unavailable/empty-file presentation. Text and archive payloads similarly become native nodes only in the view layer. Snapshot listings, cached archive items, and bounded strings retain their references across this boundary; the adapter does not copy the authoritative snapshot or move file reads into the frontend.
+
+### Native rendering dispatch
 
 Rendering dispatch is extension-based:
 
@@ -462,7 +548,7 @@ Rendering dispatch is extension-based:
 - Markdown uses `ui.md(content)`.
 - Other files with NUL bytes show a binary-file message; otherwise `ui.code(content, language)` applies the extension language map, falling back to `text`.
 - A hovered directory uses the authoritative child preview snapshot from Yazi (`yz.preview`, capped at 30 entries) and `file_dirs`, without local filesystem enumeration.
-- Archives use asynchronous external listing rather than `read_preview`: ZIP uses `unzip -Z1`; tar-like formats use `tar -tf`; `.7z` uses `7z l -ba -slt`; other recognized archive extensions fall back to tar. At most 50 output lines are cached and at most 18 displayed. This is a bounded line display, not a full archive-entry parser. The URL-keyed cache does not invalidate on archive modification; an async result is visible on a subsequent render.
+- Archives use asynchronous external listing rather than `read_preview`: ZIP uses `unzip -Z1`; tar-like formats use `tar -tf`; `.7z` uses `7z l -ba -slt`; other recognized archive extensions fall back to tar. At most 50 output lines are cached and at most 18 displayed. This is a bounded line display, not a full archive-entry parser. The URL-keyed cache belongs to the current `client_id:seq:cwd` preview stamp and is cleared when that stamp changes; it has no archive-modification watcher. A process callback accepts its result only for the same non-closing current session and cache, then calls `on_change()` for frontend rendering.
 
 There is no dedicated PDF, audio, or video viewer. Archive previews provide read-only file listings; custom archive extraction mutations and extraction buttons have been removed in favor of Yazi's native archive openers and rules. Recognizing an archive extension for listing does not imply in-place mutation support.
 ## 8. Exact-target safety and regressions
@@ -653,7 +739,7 @@ These checks describe evidence to collect for the current managed design; they a
 Use disposable fixtures for shell, trash, yank state, openers, and extraction. For click/open tests, configure an isolated observable Yazi opener when an external application would make the result ambiguous; its marker must record the actual opened path. For asynchronous operations, inspect marker/task/filesystem outcomes separately from `ok` replies. For previews, create fixtures just below/above the configured thresholds and inspect both the rendered content and concise unavailable status, including normal code/Markdown recovery; a truncated tree string is not proof that content was truncated by the preview reader.
 
 ### Observed interactive results
-The observations below are historical records from earlier isolated runs, not the result of the current automated interaction suite. Commands, complete terminal results and inspected screenshot paths from a fresh run must be recorded separately; a partial run does not establish a full-suite pass.
+The observations below are historical records from earlier isolated runs, not post-separation verification. Commands, complete terminal results and inspected screenshot paths from a fresh run must be recorded separately; a partial run does not establish a full-suite pass.
 
 *Historical note (superseded)*: Earlier smoke work exercised an experimental custom manager-command parser (`: shell ...`) and older Esc/clipboard behaviors. Those trials are superseded by the current upstream Yazi 26.9.1 semantics. A later, previously recorded live-Yazi run observed the following restored native behavior:
 - Physical `:` followed by `ls`, Enter printed `ls-visible.txt` with status 0 in a visible PTY terminal without any `shell` prefix, with clean selfprep status 0 and no lingering prep directories.
@@ -703,9 +789,9 @@ Final protocol smoke verified:
 
 Stop the foreground Yazi and renderer before removing the exact disposable root. Retain screenshots/logs only when needed as regression evidence; do not leave QA fixtures in the repository or reuse the live user's Yazi configuration.
 
-### Current native interaction verification (2026-10-10)
+### Historical pre-separation native interaction verification (2026-10-10)
 
-The complete real interaction suite passed with Tern `0.7.0 (9ca00e4)`, Yazi `26.9.1 (Terra 2025-12-27)` and Cargo `1.96.0 (30a34c682 2026-05-25)`. The following command chain exited with status 0:
+Before the frontend/backend module separation, the complete real interaction suite passed with Tern `0.7.0 (9ca00e4)`, Yazi `26.9.1 (Terra 2025-12-27)` and Cargo `1.96.0 (30a34c682 2026-05-25)`. The following recorded command chain exited with status 0. This evidence is retained unchanged as the pre-refactor baseline; it does not establish a post-refactor runtime pass:
 
 ```sh
 cargo fmt --manifest-path launcher/Cargo.toml && env TERN_YAZI_TEST_WINDOW_HOOK=/tmp/tern-yazi-background-window.sh TERN_YAZI_KEEP_INTERACTION_ARTIFACTS=1 ./tests/smoke_luau.sh && cargo clippy --locked --manifest-path launcher/Cargo.toml --all-targets -- -D warnings && cargo fmt --manifest-path launcher/Cargo.toml --check && sh -n tests/smoke_luau.sh install.sh && luajit -b yazi-plugin/tern.yazi/main.lua /tmp/tern-yazi-final-main.luac
@@ -729,11 +815,39 @@ Observed assertions and inspected screenshots:
 - Raw `:` with `ls`, visible stdout/stderr and exit status, interactive stdin, native macros and non-blocking background shell execution passed. Native copy/cut and exact-path Trash assertions passed.
 - Plugin reload and independent clients passed. `q`, native pane close and owner close cleaned owned descendants; crashed Yazi rendered offline and `j`/Enter/`o` opened no files. `q` and reload did not resurrect closed controls.
 
-This run establishes the listed native GUI outcomes, not successful routing of intercepted physical Ctrl+D/U/F/B or Shift+PageUp/Down chords, and not new proof for the historical giant-image/SVG decoder boundaries.
+That pre-separation run establishes the listed native GUI outcomes for its checkout, not a post-refactor pass, successful routing of intercepted physical Ctrl+D/U/F/B or Shift+PageUp/Down chords, or new proof for the historical giant-image/SVG decoder boundaries.
+
+### Post-separation native interaction verification (2026-10-10)
+
+The parent verification run exercised native relative module loading and the existing real interaction scenarios through the separated frontend/backend implementation. The test harness and scenarios were unchanged. This actual command chain exited with status 0, including the GUI suite, strict all-target Clippy, formatting check, shell syntax checks, and Yazi Lua compilation:
+
+```sh
+env TERN_YAZI_TEST_WINDOW_HOOK=/tmp/tern-yazi-background-window.sh TERN_YAZI_KEEP_INTERACTION_ARTIFACTS=1 ./tests/smoke_luau.sh && cargo clippy --locked --manifest-path launcher/Cargo.toml --all-targets -- -D warnings && cargo fmt --manifest-path launcher/Cargo.toml --check && sh -n tests/smoke_luau.sh install.sh && luajit -b yazi-plugin/tern.yazi/main.lua /tmp/tern-yazi-refactor-main.luac
+```
+
+The exact interaction result was:
+
+```text
+All real native interaction cases passed (owned GUI, isolated daemon).
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 42.90s
+```
+
+The retained proof root is `/tmp/tyi-2249097-18dd25463b1c69d0`; native screenshots are under `target/shots/tern/live/` inside that root. The configured disposable window hook places only the owned GUI window on desktop 1 without switching the active desktop. Screenshot files include `02-preview-limit-no-traceback.png` and `06-real-colon-ls.png`; their presence is not, by itself, a claim of visual inspection.
+
+Exercised outcomes include:
+
+- Cold/idle managed startup; breadcrumbs, UTF-16 path editing, native smart-case filter/find, and Escape ordering.
+- Native previews, concise oversized-file failure and recovery, and exact selected-file batch routing.
+- Blocking native shell stdout/stderr/stdin and macros, non-blocking background shell, copy/cut, and exact-target Trash.
+- Reload, independent clients, crash/offline behavior, and process/control-file cleanup.
+
+The final filter-ownership adjustment is included in this run: local editing or pending filter mutations retain the local query, but unrelated escape/action acknowledgements no longer block synchronization from the authoritative filter snapshot. A parent source-boundary scan also found no `tern.fs`/`tern.process` calls in the frontend, and no native UI/node, context/presentation, layout, or session-effect APIs in the backend. Backend semantic language/MIME lookup tables are initialized once per VM; their public APIs are unchanged.
+
+This post-separation pass does not establish routing for the known intercepted physical paging chords or new giant-image/SVG decoder behavior beyond the exercised scenarios. The earlier evidence above remains a separate historical baseline.
 
 ## 10. Contribution checklist
 
-- Identify which side owns the change: Yazi manager state/actors, Tern host block/protocol, or window/layout/configuration. Keep one authoritative source for each behavior.
+- Identify which side owns the change: external Yazi state/actors or Rust supervision, native frontend UI/input/layout, backend snapshot/IPC/liveness/preview data, or pure shared helpers. Keep one authoritative source for each behavior and preserve the frontend -> backend -> shared dependency direction.
 - Inspect the installed API declarations and Yazi executor before adding an action or option. Update request encoding and decoding together; preserve actor restrictions and exact-target validation.
 - Match existing Luau/Lua indentation and identifiers; use English comments/documentation. Keep changes scoped to the requested behavior.
 - Preserve stable native node keys, list IDs, selected-item semantics, and surface-scoped CSS. Test actual geometry after changes to list/preview containers.
