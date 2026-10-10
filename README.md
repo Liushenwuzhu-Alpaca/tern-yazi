@@ -31,24 +31,27 @@ Add to your Yazi `init.lua`:
 require("tern"):setup()
 ```
 
-Run `yazi` inside Tern to open a native block beside the launching shell, with Yazi running in an invisible PTY. Outside Tern, `yazi` runs the original executable with your arguments.
+Run `yazi` inside Tern to open a native visual zoom overlay that preserves the owner shell and original split tree, with Yazi running in an invisible PTY. Outside Tern, `yazi` runs the original executable with your arguments.
 
-Each managed block stays pinned to its client across plugin reloads. `q` closes it and stops its backend; Esc first cancels input or Trash confirmation, clears a filter, or leaves visual selection, then closes. Closing the managed pane or launching shell pane also stops the backend. Managed sessions persist in Tern's daemon when their window closes.
+Each managed overlay stays pinned to its client across plugin reloads. `q` closes it, stops its backend, and returns to the original shell in its prior zoom state; Esc first cancels input or Trash confirmation, clears a filter, or leaves visual selection, then closes. Closing the managed pane or launching shell pane also stops the backend. Managed sessions persist in Tern's daemon when their window closes.
 
-Use **Ctrl+Alt+Y** or **Yazi: Toggle Companion Panel** to attach to an ordinary running Yazi or switch the panel layout. Closing an attached panel leaves that Yazi running.
+Use **Ctrl+Alt+Y** or **Yazi: Toggle Companion Panel** to focus the managed overlay, or to attach to an ordinary running Yazi with floating and docked panel layouts. Closing an attached panel leaves that Yazi running.
 
 The installer defaults to `~/.local`; `--prefix DIR` selects another location. Place its `bin` first on `PATH`. `sh install.sh --uninstall` removes the owned wrapper and helper while preserving the original Yazi; use the same `--prefix` for a custom installation.
 
 ## Features
 
+- Dedicated path card with single-line truncation and full-path tooltip, separate status badges, and single-line column headings
+- `;` raw shell and `: shell quoted-run --block` launch a real visible PTY terminal with stdout, stderr, and interactive stdin, printing the exit code until Enter returns to Yazi
+- Explicit `--orphan` executes native detached commands with notification feedback
 - Three-column browsing; click to preview, double-click to enter or open
 - Yazi selection marks, visual selection and task status
 - Images/SVG, Markdown, Mermaid and highlighted code previews
 - Configurable preview limits: **Yazi: Configure Preview Limits**
 - `j/k`, `h/l`, `g/G`, PageUp/PageDown navigation
-- `/` filtering, `.` hidden files, `;` shell input, `:` manager commands
+- `/` filtering, `.` hidden files, `:` manager commands
 - `d` exact-path Trash confirmation, `y` yank, path copy and archive tools
-- Floating and tiled panels
+- Floating and docked panels for ordinary attach
 
 ## Pending
 

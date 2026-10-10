@@ -1,6 +1,6 @@
 # Development Guide
 
-This document describes the native `tern-yazi` implementation: a Rust PTY supervisor, Tern Luau block/window plugins, and a Yazi Lua plugin. The installed `yazi` wrapper runs the original executable directly outside Tern. Inside a Tern pane it starts Yazi in an invisible PTY and opens a managed native block beside the launching shell. Yazi owns file-manager state and manager actions; Tern owns layout, previews, input bars, and confirmation. Runtime execution uses the native helper, Tern, Yazi, and Ya, with no Python process.
+This document describes the native `tern-yazi` implementation: a Rust PTY supervisor, Tern Luau block/window plugins, and a Yazi Lua plugin. The installed `yazi` wrapper runs the original executable directly outside Tern. Inside a Tern pane it starts Yazi in an invisible PTY and opens a managed visual zoom overlay that preserves the owner shell and original split tree. Yazi owns file-manager state and manager actions; Tern owns layout, previews, input bars, and confirmation. Runtime execution uses the native helper, Tern, Yazi, and Ya, with no Python process.
 
 ## 1. Environment and installation
 
@@ -94,7 +94,7 @@ Configure `luau-lsp.types.definitionFiles` to include the resulting `tern.d.luau
 | --- | --- |
 | [`plugin.toml`](plugin.toml) | Plugin identity, host/window entry points, stylesheet, palette-visible companion block |
 | [`host.luau`](host.luau) | Persisted client/token binding, 500 ms block-owned health/lease polling, liveness gating, view/events, keys, serialized requests, previews, confirmation |
-| [`window.luau`](window.luau) | Managed pane creation/adoption, token/nonce lease handshake, close handling, layouts, commands, 500 ms health/configuration polling |
+| [`window.luau`](window.luau) | Managed visual zoom overlay creation/adoption, owner zoom and terminal return mappings in KV, token/nonce lease handshake, shell terminal handoff challenge, close handling, layouts, commands, 500 ms health/configuration polling |
 | [`companion.css`](companion.css) | Three-column geometry, pane-contained list/preview scrolling, image containment, footer and confirmation styling |
 | [`yazi-plugin/tern.yazi/main.lua`](yazi-plugin/tern.yazi/main.lua) | Yazi telemetry hooks, atomic snapshots/replies, request decoding, actor dispatch, target selection guard |
 | [`launcher/src/main.rs`](launcher/src/main.rs) | Invisible PTY, generated client/token, startup checks, heartbeat/lease/stop handling, process-group termination and owned runtime cleanup |
@@ -124,7 +124,7 @@ shell: yazi [args]
                                        |
                              window.luau polls every 500 ms
                                        |
-                             native block beside owner pane
+                             native visual zoom overlay preserving owner shell and split tree
                                        |
                              host.luau pinned to CID + token; 500 ms poll
                                        |
@@ -155,14 +155,13 @@ The supervisor polls the PTY with a 25 ms timeout and publishes a sequenced heal
 
 ### Window lifecycle and reload adoption
 
-The host records the pane's `EffectCx` from Tern's `command_started` shell-integration event. Its 500 ms discovery timer requires a progressing managed health sequence, then opens that health-record path through the owning pane's effect context. The window's `tern.route.open` claims only `managed-<numeric-client-id>.json` under the shared inbox and calls `poke()` to create the native block. This explicit host effect wakes an idle window; startup does not depend solely on window render timers. `window_start` and the self-rearming 500 ms window timer also reconcile existing managed panes and configuration. The window focuses the owner before `cx:new_block(..., "beside", {focus=true})`, passing client/token/owner/cwd and the startup nonce as block arguments.
+The host records the pane's `EffectCx` from Tern's `command_started` shell-integration event. Its 500 ms discovery timer requires a progressing managed health sequence, then opens that health-record path through the owning pane's effect context. The window's `tern.route.open` claims only `managed-<numeric-client-id>.json` under the shared inbox and calls `poke()` to create the native block. This explicit host effect wakes an idle window; startup does not depend solely on window render timers. `window_start` and the self-rearming 500 ms window timer also reconcile existing managed panes and configuration. When launching a managed overlay, the window focuses the owner pane, records its current zoom state in `tern.kv` under `managed_overlays` (`{ owner_pane, was_zoomed }`), opens the companion block beside the owner via `cx:new_block(..., "beside", {focus=true})` passing client/token/owner/cwd and the startup nonce, and immediately zooms the new block. The visual zoom overlay preserves the owner shell and original split tree underneath.
 
-Each client has its own managed record and pane. Window acknowledgement nonces combine a Linux kernel UUID from `/proc/sys/kernel/random/uuid` with a local counter; window clocks can restart at zero and are not unique epochs. A new block receives its nonce in launch arguments. The block accepts `managed_poll` only for its client/token and a valid nonce, then writes `TOKEN PANE ROWS COLS NONCE` to its lease. The window verifies that exact acknowledgement. A block-owned 500 ms timer retains the verified nonce and refreshes the matching lease independently of window frames; it also polls its pinned snapshot/liveness and renders relevant changes. After reload the window treats the saved lease pane as a hint, not proof: the block must acknowledge the new nonce with its own client/token. Missing or reused pane IDs cannot redirect a session to another client's block. An unacknowledged adoption is retried with a correctly pinned new block after 3 seconds; an unacknowledged new block receives a stop request and an attachment error.
+Each client has its own managed record and pane. Window acknowledgement nonces combine a Linux kernel UUID from `/proc/sys/kernel/random/uuid` with a local counter; window clocks can restart at zero and are not unique epochs. A new block receives its nonce in launch arguments. The block accepts `managed_poll` only for its client/token and a valid nonce, then writes `TOKEN PANE ROWS COLS NONCE` to its lease. The window verifies that exact acknowledgement. A block-owned 500 ms timer retains the verified nonce and refreshes the matching lease independently of window frames; it also polls its pinned snapshot/liveness and renders relevant changes. After reload the window treats the saved lease pane as a hint, not proof: the block must acknowledge the new nonce within 3 seconds, or the window launches a fresh pane.
 
-Closing a managed block or its owner pane writes the token-bound stop request and clears the matching lease. The host timer also checks that both pane IDs still exist in the daemon session. Closed client/token pairs are suppressed while the window VM remains active; the stop/lease state preserves the close decision across reload. Closing a Tern window alone follows Tern's persisted daemon-session semantics: the block and owner panes retain the managed backend, and the block-owned lease timer continues independently of window rendering. Loss of the daemon/host lease eventually triggers the supervisor's 8-second lease deadline. If the supervisor disappears, a surviving block becomes an explicit offline UI rather than being reassigned to a different client. A health sequence unchanged for 3 seconds is offline. Requests and file actions require current live evidence.
+Closing a managed block or its owner pane writes the token-bound stop request, restores the owner pane's prior zoom state via `restore_overlay()`, cleans the `managed_overlays` KV entry, and clears the matching lease. `q` returns focus directly to the original shell in its prior zoom state. The host timer also checks that both pane IDs still exist in the daemon session. Closed client/token pairs are suppressed while the window VM remains active; the stop/lease state preserves the close decision across reload. Closing a Tern window alone follows Tern's persisted daemon-session semantics: the block and owner panes retain the managed backend, and the block-owned lease timer continues independently of window rendering. Loss of the daemon/host lease eventually triggers the supervisor's 8-second lease deadline. If the supervisor disappears, a surviving block becomes an explicit offline UI rather than being reassigned to a different client. A healthy companion acknowledges its client ID before enabling operations.
 
-`Ctrl+Alt+Y` and `Yazi: Toggle Companion Panel` (`plugin.tern-yazi.toggle`) remain explicit attach/layout controls. They create an ordinary attached block when needed, or switch an existing tracked/focused managed panel between floating and docked layouts. The plugin uses its own shortcut registration; installation does not rewrite persistent global keybindings.
-
+`Ctrl+Alt+Y` and `Yazi: Toggle Companion Panel` (`plugin.tern-yazi.toggle`) remain explicit attach/layout controls. When invoked while a managed overlay or its owner pane is focused, toggle focuses and zooms the managed overlay. For an ordinary attached companion, toggle switches between floating and docked layouts. The plugin uses its own shortcut registration; installation does not rewrite persistent global keybindings.
 ### Block lifecycle and ordinary attach
 
 `tern.block.define("companion", ...)` supplies `init`, `view`, `title`, `event`, `key`, and `save`. The saved state contains `cid`, `token`, `owner_pane`, `source_cwd`, and `lease_nonce`; command/filter editing, optimistic cursor/cwd, requests, confirmation, and archive cache remain transient. A managed block reads only its pinned `state-CID.json` and requires observed heartbeat progression before enabling file actions. Unreadable/invalid snapshots are skipped, and all JSON reads have a 256 KiB cap; very large listings/selections can exceed that cap.
@@ -270,6 +269,32 @@ A successful `ya` exit only proves transport dispatch. After it exits successful
 
 An `ok` reply acknowledges actor acceptance or the target pipeline's settled dispatch, not completion of an opener, shell process, trash job, or filesystem task. Inspect Yazi task results and fixture files for end-to-end outcomes. Timeout explicitly means the outcome is unknown; do not blindly retry a destructive request. Late/unconsumed replies can remain in the inbox.
 
+### Host-tracked shell handoff and terminal lifecycle
+
+When Yazi prepares a visible shell command from raw `;` input or `: shell` without `--orphan`, it returns `{ ok = true, shell = { command = ..., cwd = ... }, id = <reply-id> }`. The host writes a tracked handoff file `shell-<id>.json` containing `{ version = 1, id = reply.id, cid = state.cid, token = state.token, pane = cx.pane, owner_pane = state.owner_pane, shell = shell }`, and calls `cx:open(path)`.
+
+The window's `tern.route.open` claims `shell-<id>.json` and verifies `id`, `pane`, `cid`, `token`, `owner_pane`, and the active lease. It generates a window nonce challenge `nonce = nonce_epoch .. "-shell-" .. tostring(nonce_seq)`, records the pending handoff, and sends a challenge action to the companion block:
+
+```text
+{ ev = "action", id = "main.poll", act = "shell_handoff_check", request_id = body.id, cid = body.cid, token = body.token, pane = body.pane, nonce = nonce }
+```
+
+Here `request_id` identifies the pending handoff and is distinct from the action event ID `main.poll`. The companion block verifies the identifiers and writes `shell-<id>.json.ack` (`ACK.json.ack`) containing `{ id = ev.request_id, nonce = ev.nonce, cid = ev.cid, token = ev.token, pane = ev.pane }`. The window validates the ACK file. Both `shell-<id>.json` and `shell-<id>.json.ack` are consumed and removed upon terminal launch or launch failure; the companion also clears handoffs on close or shutdown.
+
+Upon verified handoff, the window splits the pane to the right with `cx.layout:split(body.pane, "right", ...)` running a PTY wrapper script:
+
+```sh
+sh -c "<command>\nstatus=$?\nprintf \"\\n[exit %s] Press Enter to return to Yazi...\" \"$status\"\nIFS= read -r answer\nexit 0"
+```
+
+The window zooms the terminal pane (`zoom_pane(cx, terminal, true)`), opening a real visible PTY terminal with stdout, stderr, and interactive stdin. The host tracks session return mappings and original zoom intent in `tern.kv`:
+- `managed_overlays` stores `{ owner_pane = record.owner_pane, was_zoomed = record.was_zoomed }` keyed by `cid-token`.
+- `shell_terminals` stores `{ pane = body.pane, owner_pane = body.owner_pane }` keyed by `tostring(terminal)`.
+
+When the user views the printed exit code and presses Enter, the wrapper exits 0 and the terminal pane closes. On `pane_closed`, the window reads the saved mapping from `shell_terminals`, removes the KV entry, restores zoom to the target companion pane or owner pane (`zoom_pane(cx, target, true)`), and sends `main.poll` to resume companion rendering.
+
+Explicit `--orphan` bypasses terminal handoff: Yazi executes via `ya.exec("shell", args)` in the background without opening a terminal pane, returning an immediate acknowledgement and triggering an informational toast.
+
 ### DDS telemetry is a separate interface
 
 The Yazi plugin still publishes `tern-hover`, `tern-cd`, and deduplicated `tern-state` telemetry via `ps.pub_to(0, ...)`. It registers `ps.sub_remote("tern-cmd", ...)`: `{"op":"hello"}` republishes folder/hover telemetry, while other bodies produce a `tern-ack` echo, followed by a pulse. This capability is necessary for inbound custom DDS kinds in Yazi 26.9.
@@ -277,6 +302,10 @@ The Yazi plugin still publishes `tern-hover`, `tern-cd`, and deduplicated `tern-
 The native companion does not run `ya sub` or use this DDS stream as its view transport. Its state comes from snapshot files, and its command requests enter `M:entry()` through `ya emit-to ... plugin tern`. Do not confuse DDS echo acknowledgements with per-request actor replies.
 
 ## 5. UI state and event wiring
+
+### UI architecture and boundaries
+
+The current UI and logic implementation is partially isolated: `host.luau` combines UI tree rendering, local action dispatching, and asynchronous IPC/RPC coordination in one module. CSS style (`companion.css`), window layout and lifecycle (`window.luau`), and authoritative file-manager state (`main.lua` and Yazi snapshots) are separated into distinct layers; no refactor is claimed.
 
 ### Authoritative versus optimistic state
 
@@ -313,12 +342,13 @@ Green check marks represent persistent selected paths. The native selected-row c
 
 The block returns `main`, `dock`, and `layer` regions. Region roots are stripped by Tern, so the footer row is wrapped as a child of a `ui.col` in `dock`. The confirmation lives in `layer` with its own opaque card and pointer-enabled controls.
 
+The top path display uses a dedicated path card (`yazi.path-header`) with single-line truncation and full-path tooltip via `card.p.title = cur_cwd`. Status badges (`yazi.path-status`) are rendered in a separate row below the path card, ensuring badges cannot squeeze the path into vertical text. Column card headers (`data-role^="yazi.column." > .sf-card-head`) are constrained to a single line with ellipsis truncation.
+
 CSS assigns parent/current/preview shares of `4fr / 9fr / 7fr`, each with `minmax(0, ...)`. Pane height is inherited through flex/grid containers with `min-height: 0`; only native list scrollers and the preview region scroll. Lists retain `max.lines` and full selected node IDs for native selected-row reveal. Do not pad lists to terminal rows or remove the native selection-reveal property. Image wrappers constrain natural raster/SVG dimensions and use `object-fit: contain`.
 
 Clickable controls use action strings such as `open_file=<path>`, `copy_path=<path>`, and `terminal_here=<cwd>`, delivered to the handler as `ev.act`/`ev.value`. `event()` also accepts a structured `shortcut` action carrying `ev.key`; both that route and the block's `key()` call the same `handle_key()` implementation.
 
 File-preview buttons open through Tern, copy the visible path directly, launch `tern split down --cwd <cwd>`, or extract the visible archive. The keyboard `y` shortcut instead performs authoritative Yazi yank and copies its returned target set; the Copy Path button copies only its visible path.
-
 ## 6. Keyboard and local command semantics
 
 ### Normal mode
@@ -341,13 +371,12 @@ File-preview buttons open through Tern, copy the visible path directly, launch `
 | Ctrl+D / Ctrl+U | Half-page semantic handler, subject to Tern routing below |
 | Ctrl+F / Ctrl+B | Full-page semantic handler, subject to Tern routing below |
 | `/` | Edit a live case-insensitive Yazi regex filter |
-| `;` | Edit a raw non-interactive shell command locally |
-| `:` / Shift+`;` | Edit a manager action and its arguments locally |
+| `;` | Edit a raw shell command locally; launches a visible PTY terminal with stdout/stderr/stdin until Enter returns to Yazi |
+| `:` / Shift+`;` | Edit a manager action locally; `: shell quoted-run --block` launches a visible PTY terminal, while `--orphan` runs detached |
 | `.` | Yazi `hidden` with `state="toggle"` |
 | Ctrl+R | Re-render from the available snapshot |
 | `x` | Extract the visible archive into the visible cwd; not Yazi cut |
-| `q` | Close outside local editing/confirmation; stop a managed backend, or leave an ordinary attached Yazi running |
-| Esc | Cancel input/confirmation, clear retained filter, commit/leave visual mode, then close; managed closure stops the backend |
+| `q` | Close outside local editing/confirmation; restore owner shell in its prior zoom state, or leave ordinary attached Yazi running |
 
 Shifted letters other than `G` are not silently treated as their unshifted actions. Normal-mode Alt/Meta chords are not claimed by the handler.
 
@@ -356,6 +385,8 @@ Shifted letters other than `G` are not silently treated as their unshifted actio
 Both input bars accept printable key text, Space, paste, and Unicode. Backspace removes one UTF-8 codepoint, not an entire grapheme cluster. Enter submits the current text; Esc cancels locally. The command bar remains available after a submission error. A successful reply clears the bar only if its text still matches the submitted text.
 
 Filter editing sends `filter` requests as the text changes. Enter leaves editing while retaining the filter. Esc/clear sends an empty query and clears local filter state before a later Esc can exit the block.
+
+The `;` raw shell input and `: shell quoted-run --block` open a real visible PTY terminal pane in a zoom overlay. The command executes with stdout, stderr, and interactive stdin in Yazi's working directory. Upon process exit, the printed exit code is displayed (`[exit %s] Press Enter to return to Yazi...`). Pressing Enter terminates the terminal wrapper and returns to the same live Yazi session in the zoom overlay. Explicit `--orphan` executes native detached commands inside Yazi with notification feedback and no terminal pane.
 
 The `;` bar sends the raw string as the shell actor's first positional argument with the visible cwd as an option. It does not parse shell words, rewrite quoting, or open an extra Yazi shell prompt. Shell syntax, substitutions, and side effects belong to the shell/Yazi execution environment; this is not a safe shell sandbox.
 
@@ -368,7 +399,6 @@ The `:` bar is a manager-command parser, not a shell. It supports whitespace-sep
 ```
 
 In the last example, only Yazi's shell actor interprets the quoted shell program. The manager parser itself does not interpret the redirection. Raw `;` commands are the simpler route when submitting shell syntax.
-
 Accepted manager action names are:
 
 ```text
@@ -624,6 +654,26 @@ The final context/resize smoke matched native pane and lease dimensions at 45 ro
 
 Outside-Tern and inside-Tern `--version` invocations ran original Yazi 26.9.1. Installation rejected an unrelated wrapper, uninstall rejected a modified owned wrapper, and same-prefix sandbox uninstall removed the four owned files while preserving the original executable's SHA-256 digest. `cargo fmt --check` and `cargo clippy --locked -- -D warnings` passed. Native screenshots and layout evidence remain under `target/shots/tern/live/` inside the disposable root, including `host-activated-live.png`, `multi-clients-reload.png`, `installed-stable-live.png`, and `installed-resized-live.png`.
 
+
+### Observed native zoom overlay and terminal shell results
+
+In the live Yazi 26.9.1 verification environment, typing `yazi` launched directly into a native visual zoom overlay that preserved the owner shell and split tree.
+
+Interactive shell execution verified:
+- PTY terminal execution displayed stdout `ShellVisible`, stderr `ShellError`, exit status 7, and retained error status 9 in the visible terminal pane.
+- Interactive stdin read Unicode text `Hello 阿尔帕卡` correctly.
+- `: shell` quoted script `--block` verified: output and working directory (`cwd`) were correct.
+- Pressing Enter removed the status 9 terminal pane and returned directly to the same live Yazi session in the zoom overlay.
+- `q` and reload followed by `q` cleaned the runtime inbox and restored the owner shell unzoomed.
+- Dedicated path card geometry was observed at 331px wide by 28px tall, the separate status badges row at 18px tall, column headers at 28px tall, and full-path `title` tooltips were verified.
+
+Final protocol smoke verified:
+- `pwd` matched authoritative files `cwd`.
+- Final stderr output remained visible and status 4 was visible in the PTY terminal.
+- Pressing Enter returned to the same client with the original unzoomed state and all shell handoff files removed from the inbox.
+- `$0` and `$@` both resolved to the authoritative hovered child when no selection was active.
+- Existing original 2-pane split tree (id `579820584962`, `axisRow`, `ratio` 0.5) with exact `a`/`b` pane IDs was restored after launch and `q`; the sibling pane remained alive and zoom was false. Custom split ratios, pre-zoomed restoration, and forged challenges remain unexercised.
+- Final screenshot evidence was inspected under `target/shots/tern/live/visual-overlay-final.png` and `path-box-narrow-final-clear.png`.
 
 Stop the foreground Yazi and renderer before removing the exact disposable root. Retain screenshots/logs only when needed as regression evidence; do not leave QA fixtures in the repository or reuse the live user's Yazi configuration.
 

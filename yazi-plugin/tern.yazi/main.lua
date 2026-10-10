@@ -275,6 +275,67 @@ local commit = ya.sync(function(self, req, files)
 	ya.emit("plugin", { "tern", "finalize", mode = "sync" })
 end)
 
+-- Match the manager's legacy Splatter vector semantics before sh -c.
+local function shell_script(run, argv)
+	local function quote(value) return ya.quote(value or "", true) end
+	local function expand(pos, tab)
+		local symbol = run:sub(pos, pos)
+		if symbol == "" then return "", pos end
+		if symbol == "t" or symbol == "T" then
+			return expand(pos + 1, symbol == "t" and tab + 1 or math.max(0, tab - 1))
+		end
+		if symbol == "%" then return "%", pos + 1 end
+		if symbol == "h" or symbol == "H" then return quote(tab == 1 and argv[1] or ""), pos + 1 end
+		if symbol == "y" or symbol == "Y" then return "", pos + 1 end
+		local digits
+		if symbol:match("%d") then
+			digits = run:sub(pos):match("^%d+")
+			local index = tonumber(digits)
+			return quote(tab == 1 and argv[index + 1] or ""), pos + #digits
+		end
+		if symbol == "s" or symbol == "S" or symbol == "*" or symbol == "d" or symbol == "D" then
+			digits = run:sub(pos + 1):match("^%d+")
+			local index = digits and tonumber(digits)
+			local result = {}
+			if tab == 1 then
+				local first, last = index and index + 1 or 2, index and index + 1 or #argv
+				for i = first, math.min(last, #argv) do
+					local path = argv[i]
+					if symbol == "d" or symbol == "D" then
+						path = path:match("^(.*)/[^/]*$") or ""
+						if path == "" and argv[i]:sub(1, 1) == "/" then path = "/" end
+					end
+					result[#result + 1] = quote(path)
+				end
+			end
+			if #result == 0 and index then result[1] = quote("") end
+			return table.concat(result, " "), pos + 1 + (digits and #digits or 0)
+		end
+		return "%" .. symbol, pos + 1
+	end
+	local result, pos = {}, 1
+	while pos <= #run do
+		if run:sub(pos, pos) == "%" and pos < #run then
+			local value, next_pos = expand(pos + 1, 1)
+			result[#result + 1], pos = value, next_pos
+		else
+			result[#result + 1], pos = run:sub(pos, pos), pos + 1
+		end
+	end
+	return table.concat(result)
+end
+
+local prepare_shell = ya.sync(function(_, run, block)
+	local active = cx.active
+	local hovered = active.current.hovered
+	local argv = { hovered and tostring(hovered.url) or "" }
+	for _, file in pairs(active.selected) do argv[#argv + 1] = tostring(file.url) end
+	if #argv == 1 and hovered then argv[2] = argv[1] end
+	local command = { "sh", "-c", ya.quote(shell_script(run, argv), true) }
+	for _, path in ipairs(argv) do command[#command + 1] = ya.quote(path, true) end
+	return { command = table.concat(command, " "), cwd = tostring(active.current.cwd), block = block == true }
+end)
+
 -- Only actor names present in the 26.9.1 manager executor are accepted.
 local command_actors = {}
 for name in ("cd arrow leave enter back forward reveal follow stash open yank unyank toggle toggle_all visual_arrow visual_mode escape copy shell hidden linemode filter filter_do sort refresh quit close suspend seek"):gmatch("%S+") do
@@ -322,6 +383,21 @@ function M:entry(job)
 		if req.op == "command" then
 			assert(command_actors[req.action] or req.action == "remove", "Unknown or unsupported manager command: " .. tostring(req.action))
 			assert(not req.args.interactive, "Local command input does not open another interactive Yazi prompt")
+			if req.action == "shell" then
+				local run = req.args.run or req.args[1]
+				assert(type(run) == "string" and run ~= "", "Supply a shell script in the native command input")
+				assert(not req.args.cwd, "Shell runs in Yazi's current directory; use cd first")
+				assert(req.args.block == nil or type(req.args.block) == "boolean", "--block is a boolean flag")
+				assert(req.args.orphan == nil or type(req.args.orphan) == "boolean", "--orphan is a boolean flag")
+				if req.args.orphan then
+					ya.exec("shell", req.args)
+					reply(req, { ok = true, queued = true, orphan = true })
+				else
+					ya.exec("escape", { visual = true })
+					reply(req, { ok = true, shell = prepare_shell(run, req.args.block) })
+				end
+				return
+			end
 			if req.action == "remove" then
 				assert(not req.args.permanently and not req.args.force, "Use plain d for confirmed trash; force/permanent removal is disabled")
 				reply(req, { ok = true, paths = targets(req.target), confirm_trash = true })
@@ -379,7 +455,7 @@ function M:entry(job)
 			error("Unknown companion operation")
 		end
 	end)
-	if not ok then reply(req, { ok = false, error = tostring(err) }) end
+	if not ok then reply(req, { ok = false, rejected = true, error = tostring(err) }) end
 end
 
 function M:setup()

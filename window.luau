@@ -12,6 +12,50 @@ local closed = {}
 local nonce_seq = 0
 local nonce_epoch = tern.fs.read("/proc/sys/kernel/random/uuid", 64):match("^[%w-]+")
 
+-- Persist only restore intent; the actual split tree stays owned by Tern.
+local overlay_key = "managed_overlays"
+local function overlay_id(record): string
+	return record.cid .. "-" .. record.token
+end
+local function overlay_store(): any
+	local value = tern.kv.get(overlay_key)
+	return type(value) == "table" and value or {}
+end
+local function zoom_pane(cx, pane, zoomed)
+	local tab = cx.session:tab_of(pane)
+	local layout = tab and cx.session:layout(tab)
+	if not layout then return end
+	cx.layout:focus(pane)
+	if layout.zoomed ~= zoomed then cx:command("zoom") end
+end
+local function remember_overlay(cx, record)
+	local store = overlay_store()
+	local key = overlay_id(record)
+	local saved = store[key]
+	if type(saved) == "table" and saved.owner_pane == record.owner_pane then
+		record.was_zoomed = saved.was_zoomed == true
+	else
+		local tab = cx.session:tab_of(record.owner_pane)
+		local layout = tab and cx.session:layout(tab)
+		record.was_zoomed = layout and layout.zoomed or false
+		store[key] = { owner_pane = record.owner_pane, was_zoomed = record.was_zoomed }
+		tern.kv.set(overlay_key, store)
+	end
+end
+local function restore_overlay(cx, record)
+	local owner = cx.session:pane(record.owner_pane)
+	if owner then
+		local focused = cx.session:focused()
+		-- Do not steal focus from another client or a different tab.
+		if focused == record.pane or focused == record.owner_pane then
+			zoom_pane(cx, record.owner_pane, record.was_zoomed == true)
+		end
+	end
+	local store = overlay_store()
+	store[overlay_id(record)] = nil
+	tern.kv.set(overlay_key, store)
+end
+
 local function state_dir(): string
 	local dir = tern.getenv("XDG_RUNTIME_DIR")
 	return dir and dir ~= "" and (dir .. "/tern-yazi") or "/tmp/tern-yazi"
@@ -65,10 +109,10 @@ local function toggle(cx)
 	local focused = cx.session:focused()
 	local pane = companion_alive(cx) and companion.pane or nil
 	for _, record in pairs(managed) do
-		if not record.stopped and record.pane and cx.session:pane(record.pane)
+		if record.pane and cx.session:pane(record.pane)
 			and (record.pane == focused or record.owner_pane == focused) then
-			pane = record.pane
-			break
+			zoom_pane(cx, record.pane, true)
+			return
 		end
 	end
 	if not pane then open_companion(cx); return end
@@ -98,10 +142,12 @@ end
 local function launch_managed(cx, record)
 	-- new_block is relative to focus; explicitly choose the launching shell.
 	cx.layout:focus(record.owner_pane)
+	remember_overlay(cx, record)
 	record.pane = cx:new_block(BLOCK_KIND,
 		{ record.cid, record.token, tostring(record.owner_pane), record.cwd, record.nonce }, "beside", { focus = true })
 	record.started = tern.now()
 	record.adopting = false
+	if record.pane then zoom_pane(cx, record.pane, true) end
 end
 
 local function poke(cx)
@@ -151,6 +197,7 @@ local function poke(cx)
 			elseif token == record.token and hint and panes[hint] and panes[hint].block == BLOCK_KIND then
 				record.pane = hint
 				record.adopting = true
+				remember_overlay(cx, record)
 			else launch_managed(cx, record) end
 		end
 		if record.health_seq ~= health.seq then record.health_seq = health.seq; record.health_seen = tern.now() end
@@ -208,14 +255,128 @@ tern.on("pane_closed", function(ev, cx)
 	for cid, record in pairs(managed) do
 		if record.pane == ev.pane or record.owner_pane == ev.pane then
 			stop_session(record)
+			if record.pane == ev.pane then restore_overlay(cx, record) end
 			if record.pane == ev.pane then managed[cid] = nil end
 		end
 	end
 end)
 
+local shell_pending = {}
+local shell_key = "shell_terminals"
+local function shell_store()
+	local value = tern.kv.get(shell_key)
+	return type(value) == "table" and value or {}
+end
+local function shell_event(cx, body, act, nonce, err)
+	if cx.session:pane(body.pane) then
+		cx.session:event(body.pane, { ev = "action", id = "main.poll", act = act,
+			request_id = body.id, cid = body.cid, token = body.token, pane = body.pane, nonce = nonce,
+			shell = body.shell, error = err })
+	end
+end
+local function shell_quote(text: string): string
+	return "'" .. text:gsub("'", "'\\''") .. "'"
+end
+tern.route.open(function(req, cx)
+	local prefix = state_dir() .. "/shell-"
+	if req.path:sub(1, #prefix) ~= prefix then return nil end
+	local id = req.path:sub(#prefix + 1):match("^([%w-]+)%.json$")
+	if not id then return nil end
+	local body = read_json(req.path)
+	local pane = body and type(body.pane) == "number" and cx.session:pane(body.pane)
+	local valid = body and body.version == 1 and body.id == id and pane and pane.block == BLOCK_KIND
+		and type(body.cid) == "string" and body.cid:match("^%d+$")
+		and id:match("%-" .. tostring(body.pane) .. "%-%d+$")
+		and type(body.shell) == "table" and type(body.shell.command) == "string"
+		and type(body.shell.cwd) == "string" and body.shell.cwd:sub(1, 1) == "/"
+	if valid and body.token then
+		local health = read_json(state_dir() .. "/managed-" .. body.cid .. ".json")
+		local token, hint = lease_hint(body.cid)
+		valid = health and health.token == body.token and health.owner_pane == body.owner_pane
+			and token == body.token and hint == body.pane
+	end
+	if not valid then
+		pcall(tern.fs.remove, req.path)
+		pcall(tern.fs.remove, req.path .. ".ack")
+		cx:toast("error", "Cannot open shell terminal", "The originating Yazi session is unavailable")
+		return { handled = true }
+	end
+	local pending = shell_pending[id]
+	if not pending then
+		nonce_seq += 1
+		pending = { nonce = nonce_epoch .. "-shell-" .. tostring(nonce_seq), body = body, started = tern.now() }
+		shell_pending[id] = pending
+		shell_event(cx, body, "shell_handoff_check", pending.nonce)
+		return { handled = true }
+	end
+	if pending.body.shell.command ~= body.shell.command or pending.body.shell.cwd ~= body.shell.cwd
+		or pending.body.pane ~= body.pane or pending.body.cid ~= body.cid or pending.body.token ~= body.token then
+		shell_pending[id] = nil
+		pcall(tern.fs.remove, req.path)
+		pcall(tern.fs.remove, req.path .. ".ack")
+		shell_event(cx, pending.body, "shell_failed", pending.nonce, "Shell handoff changed during acknowledgement")
+		return { handled = true }
+	end
+	local ack = read_json(req.path .. ".ack")
+	if not ack or ack.id ~= id or ack.nonce ~= pending.nonce or ack.cid ~= body.cid
+		or ack.token ~= body.token or ack.pane ~= body.pane or type(ack.shell) ~= "table"
+		or ack.shell.command ~= body.shell.command or ack.shell.cwd ~= body.shell.cwd
+		or ack.shell.block ~= body.shell.block then return { handled = true } end
+	shell_pending[id] = nil
+	pcall(tern.fs.remove, req.path)
+	pcall(tern.fs.remove, req.path .. ".ack")
+	-- The child's status stays visible; the completed display wrapper exits cleanly.
+	local script = body.shell.command .. '\nstatus=$?\nprintf "\\n[exit %s] Press Enter to return to Yazi..." "$status"\nIFS= read -r answer\nexit 0'
+	local source_tab = cx.session:tab_of(body.pane)
+	local source_layout = source_tab and cx.session:layout(source_tab)
+	local source_zoomed = source_layout and source_layout.zoomed or false
+	local ok, terminal = pcall(function()
+		return cx.layout:split(body.pane, "right", { cwd = body.shell.cwd,
+			command = "sh -c " .. shell_quote(script) }, { focus = true })
+	end)
+	if not ok or not terminal then
+		shell_event(cx, body, "shell_failed", pending.nonce, tostring(terminal or "Terminal launch failed"))
+	else
+		local store = shell_store()
+		store[tostring(terminal)] = { pane = body.pane, owner_pane = body.owner_pane,
+			was_zoomed = source_zoomed }
+		tern.kv.set(shell_key, store)
+		zoom_pane(cx, terminal, true)
+		shell_event(cx, body, "shell_launched", pending.nonce)
+	end
+	return { handled = true }
+end)
+
+tern.on("pane_closed", function(ev, cx)
+	local store = shell_store()
+	local previous = store[tostring(ev.pane)]
+	if not previous then return end
+	store[tostring(ev.pane)] = nil
+	tern.kv.set(shell_key, store)
+	local target = cx.session:pane(previous.pane) and previous.pane or previous.owner_pane
+	local focused = cx.session:focused()
+	if target and cx.session:pane(target) and (focused == ev.pane or focused == target) then
+		zoom_pane(cx, target, previous.was_zoomed == true)
+		if target == previous.pane then cx.session:event(target, { ev = "action", id = "main.poll", act = "poll" }) end
+	end
+end)
+
+local function expire_shell_handoffs(cx)
+	for id, pending in pairs(shell_pending) do
+		if not cx.session:pane(pending.body.pane) or tern.now() - pending.started >= 30000 then
+			shell_pending[id] = nil
+			local path = state_dir() .. "/shell-" .. id .. ".json"
+			pcall(tern.fs.remove, path)
+			pcall(tern.fs.remove, path .. ".ack")
+			shell_event(cx, pending.body, "shell_failed", pending.nonce, "Shell terminal handoff expired")
+		end
+	end
+end
+
 local function arm_timer()
 	tern.timer(500, function(cx)
 		if cx then
+			expire_shell_handoffs(cx)
 			local ok, err = pcall(poke, cx)
 			if not ok then tern.log.warn("Yazi managed poll failed", tostring(err)) end
 		end

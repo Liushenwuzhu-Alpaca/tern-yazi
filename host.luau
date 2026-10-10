@@ -326,10 +326,20 @@ local function stop_backend(state: any)
 	end
 end
 
+local function clear_shell_handoffs(state: any)
+	for id, handoff in pairs(state.shell_handoffs or {}) do
+		if handoff.timer then handoff.timer:cancel() end
+		pcall(tern.fs.remove, handoff.path)
+		pcall(tern.fs.remove, handoff.path .. ".ack")
+		state.shell_handoffs[id] = nil
+	end
+end
+
 local function close_companion(state: any, cx: any)
 	state.closing = true
 	state.live = false
 	state.requests = {}
+	clear_shell_handoffs(state)
 	if state.timer then state.timer:cancel(); state.timer = nil end
 	running[cx.pane] = nil
 	stop_backend(state)
@@ -650,6 +660,11 @@ pump = function(state: any, cx: any)
 	local function finish(reply: any)
 		if finished then return end
 		finished = true
+		if state.closing or running[cx.pane] ~= state then
+			pcall(tern.fs.remove, path)
+			state.sending = false
+			return
+		end
 		if reply.ok and state.token and not refresh_live(state) then
 			reply = { ok = false, error = "Yazi backend stopped; the last operation's outcome may be unknown" }
 		end
@@ -658,11 +673,13 @@ pump = function(state: any, cx: any)
 		table.remove(state.requests, 1)
 		if not reply.ok then
 			local was_live = state.live
-			state.last_ack = nil
-			state.live = false
-			state.requests = {}
-			state.active_file = nil
-			state.optimistic_cwd = nil
+			if not reply.rejected then
+				state.last_ack = nil
+				state.live = false
+				state.requests = {}
+				state.active_file = nil
+				state.optimistic_cwd = nil
+			end
 			if body.op ~= "ping" or was_live then
 				cx:toast("error", "Yazi request failed", reply.error or "No acknowledgement")
 			end
@@ -705,6 +722,84 @@ pump = function(state: any, cx: any)
 	if not ok then finish({ ok = false, error = tostring(err) }) end
 end
 
+local function open_shell(state: any, cx: any, reply: any, query: string, kind: string): boolean
+	if state.closing or running[cx.pane] ~= state then return false end
+	if reply.orphan then
+		cx:toast("info", "Orphan shell queued in Yazi", "Detached execution; output is not shown and completion is not acknowledged")
+		return true
+	end
+	local shell = reply.shell
+	if type(reply.id) ~= "string" or not reply.id:match("^[%w-]+$") or type(shell) ~= "table"
+		or type(shell.command) ~= "string" or type(shell.cwd) ~= "string" then
+		cx:toast("error", "Invalid shell launch", "Yazi did not prepare a visible terminal command")
+		return false
+	end
+	local path = state_dir() .. "/shell-" .. reply.id .. ".json"
+	state.shell_handoffs = state.shell_handoffs or {}
+	local handoff = { path = path, query = query, kind = kind,
+		shell = { command = shell.command, cwd = shell.cwd, block = shell.block } }
+	state.shell_handoffs[reply.id] = handoff
+	local ok, err = pcall(function()
+		tern.fs.write(path, tern.json.encode({ version = 1, id = reply.id, cid = state.cid,
+			token = state.token, pane = cx.pane, owner_pane = state.owner_pane, shell = shell }))
+		cx:open(path)
+	end)
+	if not ok then
+		state.shell_handoffs[reply.id] = nil
+		pcall(tern.fs.remove, path)
+		cx:toast("error", "Cannot open shell terminal", tostring(err))
+		return false
+	end
+	handoff.timer = tern.timer(30000, function()
+		handoff.timer = nil
+		if state.shell_handoffs[reply.id] ~= handoff then return end
+		state.shell_handoffs[reply.id] = nil
+		pcall(tern.fs.remove, path)
+		pcall(tern.fs.remove, path .. ".ack")
+		if state.closing or running[cx.pane] ~= state then return end
+		state.cmd_mode, state.cmd_kind, state.cmd_query = true, handoff.kind, handoff.query
+		cx:toast("error", "Cannot open shell terminal", handoff.nonce
+			and "Timed out waiting for terminal launch acknowledgement; launch outcome unknown"
+			or "Timed out preparing visible terminal; command was not launched")
+		cx:render()
+	end)
+	return true
+end
+
+local function shell_handoff_event(state: any, ev: any, cx: any)
+	local handoff = state.shell_handoffs and state.shell_handoffs[ev.request_id]
+	if state.closing or running[cx.pane] ~= state or not handoff or ev.cid ~= state.cid
+		or ev.token ~= state.token or ev.pane ~= cx.pane or type(ev.nonce) ~= "string"
+		or not ev.nonce:match("^[%w-]+$") then return end
+	if ev.act == "shell_handoff_check" then
+		local shell = ev.shell
+		if type(shell) ~= "table" or shell.command ~= handoff.shell.command
+			or shell.cwd ~= handoff.shell.cwd or shell.block ~= handoff.shell.block then
+			ev.error = "Shell launch payload changed; command was not launched"
+		else
+			if handoff.nonce == ev.nonce then return end
+			handoff.nonce = ev.nonce
+			local ok, err = pcall(function()
+				tern.fs.write(handoff.path .. ".ack", tern.json.encode({ version = 1, id = ev.request_id,
+					cid = state.cid, token = state.token, pane = cx.pane, nonce = ev.nonce,
+					shell = handoff.shell }))
+				cx:open(handoff.path)
+			end)
+			if ok then return end
+			ev.error = tostring(err)
+		end
+	elseif ev.nonce ~= handoff.nonce then return end
+	state.shell_handoffs[ev.request_id] = nil
+	if handoff.timer then handoff.timer:cancel(); handoff.timer = nil end
+	pcall(tern.fs.remove, handoff.path)
+	pcall(tern.fs.remove, handoff.path .. ".ack")
+	if ev.act ~= "shell_launched" then
+		state.cmd_mode, state.cmd_kind, state.cmd_query = true, handoff.kind, handoff.query
+		cx:toast("error", "Cannot open shell terminal", ev.error or "Visible terminal launch failed")
+	end
+	cx:render()
+end
+
 local function action(state: any, yz: any, cx: any, name: string, args: any)
 	request(state, yz, cx, { op = "action", action = name, args = args })
 end
@@ -739,7 +834,13 @@ local function command_words(query: string): (any?, string?)
 	local quote, escaped, started = nil, false, false
 	for i = 1, #query do
 		local c = query:sub(i, i)
-		if escaped then table.insert(buffer, c); escaped = false; started = true
+		if escaped then
+			if quote == '"' and c ~= '$' and c ~= '`' and c ~= '"' and c ~= "\\" and c ~= "\n" then
+				table.insert(buffer, "\\")
+			end
+			if c ~= "\n" then table.insert(buffer, c) end
+			escaped = false
+			started = true
 		elseif c == "\\" and quote ~= "'" then escaped = true; started = true
 		elseif quote then
 			if c == quote then quote = nil else table.insert(buffer, c) end
@@ -800,10 +901,12 @@ local function build_parent_column(yz: YaziState?, cur_cwd: string, max_lines: n
 	end
 
 	local parent_title = (parent_cwd and basename(parent_cwd) ~= "") and basename(parent_cwd) or "/"
-	return ui.card(
+	local card = ui.card(
 		{ ui.span(parent_title, "muted") },
 		{ viewport_list(items, max_lines, "parent_list", selected) }
 	)
+	card.p.title = parent_cwd or "/"
+	return card
 end
 
 -- Right Column child preview: Expand subfolder contents as a scrollable list
@@ -872,10 +975,9 @@ handle_key = function(state: any, key: any, cx: any): boolean
 			local query = state.cmd_query or ""
 			if state.cmd_kind == "shell" then
 				if query == "" then state.cmd_mode = false; return true end
-				request(state, yz, cx, { op = "command", action = "shell", args = { query, cwd = cwd } }, function(reply)
-					if reply.ok then
+				request(state, yz, cx, { op = "command", action = "shell", args = { query } }, function(reply)
+					if reply.ok and open_shell(state, cx, reply, query, "shell") then
 						if state.cmd_query == query then state.cmd_mode = false; state.cmd_query = "" end
-						cx:toast("info", "Yazi accepted shell command", "Execution is asynchronous; inspect the task result")
 					end
 				end)
 				return true
@@ -883,19 +985,23 @@ handle_key = function(state: any, key: any, cx: any): boolean
 			local words, err = command_words(query)
 			if err then cx:toast("error", "Invalid command", err)
 			elseif words and #words > 0 then
-				local args = {}
+				local args, positional_only = {}, false
 				for i = 2, #words do
-					local option = words[i]:match("^%-%-(.+)$")
-					if option then
-						local field, value = option:match("^([^=]+)=(.*)$")
-						args[(field or option):gsub("-", "_")] = value or true
-					else table.insert(args, words[i]) end
+					if words[i] == "--" and not positional_only then positional_only = true
+					else
+						local option = not positional_only and words[i]:match("^%-%-(.+)$")
+						if option then
+							local field, value = option:match("^([^=]+)=(.*)$")
+							args[(field or option):gsub("-", "_")] = value or true
+						else table.insert(args, words[i]) end
+					end
 				end
 				request(state, yz, cx, { op = "command", action = words[1], args = args, target = target, cwd = cwd }, function(reply)
 					if reply.ok then
+						if words[1] == "shell" and not open_shell(state, cx, reply, query, "command") then return end
 						if state.cmd_query == query then state.cmd_mode = false; state.cmd_query = "" end
 						if reply.confirm_trash and reply.paths and #reply.paths > 0 then state.trash = { cid = safe_cid(yz.client_id), paths = reply.paths } end
-						cx:toast("info", "Yazi accepted command", "Actor accepted; asynchronous work may still be pending")
+						if words[1] ~= "shell" then cx:toast("info", "Yazi accepted command", "Actor accepted; asynchronous work may still be pending") end
 					end
 				end)
 			else state.cmd_mode = false; state.cmd_query = "" end
@@ -992,6 +1098,7 @@ local function poll_block(state)
 		end
 		if not pane_alive or not owner_alive then
 			state.closing = true
+			clear_shell_handoffs(state)
 			running[cx.pane] = nil
 			stop_backend(state)
 			return
@@ -1026,6 +1133,7 @@ tern.block.define("companion", {
 		if type(nonce) ~= "string" or not nonce:match("^[%w-]+$") then nonce = nil end
 		local previous = running[cx.pane]
 		if previous and previous.timer then previous.timer:cancel() end
+		if previous then previous.closing = true; clear_shell_handoffs(previous) end
 		local state = {
 			cx = cx,
 			cid = cid,
@@ -1082,12 +1190,15 @@ tern.block.define("companion", {
 		end
 
 		local top_rows = {}
-		local path_header = ui.row({
-			ui.text({ ui.span(display_path, "accent") }),
+		local path_header = ui.card({ ui.span(display_path, "accent") }, {})
+		path_header.p.role = "yazi.path-header"
+		path_header.p.key = "path"
+		path_header.p.title = cur_cwd
+		table.insert(top_rows, path_header)
+		table.insert(top_rows, ui.node("row", { role = "yazi.path-status", gap = "xs", wrap = true }, {
 			ui.badge(string.format("%d selected", yz.selected or 0), (yz.selected or 0) > 0 and "accent" or "muted"),
 			ui.badge("Synced", "success"),
-		})
-		table.insert(top_rows, path_header)
+		}))
 
 		-- 1.1 Filter Bar (when filter active)
 		if state.filter_mode or (state.filter_query and state.filter_query ~= "") then
@@ -1229,8 +1340,10 @@ tern.block.define("companion", {
 		left_col_card.p.key = "parent"
 		middle_col_card.p.role = "yazi.column.current"
 		middle_col_card.p.key = "current"
+		middle_col_card.p.title = middle_title .. "\n" .. cur_cwd
 		right_col_card.p.role = "yazi.column.preview"
 		right_col_card.p.key = "preview"
+		right_col_card.p.title = active_name and active_full_url or "Preview"
 		local miller_columns = ui.node("row", { role = "yazi.columns", key = "columns" }, {
 			left_col_card,
 			middle_col_card,
@@ -1297,6 +1410,10 @@ tern.block.define("companion", {
 		local cwd = yz and yz.cwd or ""
 		if act == "shortcut" and type(ev.key) == "table" then handle_key(state, ev.key, cx); return end
 		if act == "managed_poll" then managed_poll(state, ev, cx); return end
+		if act == "shell_handoff_check" or act == "shell_launched" or act == "shell_failed" then
+			shell_handoff_event(state, ev, cx)
+			return
+		end
 		if act == "poll" then
 			if not state.token and yz and not state.sending and tern.now() >= (state.next_probe or 0) then
 				state.next_probe = tern.now() + 2000

@@ -15,6 +15,27 @@
     flex-shrink: 0;
 }
 
+/* The path owns its row; status badges cannot squeeze it into vertical text. */
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-header"] {
+    align-self: stretch;
+    min-width: 0;
+    max-width: 100%;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-header"] > .sf-card-body {
+    display: none;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-status"] {
+    min-width: 0;
+    flex-wrap: wrap;
+}
+
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-status"] > * {
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
 [data-surface="plugin.tern-yazi.companion"] [data-role="yazi.columns"] {
     display: grid;
     grid-template-columns: minmax(0, 4fr) minmax(0, 9fr) minmax(0, 7fr);
@@ -34,8 +55,14 @@
     overflow: hidden;
 }
 
+[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-header"] > .sf-card-head,
 [data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.column."] > .sf-card-head {
+    display: block;
     flex-shrink: 0;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
 }
 
 [data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.column."] > .sf-card-body {
