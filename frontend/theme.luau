@@ -13,6 +13,8 @@ local function valid(value: any): boolean
 	return false
 end
 function M.read(): string
+	local env_theme = tern.getenv("YAZI_THEME")
+	if valid(env_theme) then return env_theme end
 	local value = tern.kv.get("layout_theme")
 	return valid(value) and value or "current"
 end

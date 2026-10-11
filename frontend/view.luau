@@ -559,12 +559,6 @@ local function render(state: any, cx: any, yz: YaziState?, prepared: any?, previ
 		else
 			-- Rich File Preview (Code, Markdown, Image, Archive table of contents)
 			local preview_content = build_rich_preview(preview_data, active_name, cx)
-			local act_buttons = {
-				clickable(ui.el("button", {}, { ui.text("Open in Tern") }), "open_file=" .. active_full_url),
-			}
-			table.insert(act_buttons, clickable(ui.el("button", {}, { ui.text("Copy Path") }), "copy_path=" .. active_full_url))
-			table.insert(act_buttons, clickable(ui.el("button", {}, { ui.text("Terminal Here") }), "terminal_here=" .. cur_cwd))
-
 			right_col_card = ui.card(
 				{ ui.span(active_name, "strong") },
 				{
@@ -574,7 +568,6 @@ local function render(state: any, cx: any, yz: YaziState?, prepared: any?, previ
 						ui.node("text", { role = "yazi.preview-permissions", text = fmt_permissions(active_hovered and active_hovered.permissions), tone = "muted" }),
 					}),
 					ui.node("col", { role = "yazi.preview", gap = "none" }, { preview_content }),
-					ui.node("row", { role = "yazi.preview-actions", gap = "xs", wrap = true }, act_buttons),
 				}
 			)
 		end
