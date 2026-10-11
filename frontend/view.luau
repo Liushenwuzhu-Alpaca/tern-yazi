@@ -179,6 +179,18 @@ local function selection_tray(selected_paths: { [string]: boolean }): Node?
 	return ui.node("row", { key = "selection", role = "yazi.selection-tray", gap = "xs" }, chips)
 end
 
+-- Yazi's status perm coloring: type green, r yellow, w red, x/s/S/t/T cyan, -/? gray.
+local PERM_TONES = { ["-"] = "muted", ["?"] = "muted", r = "warning", w = "error",
+	x = "info", s = "info", S = "info", t = "info", T = "info" }
+local function permission_spans(perm: string): { any }
+	local spans = table.create(#perm)
+	for i = 1, #perm do
+		local c = perm:sub(i, i)
+		spans[i] = ui.span(c, PERM_TONES[c] or "success")
+	end
+	return spans
+end
+
 
 local EMPTY_PATHS = {}
 
@@ -215,10 +227,11 @@ local function hydrate_row(cache: any, index: number): boolean
 		return false
 	end
 	local labels = { ui.span(selected and "✓ " or "  ", selected and "success" or "muted") }
-	if cache.key == "files_list" then table.insert(labels, ui.span(mark, "warn")) end
-	table.insert(labels, ui.span(cache.key == "parent_list" and cache.layout == "editorial" and "" or sym, tone))
+	if cache.key == "files_list" then table.insert(labels, ui.span(mark, "warning")) end
+	local style = theme.get(cache.layout)
+	table.insert(labels, ui.span(cache.key == "parent_list" and style.plain_parent and "" or sym, tone))
 	table.insert(labels, ui.span(name, cache.key == "parent_list" and active and "strong" or nil))
-	if cache.layout == "amber" then table.insert(labels, 1, ui.span(string.format("%02d ", index), "muted")) end
+	if style.ordinals then table.insert(labels, 1, ui.span(string.format("%02d ", index), "muted")) end
 	local child = cache.children[index]
 	if not child then
 		child = {
@@ -693,14 +706,21 @@ local function render(state: any, cx: any, yz: YaziState?, prepared: any?, previ
 		local pct_str = string.format("%d%%", pct_num)
 		local pos_str = string.format("%d/%d", cur_idx, math.max(1, #file_list))
 
+		-- Yazi layout: [mode|size] name ... permissions [percent|position].
+		-- Both capsules share the mode color; a non-normal mode switches to warn.
+		local pill_tone = mode_tone == "warn" and ".warn" or ""
 		local status_bar = ui.node("row", { role = "yazi.status", gap = "xs" }, {
-			ui.badge(mode_str, mode_tone),
-			ui.node("text", { role = "yazi.status-size", text = fmt_size(active_size), tone = "muted" }),
+			ui.node("row", { role = "yazi.status-left" .. pill_tone, gap = "none" }, {
+				ui.node("text", { role = "yazi.status-mode", text = mode_str }),
+				ui.node("text", { role = "yazi.status-size", text = fmt_size(active_size) }),
+			}),
 			ui.node("text", { role = "yazi.status-name", spans = { ui.span(active_name or "", "strong") } }),
 			ui.node("row", { role = "yazi.status-right", gap = "xs" }, {
-				ui.node("text", { role = "yazi.status-permissions", text = fmt_permissions(active_hovered and active_hovered.permissions), tone = "muted" }),
-				ui.text({ ui.span(" " .. pct_str .. " ", "muted") }),
-				ui.badge(pos_str, "accent"),
+				ui.node("text", { role = "yazi.status-permissions", spans = permission_spans(fmt_permissions(active_hovered and active_hovered.permissions)) }),
+				ui.node("row", { role = "yazi.status-progress" .. pill_tone, gap = "none" }, {
+					ui.node("text", { role = "yazi.status-percent", text = pct_str }),
+					ui.node("text", { role = "yazi.status-position", text = pos_str }),
+				}),
 			}),
 		})
 		local trash_layer = nil
@@ -720,7 +740,7 @@ local function render(state: any, cx: any, yz: YaziState?, prepared: any?, previ
 			}) })
 		end
 		local dock_rows = { status_bar }
-		if layout == "amber" then
+		if theme.get(layout).tray then
 			local tray = selection_tray(selected_paths)
 			if tray then table.insert(dock_rows, tray) end
 		end

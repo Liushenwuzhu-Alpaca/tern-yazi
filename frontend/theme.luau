@@ -1,16 +1,22 @@
 -- Presentation-only layout preference shared by host and window VMs.
+-- Each theme is `themes/<id>.css` (listed in plugin.toml `styles`) plus one entry here.
+-- Optional structural flags: `narrow` (role gains `.narrow` below 120 columns),
+-- `plain_parent` (no parent-column icons), `ordinals` (row numbers), `tray` (selection tray in the dock).
 local M = {}
 M.options = {
 	{ id = "current", title = "Current" },
-	{ id = "aurora", title = "Aurora Glass" },
-	{ id = "editorial", title = "Editorial Paper" },
-	{ id = "amber", title = "Amber Ledger" },
+	{ id = "aurora", title = "Aurora Glass", narrow = true },
+	{ id = "editorial", title = "Editorial Paper", narrow = true, plain_parent = true },
+	{ id = "amber", title = "Amber Ledger", narrow = true, ordinals = true, tray = true },
 }
+local by_id = {}
+for _, option in ipairs(M.options) do by_id[option.id] = option end
 local function valid(value: any): boolean
-	for _, option in ipairs(M.options) do
-		if value == option.id then return true end
-	end
-	return false
+	return by_id[value] ~= nil
+end
+-- The option record for a theme id; unknown ids fall back to Current.
+function M.get(value: string?): any
+	return by_id[value] or by_id.current
 end
 function M.read(): string
 	local env_theme = tern.getenv("YAZI_THEME")
@@ -38,9 +44,9 @@ function M.event(state: any, ev: any): (boolean, boolean)
 	return true, M.apply(state, value)
 end
 function M.regions(regions: any, state: any, cx: any): any
-	local id = valid(state.layout_theme) and state.layout_theme or "current"
-	local role = "yazi.theme." .. id
-	if id ~= "current" and (cx.cols or 120) < 120 then role ..= ".narrow" end
+	local option = M.get(state.layout_theme)
+	local role = "yazi.theme." .. option.id
+	if option.narrow and (cx.cols or 120) < 120 then role ..= ".narrow" end
 	for _, region in pairs(regions) do
 		region.p = region.p or {}
 		region.p.role = role

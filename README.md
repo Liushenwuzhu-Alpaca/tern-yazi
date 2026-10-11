@@ -14,7 +14,7 @@ Native Tern companion panel and file browser powered by Yazi.
 - **Rich Previews**: Syntax-highlighted code, Markdown, Mermaid diagrams, and raster/SVG image previews.
 - **Full Navigation**: Upstream Yazi keybindings (`j/k`, `h/l`, `gg/G`, `/`, `?`, `f`, `v`, `y`, `x`, `d`).
 - **Interactive Shell**: Native blocking (`:`) and non-blocking (`;`) shell commands with full PTY support.
-- **Layout Themes**: Switch between 4 themes (`Current`, `Aurora Glass`, `Editorial Paper`, `Amber Ledger`) via Tern's command palette.
+- **Layout Themes**: Switch between 4 themes (`Current`, `Aurora Glass`, `Editorial Paper`, `Amber Ledger`) via Tern's command palette. Each theme is a standalone stylesheet in `themes/<id>.css`; see [DEVELOPMENT.md](DEVELOPMENT.md#native-layout-themes) to customize or add one.
 
 ## Requirements
 

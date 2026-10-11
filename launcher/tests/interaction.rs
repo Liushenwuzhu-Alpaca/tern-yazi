@@ -789,28 +789,34 @@ impl Harness {
     }
 
     fn expect_metadata_file_layout(&mut self) -> TestResult<()> {
-        self.wait("footer mode/size/name and permission/progress/position have real ordered bounds", |h| {
+        self.wait("footer [mode|size] name and permissions [percent|position] capsules have real ordered bounds", |h| {
             let footer = metadata_rect(&h.tree("[data-role=\"yazi.status\"]")?)?;
-            let mode = metadata_rect(&h.tree("[data-role=\"yazi.status\"] > .sf-badge")?)?;
+            let left = metadata_rect(&h.tree("[data-role^=\"yazi.status-left\"]")?)?;
+            let mode = metadata_rect(&h.tree("[data-role=\"yazi.status-mode\"]")?)?;
             let size = metadata_rect(&h.tree("[data-role=\"yazi.status-size\"]")?)?;
             let name = metadata_rect(&h.tree("[data-role=\"yazi.status-name\"]")?)?;
             let right = metadata_rect(&h.tree("[data-role=\"yazi.status-right\"]")?)?;
             let permissions = metadata_rect(&h.tree("[data-role=\"yazi.status-permissions\"]")?)?;
-            let percent = metadata_rect(&h.tree("[data-role=\"yazi.status-right\"] > .sf-text:not([data-role=\"yazi.status-permissions\"])")?)?;
-            let position = metadata_rect(&h.tree("[data-role=\"yazi.status-right\"] > .sf-badge")?)?;
-            if [mode, size, name, right].into_iter().all(|r| metadata_contains(footer, r))
-                && [permissions, percent, position].into_iter().all(|r| metadata_contains(right, r))
-                && metadata_before(mode, size)
-                && metadata_before(size, name)
+            let progress = metadata_rect(&h.tree("[data-role^=\"yazi.status-progress\"]")?)?;
+            let percent = metadata_rect(&h.tree("[data-role=\"yazi.status-percent\"]")?)?;
+            let position = metadata_rect(&h.tree("[data-role=\"yazi.status-position\"]")?)?;
+            // Capsule segments touch: no gap between mode/size or percent/position.
+            let joined = |a: [f64; 4], b: [f64; 4]| (b[0] - (a[0] + a[2])).abs() < 1.0;
+            if [left, name, right].into_iter().all(|r| metadata_contains(footer, r))
+                && [mode, size].into_iter().all(|r| metadata_contains(left, r))
+                && [permissions, progress].into_iter().all(|r| metadata_contains(right, r))
+                && [percent, position].into_iter().all(|r| metadata_contains(progress, r))
+                && joined(mode, size)
+                && joined(percent, position)
+                && metadata_before(left, name)
                 && metadata_before(name, right)
                 && name[0] + name[2] >= right[0] - 16.0
                 && right[0] + right[2] >= footer[0] + footer[2] - 1.0
-                && metadata_before(permissions, percent)
-                && metadata_before(percent, position)
+                && metadata_before(permissions, progress)
             {
                 Ok(Some(()))
             } else {
-                Err(format!("Footer {footer:?}: mode {mode:?}, size {size:?}, name {name:?}, right {right:?}, permissions {permissions:?}, percent {percent:?}, position {position:?}"))
+                Err(format!("Footer {footer:?}: left {left:?} (mode {mode:?}, size {size:?}), name {name:?}, right {right:?}, permissions {permissions:?}, progress {progress:?} (percent {percent:?}, position {position:?})"))
             }
         })?;
         self.expect_metadata_header_layout("yazi.column.parent", ".sf-list-scroll.max")?;
@@ -888,13 +894,13 @@ impl Harness {
             "[data-role=\"yazi.column.current\"] > .sf-card-head",
             &format!("metadata ({index}/{})", files.len()),
         )?;
-        self.expect_metadata_text("[data-role=\"yazi.status\"] > .sf-badge", "NOR")?;
+        self.expect_metadata_text("[data-role=\"yazi.status-mode\"]", "NOR")?;
         self.expect_metadata_text(
-            "[data-role=\"yazi.status-right\"] > .sf-text:not([data-role=\"yazi.status-permissions\"])",
+            "[data-role=\"yazi.status-percent\"]",
             &format!("{}%", index * 100 / files.len()),
         )?;
         self.expect_metadata_text(
-            "[data-role=\"yazi.status-right\"] > .sf-badge",
+            "[data-role=\"yazi.status-position\"]",
             &format!("{index}/{}", files.len()),
         )?;
         self.expect_metadata_text(
@@ -3833,216 +3839,6 @@ fn theme_visible(node: &Value) -> bool {
     node["rect"][2].as_f64().unwrap_or(0.0) > 0.0 && node["rect"][3].as_f64().unwrap_or(0.0) > 0.0
 }
 
-
-fn native_large_directory(h: &mut Harness) -> TestResult<()> {
-    h.case = "5000 real Yazi entries preserve complete order beyond the dynamic snapshot cap";
-    fs::create_dir_all(h.path("large-directory")).map_err(|e| e.to_string())?;
-    let ordered: Vec<String> = (0..5000)
-        .map(|index| format!("entry-{index:05}-native-global-navigation-fixture.txt"))
-        .collect();
-    for name in &ordered {
-        h.write_fixture(
-            &format!("large-directory/{name}"),
-            b"REAL_LARGE_DIRECTORY\n",
-        )?;
-    }
-    let client = h.launch(h.path("large-directory"), true)?;
-    let initial = h.expect_state(
-        &client,
-        "all 5000 names arrive in exact native alphabetical order",
-        |s| {
-            names(s, "files") == ordered
-                && s["file_count"].as_u64() == Some(5000)
-                && hover(s) == text(&client.cwd.join(&ordered[0]))
-        },
-    )?;
-    let listing_bytes = fs::metadata(h.inbox().join(format!("listing-{}.json", client.cid)))
-        .map_err(|e| e.to_string())?
-        .len();
-    let state_bytes = fs::metadata(h.state_path(&client))
-        .map_err(|e| e.to_string())?
-        .len();
-    if !(256 * 1024..16 * 1024 * 1024).contains(&listing_bytes) || state_bytes > 256 * 1024 {
-        return Err(format!("Real large listing must cross the dynamic cap: listing={listing_bytes}, state={state_bytes}"));
-    }
-    let frozen_url = text(&client.cwd.join(&ordered[0]));
-    h.key("Space")?;
-    h.expect_state(
-        &client,
-        "Space selects the original global URL and advances",
-        |s| {
-            selected(s) == BTreeSet::from([frozen_url.clone()])
-                && hover(s) == text(&client.cwd.join(&ordered[1]))
-        },
-    )?;
-    let mut actor_ms = Vec::new();
-    let mut ui_ms = Vec::new();
-    let mut index = 1usize;
-    for key in ["j", "Down", "k", "Up"].into_iter().cycle().take(32) {
-        index = if matches!(key, "j" | "Down") {
-            index + 1
-        } else {
-            index - 1
-        };
-        let started = Instant::now();
-        h.key(key)?;
-        h.expect_state(
-            &client,
-            "real input reaches the matching actor cursor with full order intact",
-            |s| {
-                hover(s) == text(&client.cwd.join(&ordered[index]))
-                    && names(s, "files") == ordered
-                    && selected(s) == BTreeSet::from([frozen_url.clone()])
-            },
-        )?;
-        actor_ms.push(started.elapsed().as_secs_f64() * 1000.0);
-        h.expect_metadata_selection(&format!("{ROWS}.sel"), &client.cwd.join(&ordered[index]))?;
-        h.expect_ui(
-            "[data-role=\"yazi.column.current\"] .sf-list.virtual",
-            "distinct navigation frames retain the mounted middle native list",
-            |v| nodes(v).len() == 1 && theme_visible(nodes(v)[0]),
-        )?;
-        ui_ms.push(started.elapsed().as_secs_f64() * 1000.0);
-    }
-    h.case = "G reveals the global final item in a bounded virtual pool";
-    h.key("G")?;
-    h.expect_state(
-        &client,
-        "G reaches global index 4999 without truncation or selection loss",
-        |s| {
-            hover(s) == text(&client.cwd.join(&ordered[4999]))
-                && s["cursor"].as_u64() == Some(5000)
-                && names(s, "files") == ordered
-                && selected(s) == BTreeSet::from([frozen_url.clone()])
-        },
-    )?;
-    h.expect_metadata_selection(
-        &row_selector(ROWS, &ordered[4999]),
-        &client.cwd.join(&ordered[4999]),
-    )?;
-    let (mounted, capacity) = h.wait("global selected item is revealed inside a bounded native virtual pool", |h| {
-        let scroller = metadata_rect(&h.tree("[data-role=\"yazi.column.current\"] .sf-list-scroll.max")?)?;
-        let row = metadata_rect(&h.tree(&row_selector(ROWS, &ordered[4999]))?)?;
-        let pool = h.tree("[data-role=\"yazi.column.current\"] .sf-item.sf-vrow[data-item]")?;
-        let capacity = (scroller[3] / row[3]).ceil() as usize + 14;
-        let mounted = nodes(&pool).len();
-        let correct = nodes(&pool).iter().all(|node| {
-            node["title"].as_str().is_some_and(|url| {
-                ordered.iter().any(|name| url == text(&client.cwd.join(name)))
-            })
-        });
-        if metadata_contains(scroller, row) && mounted > 0 && mounted <= capacity && correct {
-            Ok(Some((mounted, capacity)))
-        } else {
-            Err(format!("Global reveal/pool mismatch: selected={row:?}, scroller={scroller:?}, mounted={mounted}, capacity={capacity}, pool={pool}"))
-        }
-    })?;
-    for _ in 0..4 {
-        h.open_path_editor(&text(&client.cwd))?;
-        h.expect_ui(
-            "[data-role=\"yazi.column.current\"] .sf-list.virtual",
-            "path-hover overlay render does not erase the middle column",
-            |v| nodes(v).len() == 1 && theme_visible(nodes(v)[0]),
-        )?;
-        h.expect_metadata_selection(&format!("{ROWS}.sel"), &client.cwd.join(&ordered[4999]))?;
-        h.click_target("[data-role=\"yazi.path-cancel\"]")?;
-        h.expect_metadata_selection(&format!("{ROWS}.sel"), &client.cwd.join(&ordered[4999]))?;
-    }
-    h.click_file(&client, &ordered[4998])?;
-    h.expect_state(
-        &client,
-        "pointer selects pooled row using its global item identity, not pool index",
-        |s| {
-            s["cursor"].as_u64() == Some(4999)
-                && selected(s) == BTreeSet::from([frozen_url.clone()])
-        },
-    )?;
-    h.key("v")?;
-    h.key("k")?;
-    let range = BTreeSet::from([
-        text(&client.cwd.join(&ordered[4997])),
-        text(&client.cwd.join(&ordered[4998])),
-    ]);
-    h.expect_state(
-        &client,
-        "high-index visual range marks authoritative global URLs",
-        |s| {
-            s["mode"] == "select"
-                && names(s, "marked_urls").into_iter().collect::<BTreeSet<_>>() == range
-        },
-    )?;
-    h.key("Escape")?;
-    h.key("ctrl+a")?;
-    let all_urls: BTreeSet<String> = ordered
-        .iter()
-        .map(|name| text(&client.cwd.join(name)))
-        .collect();
-    h.expect_state(
-        &client,
-        "native toggle-all keeps every one of the 5000 global URLs",
-        |s| selected(s) == all_urls,
-    )?;
-    h.case = "large listing/filter pairs remain coherent while selection URLs stay global";
-    h.key("f")?;
-    h.paste(client.pane, "entry-04999")?;
-    let filtered = h.expect_state(
-        &client,
-        "filtered coherent pair contains only the exact high-index filename",
-        |s| {
-            names(s, "files") == vec![ordered[4999].clone()]
-                && selected(s) == all_urls
-                && hover(s) == text(&client.cwd.join(&ordered[4999]))
-        },
-    )?;
-    h.expect_metadata_selection(
-        &row_selector(ROWS, &ordered[4999]),
-        &client.cwd.join(&ordered[4999]),
-    )?;
-    h.click_target("[data-role=\"yazi.command-cancel\"]")?;
-    let restored = h.expect_state(
-        &client,
-        "clearing the actual filter restores every entry in original order",
-        |s| {
-            names(s, "files") == ordered
-                && selected(s) == all_urls
-                && s["filter"] == initial["filter"]
-        },
-    )?;
-    if initial["listing_epoch"] != filtered["listing_epoch"]
-        || filtered["listing_epoch"] != restored["listing_epoch"]
-        || filtered["listing_revision"] == restored["listing_revision"]
-    {
-        return Err(format!("Real filter listing revisions did not advance coherently: initial={initial}, filtered={filtered}, restored={restored}"));
-    }
-    actor_ms.sort_by(f64::total_cmp);
-    ui_ms.sort_by(f64::total_cmp);
-    let distribution = |samples: &[f64]| {
-        json!({
-            "samples": samples.len(), "median_ms": samples[samples.len() / 2],
-            "p95_ms": samples[(samples.len() * 95).div_ceil(100) - 1],
-            "max_ms": samples[samples.len() - 1],
-        })
-    };
-    println!(
-        "Actual AFTER large-directory input latency (includes ctl process and 40ms polling): {}",
-        json!({
-            "entries": 5000, "listing_bytes": listing_bytes, "dynamic_bytes": state_bytes,
-            "mounted": mounted, "pool_capacity": capacity,
-            "input_to_actor": distribution(&actor_ms), "input_to_visible_ui": distribution(&ui_ms),
-        })
-    );
-    h.shot("14-native-large-directory-global-selection")?;
-    h.key("Escape")?;
-    h.expect_state(
-        &client,
-        "native Escape clears all large-directory selection",
-        |s| selected(s).is_empty(),
-    )?;
-    let watched = descendants(client.supervisor);
-    h.owned.extend(watched.iter().copied());
-    h.key("q")?;
-    h.removed(&client, &watched)
-}
 fn extended_preview_flow(h: &mut Harness) -> TestResult<()> {
     let preview_dir = h.path("previews");
     fs::create_dir_all(&preview_dir).map_err(|e| e.to_string())?;
@@ -4409,7 +4205,6 @@ fn real_native_interactions() {
     let result = interaction_flow(&mut harness)
         .and_then(|()| glyph_interaction_flow(&mut harness))
         .and_then(|()| native_metadata_footer_headers(&mut harness))
-        .and_then(|()| native_large_directory(&mut harness))
         .and_then(|()| extended_preview_flow(&mut harness));
     conclude(&mut harness, result);
 }

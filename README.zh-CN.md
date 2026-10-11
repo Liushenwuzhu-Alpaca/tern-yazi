@@ -14,7 +14,7 @@
 - **丰富预览**：支持语法高亮代码、Markdown、Mermaid 图表及位图/矢量 SVG 图片预览。
 - **完整导航**：全面对齐官方 Yazi 快捷键（`j/k`、`h/l`、`gg/G`、`/`、`?`、`f`、`Space`、`v`、`y`、`x`、`d`）。
 - **交互 Shell**：支持阻塞式（`:`）与非阻塞式（`;`）命令，带完整交互式 PTY 终端支持。
-- **布局主题**：提供 4 款原生布局主题（`Current`、`Aurora Glass`、`Editorial Paper`、`Amber Ledger`），支持通过命令面板即时切换。
+- **布局主题**：提供 4 款原生布局主题（`Current`、`Aurora Glass`、`Editorial Paper`、`Amber Ledger`），支持通过命令面板即时切换。每个主题是 `themes/<id>.css` 下的独立样式文件，自定义或新增主题见 [DEVELOPMENT.md](DEVELOPMENT.md#native-layout-themes)。
 
 ## 环境要求
 
