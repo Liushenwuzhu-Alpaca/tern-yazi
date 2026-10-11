@@ -243,7 +243,11 @@ local function start_standalone(state)
 	tern.kv.set("native_launches", store)
 	local helper, real = standalone_executables()
 	local ok, err = pcall(function()
-		tern.process.run({ helper, "--standalone-pane", tostring(state.pane), "--real", real, "--" },
+		local run_args = { helper, "--standalone-pane", tostring(state.pane), "--real", real, "--" }
+		if state.source_cwd and state.source_cwd ~= "" then
+			table.insert(run_args, state.source_cwd)
+		end
+		tern.process.run(run_args,
 			{ cwd = state.source_cwd }, function(result)
 				local current_state = running[state.pane]
 				if not current_state or current_state.closing or current_state.owner_kind ~= "standalone" then return end
@@ -307,18 +311,26 @@ end
 local function new(args: any, saved: any, pane: number): any
 	args = args or {}
 	saved = type(saved) == "table" and saved or {}
-	local cid = safe_cid(args[1] or saved.cid)
+	-- A lone "cwd:<dir>" argument pins the source directory without positional
+	-- holes; block argument channels may compact empty entries.
+	local source_cwd = args[4] or saved.source_cwd
+	local cid_arg = args[1]
+	if type(cid_arg) == "string" and cid_arg:sub(1, 4) == "cwd:" then
+		source_cwd = cid_arg:sub(5)
+		cid_arg = nil
+	end
+	local cid = safe_cid(cid_arg or saved.cid)
 	if cid and not cid:match("^%d+$") then cid = nil end
 	local token = args[2] or saved.token
 	if type(token) ~= "string" or not token:match("^[%w-]+$") then token = nil end
 	local nonce = args[5] or saved.lease_nonce
 	if type(nonce) ~= "string" or not nonce:match("^[%w-]+$") then nonce = nil end
 	local owner_kind = args[3] and "shell" or saved.owner_kind
-	if not owner_kind then owner_kind = args[1] and "attach" or "standalone" end
+	if not owner_kind then owner_kind = cid_arg and "attach" or "standalone" end
 	return {
 		pane = pane, cid = cid, token = token, lease_nonce = nonce,
 		owner_kind = owner_kind, owner_pane = tonumber(args[3]) or saved.owner_pane,
-		source_cwd = args[4] or saved.source_cwd, live = false,
+		source_cwd = source_cwd, live = false,
 		startup_attempted = saved.startup_attempted, startup_error = saved.startup_error,
 	}
 end

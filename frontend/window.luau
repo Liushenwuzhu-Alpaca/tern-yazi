@@ -65,15 +65,19 @@ local function restore_slot(cx, record, slot)
 				ok = cx.layout:move(record.owner_pane, target, slot.dir or "right", { focus = false })
 			end
 		else
-			-- Raw close may already have destroyed the last-pane tab. Restore in a
-			-- dedicated tab, never beside an unrelated currently focused client.
-			local tab
-			tab, err = cx.layout:move_to_new_tab(record.owner_pane, slot.session, { focus = false })
-			ok = tab ~= nil
+			-- Raw or daemon-side close may already have destroyed the last-pane
+			-- tab. unpark is the documented parked-to-tiled primitive; then give
+			-- the shell its own tab, never beside an unrelated focused client.
+			ok, err = cx.layout:unpark(record.owner_pane, { focus = false })
 			if ok then
-				cx.layout:name_tab(tab, slot.name)
-				cx.layout:color_tab(tab, slot.color)
-				cx.layout:order_tab(tab, slot.position or 1)
+				local tab
+				tab, err = cx.layout:move_to_new_tab(record.owner_pane, slot.session, { focus = false })
+				ok = tab ~= nil
+				if ok then
+					cx.layout:name_tab(tab, slot.name)
+					cx.layout:color_tab(tab, slot.color)
+					cx.layout:order_tab(tab, slot.position or 1)
+				else cx.layout:park(record.owner_pane) end
 			end
 		end
 	end
@@ -83,8 +87,18 @@ local function restore_slot(cx, record, slot)
 		return false
 	end
 	if native then
-		-- Collapse only this temporary pair, or remove only this native float.
-		-- The actual shell now owns the original presentation again.
+		-- A floating native pane must dock before park: parking a float keeps
+		-- presenting it. The actual shell now owns the original presentation again.
+		local tab = cx.session:tab_of(record.pane)
+		local lay = tab and cx.session:layout(tab)
+		if lay then
+			for _, item in ipairs(lay.floats or {}) do
+				if item.pane == record.pane then
+					cx.layout:dock(record.pane, nil, nil, { focus = false })
+					break
+				end
+			end
+		end
 		ok, err = cx.layout:park(record.pane)
 		if not ok then
 			tern.log.warn("Yazi return failed", tostring(err))
@@ -99,14 +113,34 @@ local function restore_slot(cx, record, slot)
 	backend.forget_managed_slot(record)
 	return true
 end
+-- Daemon-side closes never raise pane_closed in this window; the managed scan
+-- is the only witness. Restore the parked owner exactly like an owned close.
+local function restore_vanished(cx, record)
+	if not record.pane or cx.session:pane(record.pane) then return end
+	local owner = cx.session:pane(record.owner_pane)
+	if not owner or not owner.parked then return end
+	local slot = backend.managed_slot(record)
+	if slot then restore_slot(cx, record, slot) end
+end
 local function companion_alive(cx): boolean
 	return companion.pane ~= nil and cx.session:pane(companion.pane) ~= nil
 end
 
 -- No-argument creation owns its backend; explicit client arguments attach only.
+local function focused_shell_cwd(cx): string?
+	local focused = cx.session:focused()
+	local info = focused and cx.session:pane(focused)
+	if not info or info.block then return nil end
+	local cwd = info.cwd
+	if type(cwd) ~= "string" or cwd == "" then return nil end
+	return cwd
+end
 local function open_companion(cx)
 	if companion_alive(cx) then return end
-	local pane = cx:new_block(BLOCK_KIND, nil, "beside", { focus = true })
+	-- BlockCx.cwd is the window cwd for window-created blocks; pin the source
+	-- directory to the focused shell so the companion opens where the user is.
+	local cwd = focused_shell_cwd(cx)
+	local pane = cx:new_block(BLOCK_KIND, cwd and { "cwd:" .. cwd } or nil, "beside", { focus = true })
 	if not pane then tern.log.warn("new_block failed", BLOCK_KIND); return end
 	companion.pane = pane
 	poll_pane(cx, pane)
@@ -187,7 +221,10 @@ local function poke(cx)
 		if not candidate then break end
 		local record = candidate.record
 		if candidate.launch then launch_managed(cx, record) end
-		if not backend.managed_active(candidate, metadata) then continue end
+		if not backend.managed_active(candidate, metadata) then
+			restore_vanished(cx, record)
+			continue
+		end
 		if not record.pane then launch_managed(cx, record) end
 		if not record.pane then continue end
 		local slot = backend.managed_slot(record)
@@ -203,7 +240,9 @@ local function poke(cx)
 		local report = backend.managed_poll(record)
 		cx.session:event(report.pane, report.event)
 	end
-	for _, pane in ipairs(backend.finish_managed_scan(scan)) do poll_pane(cx, pane) end
+	local offline, dropped = backend.finish_managed_scan(scan)
+	for _, pane in ipairs(offline) do poll_pane(cx, pane) end
+	for _, record in ipairs(dropped) do restore_vanished(cx, record) end
 end
 local function expire_native_terminals(cx, closed_pane)
 	for _, pane in ipairs(backend.expire_native_terminals(query(cx), closed_pane)) do cx.layout:close(pane) end

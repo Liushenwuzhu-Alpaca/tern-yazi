@@ -81,6 +81,50 @@ local function build_rich_preview(data: any, active_name: string, cx: any): Node
 			ui.text({ ui.span(string.format("Image (%s, %s)", ext:upper(), fmt_size(#content)), "muted") }),
 		})
 	end
+	-- 1b. PDF Native Preview (via pdftocairo cover image + pdfinfo metadata)
+	if data.tag == "pdf" then
+		if data.status == "loading" then
+			return ui.node("col", { role = "yazi.pdf-preview", gap = "xs" }, {
+				ui.text({ ui.span("Loading PDF preview...", "warn") }),
+			})
+		elseif data.status == "ready" then
+			local meta = data.meta or {}
+			local pages_str = meta.Pages and (meta.Pages .. " pages") or "PDF Document"
+			local version_str = meta["PDF version"] and ("v" .. meta["PDF version"]) or nil
+			local title_str = meta.Title and meta.Title ~= "" and meta.Title or nil
+
+			local meta_spans = {
+				ui.span("PDF", "badge"),
+				ui.span(" " .. pages_str, "strong"),
+			}
+			if version_str then
+				table.insert(meta_spans, ui.span(" (" .. version_str .. ")", "muted"))
+			end
+
+			local children = {
+				ui.text(meta_spans),
+			}
+			if title_str then
+				table.insert(children, ui.text({ ui.span(title_str, "muted") }))
+			end
+
+			if data.blob then
+				table.insert(children, ui.node("image", {
+					blob = data.blob,
+					alt = active_name,
+					role = "yazi.image",
+					max = { w = 1, h = tostring(math.max(1, (cx.rows or 24) - 14)) .. "lines" },
+				}))
+				table.insert(children, ui.text({ ui.span("Click image to zoom", "muted") }))
+			else
+				table.insert(children, ui.text({ ui.span("Page cover rasterization pending", "muted") }))
+			end
+
+			return ui.node("col", { role = "yazi.pdf-preview", gap = "xs" }, children)
+		else
+			return ui.text({ ui.span("PDF preview unavailable", "muted") })
+		end
+	end
 
 	-- 2. Mermaid diagram preview (.mermaid / .mmd)
 	if data.tag == "mermaid" then
@@ -196,6 +240,18 @@ local function hydration_pending(state: any): boolean
 	return false
 end
 
+local function reveal_pending(state: any): boolean
+	for _, cache in pairs(state.active_list_caches or {}) do
+		if cache.reveal then return true end
+	end
+	return false
+end
+
+-- Restores selections withheld by a layout swap; the next render reveals them.
+local function finish_reveal(state: any)
+	for _, cache in pairs(state.list_cache or {}) do cache.reveal = nil end
+end
+
 -- Called only by the owning host's finite timer, using the latest visible caches.
 local function hydrate(state: any): boolean
 	local deadline, count, changed = tern.now() + HYDRATE_BUDGET_MS, 0, false
@@ -225,9 +281,14 @@ local function directory_list(state: any, folder: any, cwd: string, max_lines: n
 	state.list_cache = caches
 	local cache = caches[key]
 	local rebuild = not cache or cache.files ~= files or cache.cwd ~= cwd or cache.layout ~= layout
+	-- Native lists keep their pixel scroll offset and reveal only on selection
+	-- changes. A layout swap changes row heights, so withhold the unchanged
+	-- selection for one frame; restoring it makes the native list reveal it.
+	local relayout = rebuild and cache ~= nil and cache.files == files and cache.cwd == cwd
 	if rebuild then
 		cache = { files = files, cwd = cwd, layout = layout, key = key, indices = {}, names_by_url = {},
-			urls = {}, items = {}, children = {}, pending = {}, pending_count = 0, queue = {}, queue_head = 1 }
+			urls = {}, items = {}, children = {}, pending = {}, pending_count = 0, queue = {}, queue_head = 1,
+			reveal = relayout }
 		for index, name in ipairs(files) do
 			local url = join_path(cwd, name)
 			cache.indices[name], cache.names_by_url[url], cache.urls[index] = index, name, url
@@ -330,7 +391,7 @@ local function directory_list(state: any, folder: any, cwd: string, max_lines: n
 		p = {
 			key = key,
 			max = { lines = max_lines },
-			selected = selected_name and cache.indices[selected_name]
+			selected = not cache.reveal and selected_name and cache.indices[selected_name]
 				and (LIST_IDS[key] .. "." .. selected_name) or nil,
 		},
 		c = children,
@@ -640,4 +701,6 @@ end
 M.render = render
 M.hydrate = hydrate
 M.hydration_pending = hydration_pending
+M.reveal_pending = reveal_pending
+M.finish_reveal = finish_reveal
 return M

@@ -16,7 +16,7 @@ The recorded Linux interactive verification environment uses:
 
 These are observed versions, not a compatibility matrix. The generated declarations in [`tern.d.luau`](tern.d.luau) describe the Tern APIs used by this checkout. Both Yazi and the Tern host must run on the same machine and see the same runtime inbox. Keep `ya` and `tern` on the host process's `PATH`; Terminal Here invokes `tern` as a subprocess.
 
-Rust and Cargo build the launcher; its locked dependencies are `libc` and `serde_json`. The installer produces a standalone native executable, so Cargo is a build-time requirement rather than a runtime service. A Nerd Font supplies the glyph coverage selected by Yazi's theme; the companion does not change terminal/global font settings. Archive paths additionally use installed `unzip`, `tar`, or `7z` executables; listing support and extraction support differ by format.
+Rust and Cargo build the launcher; its locked dependencies are `libc` and `serde_json`. The installer produces a standalone native executable, so Cargo is a build-time requirement rather than a runtime service. A Nerd Font supplies the glyph coverage selected by Yazi's theme; the companion does not change terminal/global font settings. Archive paths additionally use installed `unzip`, `tar`, or `7z` executables; listing support and extraction support differ by format. PDF previews use Poppler's `pdfinfo` and `pdftocairo`.
 
 ### Link the checkout
 
@@ -221,7 +221,7 @@ The width budget retains the current directory and folds older ancestors behind 
 
 `frontend/theme.luau` is shared by the host and window VMs. Four commands in the Yazi group register `plugin.tern-yazi.theme_current`, `plugin.tern-yazi.theme_aurora`, `plugin.tern-yazi.theme_editorial`, and `plugin.tern-yazi.theme_amber`, titled `Yazi: Layout - Current`, `Yazi: Layout - Aurora Glass`, `Yazi: Layout - Editorial Paper`, and `Yazi: Layout - Amber Ledger`. The environment variable `YAZI_THEME` optionally overrides the theme on launch, falling back to plugin-local `tern.kv` key `layout_theme` (default `current`). No global setting or keybinding is written.
 
-The plugin binds `Ctrl+Shift+Space` to Tern's built-in `palette` action. Type `Yazi: Layout` to see all four entries; Esc dismisses the palette without changing the current Yazi selection. The real interaction chain opens this palette through the keyboard, checks all four visible labels, then continues measured native theme geometry tests.
+The plugin binds `Ctrl+Shift+Space` to Tern's built-in `palette` action. Type `Yazi: Layout` to see all four entries; Esc dismisses the palette without changing the current Yazi selection.
 
 A command first writes KV and then broadcasts `{ ev = "action", id = "main.theme", act = "set_theme=<id>" }` to every companion pane in its session. The argument stays in the supported `act` field. Hosts read KV at initialization, timer polling and ordinary window poll events, covering reloads, new panes and other windows. Theme events are consumed before snapshot/input/Yazi RPC routing. A changed choice requests only a frontend render, never a backend restart or Yazi command.
 
@@ -231,7 +231,9 @@ Current retains the original 4:9:7 grid, 6 px gaps, density, fonts, and clean di
 
 Amber prepends actual ordered listing ordinals to native row spans. Its `yazi.selection-tray` is a bounded single-line dock row appended after the existing status node (CSS orders it visually before the footer), with up to six sorted authoritative selected paths as `yazi.selection-chip` filename nodes and an optional `yazi.selection-overflow` `+N` node. Each filename keeps its case and full-path title. Persistent success-tone selection marks and warning-tone visual marks remain separate from the native cursor. No selected-count header, Source/Info tabs, line-count badge or mock dataset is introduced.
 
-All themes share one native component tree and independent bounded list/preview scrolling, fixed input slot, native code widget, image aspect/error limits and existing decoders. Semantic Tern palette colors adapt to global appearance; the layouts do not require browser embedding, blur/gradient support, dependencies, Python, Yazi patches, a daemon, font installation or global font configuration. The real GUI regression remains in the single `real_native_interactions` chain and checks measured layouts, selection/identity retention, reload/new-pane persistence, narrow bounds and actual image aspect.
+All themes share one native component tree and independent bounded list/preview scrolling, fixed input slot, native code widget, image aspect/error limits and existing decoders. Semantic Tern palette colors adapt to global appearance; the layouts do not require browser embedding, blur/gradient support, dependencies, Python, Yazi patches, a daemon, font installation or global font configuration. Layout themes currently have no automated GUI regression: the measured theme case was removed from `real_native_interactions` because of the known issue below.
+
+**Known issue: stale pane size in new companions.** A demo theme picks its wide or narrow layout from the block's `cx.cols`. A companion pane opened by managed launch can keep reporting Tern's initial `80x24` after the pane is actually wider; one recorded run observed `80x24` in the new pane while a sibling companion in the same window reported `160x52`. The pane then renders the narrow layout (parent column hidden) until a later resize reaches the block. This is intermittent. `BlockCx` exposes only `cols`/`rows`, with no API to query or refresh the real size, so the plugin has no reliable workaround; a nudge (±1 resize plus a zoom pair) did not fix it. It is to be reported upstream to Tern.
 
 
 
@@ -591,10 +593,11 @@ The image cap matches Tern's documented [16 MiB single-blob limit](https://docs.
 | `unavailable` | Active byte `limit` for the bounded-read warning |
 | `archive` | `status` (`loading`, `ready`, or `empty`) and the existing cached `items` reference |
 | `image` | Bounded `content` bytes, `mime`, and `ext` |
+| `pdf` | `status` (`loading`, `ready`, or `unavailable`); when ready, `pdfinfo` `meta` fields and page-1 JPEG `content` with `mime` |
 | `mermaid`, `markdown`, `binary` | Bounded `content` string |
 | `code` | Bounded `content` string and detected `lang` |
 
-For a non-empty `image` payload, `frontend/host` performs `cx:blob(content, mime)` under protection and adds the successful blob ID to that transient payload. `frontend/view` builds the image node, or the existing short unavailable/empty-file presentation. Text and archive payloads similarly become native nodes only in the view layer. Snapshot listings, cached archive items, and bounded strings retain their references across this boundary; the adapter does not copy the authoritative snapshot or move file reads into the frontend.
+For a non-empty `image` or ready `pdf` payload, `frontend/host` performs `cx:blob(content, mime)` under protection and adds the successful blob ID to that transient payload. `frontend/view` builds the image node, or the existing short unavailable/empty-file presentation. Text and archive payloads similarly become native nodes only in the view layer. Snapshot listings, cached archive items, and bounded strings retain their references across this boundary; the adapter does not copy the authoritative snapshot or move file reads into the frontend.
 
 ### Native rendering dispatch
 
@@ -606,8 +609,9 @@ Rendering dispatch is extension-based:
 - Other files with NUL bytes show a binary-file message; otherwise `ui.code(content, language)` applies the extension language map, falling back to `text`.
 - A hovered directory uses the authoritative child preview snapshot from Yazi (`yz.preview`, capped at 30 entries) and `file_dirs` and `file_icons`, without local filesystem enumeration. Its header uses the separate pre-cap `file_count`, so more than 30 loaded immediate children are counted correctly; grandchildren are not counted.
 - Archives use asynchronous external listing rather than `read_preview`: ZIP uses `unzip -Z1`; tar-like formats use `tar -tf`; `.7z` uses `7z l -ba -slt`; other recognized archive extensions fall back to tar. At most 50 output lines are cached and at most 18 displayed. This is a bounded line display, not a full archive-entry parser. The URL-keyed cache belongs to the current `client_id:seq:cwd` preview stamp and is cleared when that stamp changes; it has no archive-modification watcher. A process callback accepts its result only for the same non-closing current session and cache, then calls `on_change()` for frontend rendering.
+- PDFs first pass the bounded regular-file gate (the `code_bytes` limit), then run asynchronously: `pdfinfo` supplies page count, version and title, and `pdftocairo -f 1 -l 1 -singlefile -jpeg -r 100 <pdf> -` writes the page-1 cover to stdout. A failed `pdfinfo` only leaves the metadata empty; a failed, timed-out (10 s) or empty rasterization, or a cover above the `image_bytes` limit, shows `PDF preview unavailable`. Results share the archive cache lifecycle: keyed by URL, cleared on a new preview stamp, and accepted only for the same non-closing session. `pdftoppm` is not used: Poppler 26.x writes `-` as a `-.jpg` file in the working directory instead of stdout. The cover reuses the `yazi.image` node; `yazi.pdf-preview`, like `yazi.image-preview`, must give its column `height: 100%` because the image node flexes from a zero basis and otherwise collapses to zero height.
 
-There is no dedicated PDF, audio, or video viewer. Archive previews provide read-only file listings; custom archive extraction mutations and extraction buttons have been removed in favor of Yazi's native archive openers and rules. Recognizing an archive extension for listing does not imply in-place mutation support.
+There is no dedicated audio or video viewer, and PDF preview shows only the first page. Archive previews provide read-only file listings; custom archive extraction mutations and extraction buttons have been removed in favor of Yazi's native archive openers and rules. Recognizing an archive extension for listing does not imply in-place mutation support.
 ## 8. Exact-target safety and regressions
 
 ### Target calculation

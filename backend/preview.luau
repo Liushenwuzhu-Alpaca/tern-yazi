@@ -4,6 +4,29 @@ local session = require('./session')
 local file_ext, mime_for, is_archive = model.file_ext, model.mime_for, model.is_archive
 local M = {}
 
+-- Plugin-scoped byte limits; bounded reads reject whole oversized files, not prefixes.
+local PREVIEW_LIMITS = require('./preview_policy').limits
+
+local function preview_limit(kind: string): (number?, any?)
+	local spec = PREVIEW_LIMITS[kind]
+	local ok_config, config = pcall(tern.kv.get, "preview_limits")
+	if not ok_config then return nil, { tag = "settings-unavailable" } end
+	local value = type(config) == "table" and config[kind] or nil
+	local limit = spec.default
+	if type(value) == "number" and value > 0 and value < math.huge and value % 1 == 0 then
+		limit = math.min(value, spec.max)
+	end
+	return limit, nil
+end
+
+local function read_preview(path: string, kind: string): (string?, any?)
+	local limit, failure = preview_limit(kind)
+	if not limit then return nil, failure end
+	local ok_read, content = pcall(tern.fs.read, path, limit)
+	if not ok_read then return nil, { tag = "unavailable", limit = limit } end
+	return content, nil
+end
+
 local function fetch_archive_contents(full_url: string, ext: string, state: any)
 	local cache = state.archive_cache
 	if cache[full_url] ~= nil then return end
@@ -39,21 +62,45 @@ local function fetch_archive_contents(full_url: string, ext: string, state: any)
 	end)
 end
 
--- Plugin-scoped byte limits; bounded reads reject whole oversized files, not prefixes.
-local PREVIEW_LIMITS = require('./preview_policy').limits
+local function fetch_pdf_preview(full_url: string, state: any)
+	local cache = state.pdf_cache
+	if not cache then return end
+	if cache[full_url] ~= nil then return end
+	cache[full_url] = false
 
-local function read_preview(path: string, kind: string): (string?, any?)
-	local spec = PREVIEW_LIMITS[kind]
-	local ok_config, config = pcall(tern.kv.get, "preview_limits")
-	if not ok_config then return nil, { tag = "settings-unavailable" } end
-	local value = type(config) == "table" and config[kind] or nil
-	local limit = spec.default
-	if type(value) == "number" and value > 0 and value < math.huge and value % 1 == 0 then
-		limit = math.min(value, spec.max)
+	local function finish(meta: { [string]: string }, image: string?)
+		if state.closing or state.pdf_cache ~= cache or not session.current(state) then return end
+		-- A string marker is the terminal failure state; tables are ready payloads.
+		cache[full_url] = image and { meta = meta, image_bytes = image } or "failed"
+		state.on_change()
 	end
-	local ok_read, content = pcall(tern.fs.read, path, limit)
-	if not ok_read then return nil, { tag = "unavailable", limit = limit } end
-	return content, nil
+
+	local cap = preview_limit("image_bytes")
+	local rasterize = function(meta: { [string]: string })
+		-- Rasterize to stdout: no shared temp path to pre-seed, follow or race.
+		-- pdftocairo documents '-' as stdout; pdftoppm 26.x writes a '-.jpg' file instead.
+		local ok_run = pcall(function()
+			tern.process.run({ "pdftocairo", "-f", "1", "-l", "1", "-singlefile", "-jpeg", "-r", "100", full_url, "-" }, { timeout_ms = 10000 }, function(res)
+				local bytes = res and res.status == 0 and not res.timed_out and res.stdout or nil
+				if bytes and #bytes > 0 and cap and #bytes <= cap then finish(meta, bytes)
+				else finish(meta, nil) end
+			end)
+		end)
+		if not ok_run then finish(meta, nil) end
+	end
+	local ok_info = pcall(function()
+		tern.process.run({ "pdfinfo", full_url }, { timeout_ms = 10000 }, function(res_info)
+			local meta = {}
+			if res_info and res_info.status == 0 and res_info.stdout then
+				for line in res_info.stdout:gmatch("[^\r\n]+") do
+					local k, v = line:match("^([^:]+):%s*(.*)$")
+					if k and v then meta[k] = v end
+				end
+			end
+			rasterize(meta)
+		end)
+	end)
+	if not ok_info then rasterize({}) end
 end
 
 local function prepare(state: any, full_url: string): any
@@ -63,6 +110,30 @@ local function prepare(state: any, full_url: string): any
 		local cached = state.archive_cache[full_url]
 		return { tag = "archive", status = type(cached) == "table" and #cached > 0 and "ready"
 			or (cached == false and "loading" or "empty"), items = cached }
+	end
+	if ext == "pdf" then
+		local cache = state.pdf_cache
+		if cache and cache[full_url] == nil then
+			-- Whole-file regular-input gate before any helper runs: oversized,
+			-- symlinked or non-regular PDFs keep the shared rejection rules.
+			local gate, failure = read_preview(full_url, "code_bytes")
+			if not gate then return failure end
+			fetch_pdf_preview(full_url, state)
+		end
+		local cached = cache and cache[full_url]
+		if type(cached) == "table" then
+			return {
+				tag = "pdf",
+				status = "ready",
+				meta = cached.meta,
+				content = cached.image_bytes,
+				mime = "image/jpeg",
+			}
+		elseif cached == false then
+			return { tag = "pdf", status = "loading" }
+		else
+			return { tag = "pdf", status = "unavailable" }
+		end
 	end
 	local mime = mime_for(ext)
 	local kind = "code_bytes"
@@ -80,6 +151,7 @@ end
 
 local function init(state: any)
 	state.archive_cache = {}
+	state.pdf_cache = {}
 end
 
 local function sync(state: any, yz: any)
@@ -88,6 +160,7 @@ local function sync(state: any, yz: any)
 	if state.preview_stamp ~= stamp then
 		state.preview_stamp = stamp
 		state.archive_cache = {}
+		state.pdf_cache = {}
 	end
 end
 

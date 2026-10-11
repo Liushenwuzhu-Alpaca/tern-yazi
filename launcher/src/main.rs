@@ -697,7 +697,8 @@ impl Backend {
                 libc::signal(libc::SIGHUP, libc::SIG_DFL);
                 libc::signal(libc::SIGPIPE, libc::SIG_DFL);
             }
-            let error = Command::new(real)
+            let mut command = Command::new(real);
+            command
                 .arg("--client-id")
                 .arg(cid)
                 .args(args)
@@ -711,8 +712,11 @@ impl Backend {
                 .env_remove("TERN_PANE")
                 .env_remove("TERN_PANE_SOCKET")
                 .env_remove("TERN_WINDOW_SOCKET")
-                .env_remove("TERN_IDENTITY")
-                .exec();
+                .env_remove("TERN_IDENTITY");
+            if let Ok(cwd) = env::current_dir() {
+                command.env("PWD", cwd);
+            }
+            let error = command.exec();
             eprintln!("tern-yazi: cannot execute original Yazi: {error}");
             unsafe {
                 libc::_exit(127);

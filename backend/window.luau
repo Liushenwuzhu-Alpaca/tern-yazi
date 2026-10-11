@@ -162,8 +162,11 @@ function Window.next_managed(scan)
 				owner_kind = health.owner_kind, cwd = health.cwd,
 				nonce = nonce_epoch .. "-" .. tostring(nonce_seq), started = tern.now() }
 			managed[cid] = record
-			local token, hint = lease_hint(cid)
+			local token, hint, existing_nonce = lease_hint(cid)
 			local saved = slot_store()[key]
+			if existing_nonce and token == record.token then
+				record.nonce = existing_nonce
+			end
 			if health.owner_kind == "standalone" and health.native_pane == health.owner_pane
 				and panes[health.native_pane] and panes[health.native_pane].block == BLOCK_KIND then
 				record.pane = health.native_pane
@@ -214,16 +217,23 @@ function Window.managed_poll(record)
 		cid = record.cid, token = record.token, nonce = record.nonce } }
 end
 function Window.finish_managed_scan(scan)
-	local offline = {}
+	local offline, dropped = {}, {}
 	for cid, record in pairs(managed) do
 		if not scan.seen[cid] then
-			-- Preserve explicit offline UI while stopping its lease.
-			record.stopped = true
-			if record.pane and scan.panes[record.pane] then table.insert(offline, record.pane)
-			else managed[cid] = nil end
+			if record.pane and scan.panes[record.pane] then
+				-- Health may be transiently unreadable while the pane is alive.
+				-- Keep the record and poll it as offline instead of stopping it.
+				table.insert(offline, record.pane)
+			else
+				-- Health and pane both vanished: a daemon-side close the window
+				-- never sees as pane_closed. The caller restores the parked owner.
+				record.stopped = true
+				managed[cid] = nil
+				table.insert(dropped, record)
+			end
 		end
 	end
-	return offline
+	return offline, dropped
 end
 function Window.focused_managed(focused, query)
 	for _, record in pairs(managed) do

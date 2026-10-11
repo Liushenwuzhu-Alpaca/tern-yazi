@@ -42,6 +42,13 @@ local function sync_hover(state: any, yz: YaziState?)
 		state.source_cwd = yz.cwd
 		state.source_hover = hovered
 	end
+	-- The published snapshot can prove a submitted path before its reply is
+	-- polled; keys typed after the jump must reach Yazi, not the stale editor.
+	local jump = state.path_jump
+	if jump and yz.cwd == jump.target then
+		state.path_jump = nil
+		if state.path_query == jump.query then state.path_mode = false end
+	end
 	-- Only pending filter mutations own the local query. An unrelated action may
 	-- publish its new filter snapshot before its acknowledgement reaches us.
 	if not state.filter_mode and not actions.pending_filter(state)
@@ -135,8 +142,11 @@ end
 
 local function jump_directory(state: any, yz: any, cx: any, target: string)
 	local query = state.path_query
+	local jump = { query = query, target = target }
 	state.path_menu = false
+	state.path_jump = jump
 	actions.request(state, yz, { op = "cd", target = target }, function(reply)
+		if state.path_jump == jump then state.path_jump = nil end
 		if reply.ok then
 			state.active_file = nil
 			state.optimistic_cwd = nil

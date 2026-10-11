@@ -3,4 +3,4 @@
 set -eu
 
 REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-exec cargo test --locked --manifest-path "$REPO/launcher/Cargo.toml" --test interaction -- --nocapture
+exec cargo test --locked --manifest-path "$REPO/launcher/Cargo.toml" --test interaction -- --test-threads=1 --nocapture

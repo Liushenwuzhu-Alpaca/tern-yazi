@@ -33,9 +33,21 @@ local function sync_hydration(state: any)
 	end)
 end
 
+-- A separate frame lets the native list observe the restored selection.
+local function sync_reveal(state: any)
+	if state.reveal_timer or not view.reveal_pending(state) then return end
+	state.reveal_timer = tern.timer(30, function()
+		state.reveal_timer = nil
+		view.finish_reveal(state)
+		if state.closing or state.return_pending or not contexts[state] then return end
+		state.on_change(true)
+	end)
+end
+
 local function render(state: any, cx: any, yz: any, prepared: any?, data: any?): any
 	local regions = view.render(state, cx, yz, prepared, data)
 	sync_hydration(state)
+	sync_reveal(state)
 	return regions
 end
 
@@ -149,8 +161,8 @@ local function register()
 			if prepared.active_name and prepared.is_active_dir == false then
 				data = preview.prepare(state, prepared.active_full_url)
 				-- Uploading native blobs is presentation, not backend file IO.
-				if data.tag == "image" and #data.content > 0 then
-					local ok, blob = pcall(function() return cx:blob(data.content, data.mime) end)
+				if (data.tag == "image" or data.tag == "pdf") and data.content and #data.content > 0 then
+					local ok, blob = pcall(function() return cx:blob(data.content, data.mime or "image/jpeg") end)
 					if ok then data.blob = blob end
 				end
 			end
