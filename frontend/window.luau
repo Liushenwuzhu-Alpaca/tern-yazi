@@ -351,6 +351,17 @@ function Window.register(control_route)
 
 	tern.command({ id = "toggle", title = "Yazi: Toggle Companion Panel", group = "Yazi", run = toggle })
 	tern.bind("ctrl+alt+y", toggle)
+	-- Tern's preset owns Ctrl+C for terminal copy/interrupt, so a plugin bind is
+	-- left out. While the companion itself is focused, Yazi's official `<C-c>`
+	-- tab-close semantics win through the copy command's override point.
+	tern.override("copy", function(cx)
+		local pane = cx.session:focused()
+		local info = pane and cx.session:pane(pane)
+		if not info or info.block ~= BLOCK_KIND then return false end
+		cx.session:event(pane, { ev = "action", id = "main.close-tab", act = "shortcut",
+			key = { name = "c", ctrl = true, shift = false, alt = false, meta = false } })
+		return true
+	end)
 	tern.command({
 		id = "preview_limits",
 		title = "Yazi: Configure Preview Limits",

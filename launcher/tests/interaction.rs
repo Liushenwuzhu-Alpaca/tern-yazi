@@ -363,26 +363,58 @@ impl Harness {
         if !state["listing_epoch"].is_string()
             || state["listing_epoch"] != listing["epoch"]
             || !state["listing_revision"].is_number()
-            || state["listing_revision"] != listing["revision"] {
+            || state["listing_revision"] != listing["revision"]
+        {
             return Value::Null;
         }
-        let (Some(dynamic), Some(immutable)) = (state.as_object_mut(), listing.as_object_mut()) else {
+        let (Some(dynamic), Some(immutable)) = (state.as_object_mut(), listing.as_object_mut())
+        else {
             return Value::Null;
         };
-        for field in ["cwd", "files", "file_dirs", "file_icons", "file_count", "parent", "preview", "selected_urls", "marked_urls"] {
-            if let Some(value) = immutable.remove(field) { dynamic.insert(field.into(), value); }
+        for field in [
+            "cwd",
+            "files",
+            "file_dirs",
+            "file_icons",
+            "file_count",
+            "parent",
+            "preview",
+            "selected_urls",
+            "marked_urls",
+        ] {
+            if let Some(value) = immutable.remove(field) {
+                dynamic.insert(field.into(), value);
+            }
         }
         let apply_icons = |scope: &mut Value, overrides: Value| {
-            let Value::Object(overrides) = overrides else { return };
-            let Some(scope) = scope.as_object_mut() else { return };
-            if let Some(icons) = scope.entry("file_icons").or_insert_with(|| json!({})).as_object_mut() {
+            let Value::Object(overrides) = overrides else {
+                return;
+            };
+            let Some(scope) = scope.as_object_mut() else {
+                return;
+            };
+            if let Some(icons) = scope
+                .entry("file_icons")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+            {
                 icons.extend(overrides);
             }
         };
-        for (scope, field) in [("", "icon_overrides"), ("parent", "parent_icon_overrides"), ("preview", "preview_icon_overrides")] {
-            let overrides = state.as_object_mut().and_then(|state| state.remove(field)).unwrap_or(Value::Null);
-            if scope.is_empty() { apply_icons(&mut state, overrides); }
-            else if let Some(value) = state.get_mut(scope) { apply_icons(value, overrides); }
+        for (scope, field) in [
+            ("", "icon_overrides"),
+            ("parent", "parent_icon_overrides"),
+            ("preview", "preview_icon_overrides"),
+        ] {
+            let overrides = state
+                .as_object_mut()
+                .and_then(|state| state.remove(field))
+                .unwrap_or(Value::Null);
+            if scope.is_empty() {
+                apply_icons(&mut state, overrides);
+            } else if let Some(value) = state.get_mut(scope) {
+                apply_icons(value, overrides);
+            }
         }
         state
     }
@@ -533,7 +565,9 @@ impl Harness {
     fn startup_panes(&self, original: &BTreeSet<u64>, native: Option<u64>) -> TestResult<()> {
         // Read app state only: never send an event or command to wake native startup.
         let state = self.ctl("state", &[])?;
-        let panes = state["panes"].as_array().ok_or("Startup observation has no real panes")?;
+        let panes = state["panes"]
+            .as_array()
+            .ok_or("Startup observation has no real panes")?;
         let mut added = 0;
         for pane in panes {
             let id = pane["id"].as_u64().ok_or("Startup pane has no actual ID")?;
@@ -542,7 +576,9 @@ impl Harness {
             }
             added += 1;
             if added > 1 || native.is_some_and(|native| native != id) {
-                return Err(format!("Native startup created an extra Task/terminal pane: {state}"));
+                return Err(format!(
+                    "Native startup created an extra Task/terminal pane: {state}"
+                ));
             }
         }
         Ok(())
@@ -783,20 +819,25 @@ impl Harness {
             "yazi.column.preview",
             "[data-role=\"yazi.preview-metadata\"]",
         )?;
-        self.wait("fixed preview metadata and actions bound the independent content scroller", |h| {
-            let card = metadata_rect(&h.tree("[data-role=\"yazi.column.preview\"]")?)?;
-            let metadata = metadata_rect(&h.tree("[data-role=\"yazi.preview-metadata\"]")?)?;
-            let preview = metadata_rect(&h.tree(PREVIEW)?)?;
-            let actions = metadata_rect(&h.tree("[data-role=\"yazi.preview-actions\"]")?)?;
-            if [metadata, preview, actions].into_iter().all(|r| metadata_contains(card, r))
-                && metadata_above(metadata, preview)
-                && metadata_above(preview, actions)
-            {
-                Ok(Some(()))
-            } else {
-                Err(format!("Preview card {card:?}: metadata {metadata:?}, content {preview:?}, actions {actions:?}"))
-            }
-        })
+        self.wait(
+            "fixed preview metadata bounds the independent content scroller",
+            |h| {
+                let card = metadata_rect(&h.tree("[data-role=\"yazi.column.preview\"]")?)?;
+                let metadata = metadata_rect(&h.tree("[data-role=\"yazi.preview-metadata\"]")?)?;
+                let preview = metadata_rect(&h.tree(PREVIEW)?)?;
+                if [metadata, preview]
+                    .into_iter()
+                    .all(|r| metadata_contains(card, r))
+                    && metadata_above(metadata, preview)
+                {
+                    Ok(Some(()))
+                } else {
+                    Err(format!(
+                        "Preview card {card:?}: metadata {metadata:?}, content {preview:?}"
+                    ))
+                }
+            },
+        )
     }
 
     fn expect_native_file_metadata(
@@ -939,7 +980,14 @@ impl Harness {
         // fixture's private paths in Bash itself before testing typed commands.
         let mut bashrc = String::new();
         for (key, value) in [
-            ("PATH", format!("{}:{}", text(&self.path("bin")), env::var("PATH").unwrap_or_default())),
+            (
+                "PATH",
+                format!(
+                    "{}:{}",
+                    text(&self.path("bin")),
+                    env::var("PATH").unwrap_or_default()
+                ),
+            ),
             ("YAZI_CONFIG_HOME", text(&self.path("yazi"))),
             ("TERN_CONFIG_DIR", text(&self.path("config"))),
             ("TERN_DAEMON_SOCK", text(&self.path("daemon.sock"))),
@@ -1332,7 +1380,12 @@ end })
         Ok(client)
     }
 
-    fn standalone(&mut self, pane: u64, cwd: PathBuf, original_panes: BTreeSet<u64>) -> TestResult<Client> {
+    fn standalone(
+        &mut self,
+        pane: u64,
+        cwd: PathBuf,
+        original_panes: BTreeSet<u64>,
+    ) -> TestResult<Client> {
         let client = self.wait("no-argument native block starts its own real Yazi without a terminal", |h| {
             h.startup_panes(&original_panes, Some(pane))?;
             let binding = read_json(&h.inbox().join(format!("native-{pane}.json"))).unwrap_or(Value::Null);
@@ -1475,12 +1528,13 @@ end })
             Ok(nodes(&value)
                 .into_iter()
                 .find(|node| {
-                    theme_visible(node) && (node["text"]
-                        .as_str()
-                        .is_some_and(|s| s == label || s.ends_with(&format!(" {label}")))
-                        || node["title"]
+                    theme_visible(node)
+                        && (node["text"]
                             .as_str()
-                            .is_some_and(|s| s.ends_with(&format!("/{label}"))))
+                            .is_some_and(|s| s == label || s.ends_with(&format!(" {label}")))
+                            || node["title"]
+                                .as_str()
+                                .is_some_and(|s| s.ends_with(&format!("/{label}"))))
                 })
                 .cloned())
         })?;
@@ -1653,9 +1707,13 @@ end })
 
     fn computed(&self, selector: &str, shot: &str) -> TestResult<Value> {
         let dump = self.ctl("dump", &[selector])?;
-        let elements = dump["elements"].as_array().ok_or("Actual dump has no computed elements")?;
+        let elements = dump["elements"]
+            .as_array()
+            .ok_or("Actual dump has no computed elements")?;
         if elements.len() != 1 || elements[0]["visible"] != true {
-            return Err(format!("Expected one visible role root, not a child text source: {selector}: {dump}"));
+            return Err(format!(
+                "Expected one visible role root, not a child text source: {selector}: {dump}"
+            ));
         }
         self.shot(shot)?;
         Ok(elements[0].clone())
@@ -1909,7 +1967,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     h.expect_ui(
         "[data-role=\"yazi.command-bubble.shell\"]",
         "shell editor occupies the reserved command row",
-        |v| nodes(v).len() == 1 && theme_visible(&nodes(v)[0]),
+        |v| nodes(v).len() == 1 && theme_visible(nodes(v)[0]),
     )?;
     h.expect_ui(
         "[data-role=\"yazi.column.current\"]",
@@ -2455,11 +2513,8 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     h.shot("04-tern-markdown-open")?;
     h.close_file(&first, file)?;
     h.click_file(&first, "image.svg")?;
-    h.click_node(
-        "[data-role=\"yazi.preview-actions\"] button",
-        "Open in Tern",
-        false,
-    )?;
+    // Preview action buttons are removed by design; Enter opens the hovered file.
+    h.key("Enter")?;
     let file = h.opened(&first.cwd.join("image.svg"))?;
     h.shot("05-tern-image-open")?;
     h.close_file(&first, file)?;
@@ -2568,35 +2623,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
             .map(|_| ()))
     })?;
 
-    h.case = "native yank copy and cut register downstream paste outcomes";
-    for (name, key, dest, source_remains) in [
-        ("copy.txt", "y", "copydest", true),
-        ("cut.txt", "x", "cutdest", false),
-    ] {
-        h.click_file(&first, name)?;
-        h.key(key)?;
-        h.click_node(ROWS, dest, true)?;
-        h.expect_state(
-            &first,
-            "UI navigation reaches isolated paste destination",
-            |s| s["cwd"] == text(&first.cwd.join(dest)),
-        )?;
-        // The frontend deliberately has no p action. Only downstream paste is CLI-driven;
-        // y/x and navigation above are genuine UI interactions, not emitted substitutes.
-        h.execute("ya", &["emit-to".into(), first.cid.clone(), "paste".into()])?;
-        let source = first.cwd.join(name);
-        let destination = first.cwd.join(dest).join(name);
-        h.wait("native yank register drives actual copy/cut filesystem task", |_| {
-            let contents = fs::read_to_string(&destination).unwrap_or_default();
-            let expected = if source_remains { "COPY_ORIGINAL\n" } else { "CUT_ORIGINAL\n" };
-            if contents == expected && source.exists() == source_remains { Ok(Some(())) }
-            else { Err(format!("destination {} contents {contents:?}; source exists {} expected {source_remains}", text(&destination), source.exists())) }
-        })?;
-        h.key("h")?;
-        h.expect_state(&first, "return from paste destination", |s| {
-            s["cwd"] == text(&first.cwd)
-        })?;
-    }
+    shortcut_flow(h, &first)?;
 
     h.case = "Trash exact native selection, Escape cancellation, confirmed disposable paths";
     h.click_file(&first, "trash-a.txt")?;
@@ -3575,9 +3602,11 @@ fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
             "[data-role=\"yazi.column.preview\"] > .sf-card-head",
             "many · 38 entries",
         )?;
-        h.expect_state(&client, "folder content bytes include descendants without directory inodes", |s| {
-            hover(s) == many_path && s["hovered"]["size"].as_u64() == Some(314)
-        })?;
+        h.expect_state(
+            &client,
+            "folder content bytes include descendants without directory inodes",
+            |s| hover(s) == many_path && s["hovered"]["size"].as_u64() == Some(314),
+        )?;
         h.expect_metadata_text("[data-role=\"yazi.status-size\"]", "314 B")?;
         h.expect_metadata_text("[data-role=\"yazi.status-permissions\"]", "drwxr-x--x")?;
         h.expect_metadata_text("[data-role=\"yazi.status-name\"]", "many")?;
@@ -3585,11 +3614,18 @@ fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
             CHILD_ROWS,
             "mounted child pool contains only authoritative capped immediate entries",
             |v| {
-                !nodes(v).is_empty() && nodes(v).len() <= 30
+                !nodes(v).is_empty()
+                    && nodes(v).len() <= 30
                     && nodes(v).iter().all(|n| {
                         n["title"].as_str().is_some_and(|p| {
                             Path::new(p).parent() == Some(client.cwd.join("many").as_path())
-                                && names(&many["preview"], "files").contains(&Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
+                                && names(&many["preview"], "files").contains(
+                                    &Path::new(p)
+                                        .file_name()
+                                        .unwrap()
+                                        .to_string_lossy()
+                                        .into_owned(),
+                                )
                         })
                     })
             },
@@ -3604,24 +3640,46 @@ fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
         h.expect_ui("[data-role=\"yazi.preview-metadata\"], [data-role=\"yazi.preview-size\"], [data-role=\"yazi.preview-permissions\"]", "directory preview removes stale file-only metadata", |v| nodes(v).is_empty())?;
         h.shot("10-native-folder-count-before-cap")?;
 
-        h.case = "folder footer sums 137 plus nested 211 plus hidden 19 without changing Yazi state";
+        h.case =
+            "folder footer sums 137 plus nested 211 plus hidden 19 without changing Yazi state";
         h.click_file(&client, "regular.txt")?;
-        h.expect_state(&client, "regular file exports its real 23 bytes", |s| s["hovered"]["size"].as_u64() == Some(23))?;
+        h.expect_state(&client, "regular file exports its real 23 bytes", |s| {
+            s["hovered"]["size"].as_u64() == Some(23)
+        })?;
         h.expect_metadata_text("[data-role=\"yazi.status-size\"]", "23 B")?;
         h.key("Space")?;
-        h.expect_state(&client, "folder usage starts with a real retained file selection", |s| {
-            selected(s) == BTreeSet::from([text(&client.cwd.join("regular.txt"))])
-        })?;
+        h.expect_state(
+            &client,
+            "folder usage starts with a real retained file selection",
+            |s| selected(s) == BTreeSet::from([text(&client.cwd.join("regular.txt"))]),
+        )?;
         h.click_file(&client, "contents")?;
-        let calculation_state = h.expect_state(&client, "folder calculation starts from a coherent actor/listing pair", |s| {
-            hover(s) == text(&client.cwd.join("contents")) && s["hovered"]["dir"] == true
-        })?;
+        let calculation_state = h.expect_state(
+            &client,
+            "folder calculation starts from a coherent actor/listing pair",
+            |s| hover(s) == text(&client.cwd.join("contents")) && s["hovered"]["dir"] == true,
+        )?;
         let contents_path = text(&client.cwd.join("contents"));
-        h.expect_state(&client, "recursive folder usage becomes 367 bytes with hidden files included", |s| {
-            hover(s) == contents_path && s["hovered"]["size"].as_u64() == Some(367)
-                && ["cwd", "files", "cursor", "filter", "finder", "mode", "selected_urls", "marked_urls"]
-                    .iter().all(|key| s[*key] == calculation_state[*key])
-        })?;
+        h.expect_state(
+            &client,
+            "recursive folder usage becomes 367 bytes with hidden files included",
+            |s| {
+                hover(s) == contents_path
+                    && s["hovered"]["size"].as_u64() == Some(367)
+                    && [
+                        "cwd",
+                        "files",
+                        "cursor",
+                        "filter",
+                        "finder",
+                        "mode",
+                        "selected_urls",
+                        "marked_urls",
+                    ]
+                    .iter()
+                    .all(|key| s[*key] == calculation_state[*key])
+            },
+        )?;
         h.expect_metadata_text("[data-role=\"yazi.status-size\"]", "367 B")?;
         h.expect_metadata_text("[data-role=\"yazi.status-name\"]", "contents")?;
         // Start repeated real directory calculations and immediately leave their URL.
@@ -3630,24 +3688,44 @@ fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
             h.click_node(ROWS, "many", false)?;
             h.click_node(ROWS, "regular.txt", false)?;
         }
-        h.expect_state(&client, "old folder completion cannot replace the current regular-file bytes", |s| {
-            hover(s) == text(&client.cwd.join("regular.txt"))
-                && s["hovered"]["size"].as_u64() == Some(23)
-        })?;
+        h.expect_state(
+            &client,
+            "old folder completion cannot replace the current regular-file bytes",
+            |s| {
+                hover(s) == text(&client.cwd.join("regular.txt"))
+                    && s["hovered"]["size"].as_u64() == Some(23)
+            },
+        )?;
         let stable = h.snapshot(&client);
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
             let current = h.snapshot(&client);
-            if !current.is_null() && (current["hovered"] != stable["hovered"]
-                || ["files", "cursor", "filter", "finder", "selected_urls", "marked_urls"]
-                    .iter().any(|key| current[*key] != stable[*key])) {
-                return Err(format!("Stale directory computation changed current file: {current}"));
+            if !current.is_null()
+                && (current["hovered"] != stable["hovered"]
+                    || [
+                        "files",
+                        "cursor",
+                        "filter",
+                        "finder",
+                        "selected_urls",
+                        "marked_urls",
+                    ]
+                    .iter()
+                    .any(|key| current[*key] != stable[*key]))
+            {
+                return Err(format!(
+                    "Stale directory computation changed current file: {current}"
+                ));
             }
             h.expect_metadata_text("[data-role=\"yazi.status-size\"]", "23 B")?;
             thread::sleep(POLL);
         }
         h.key("Escape")?;
-        h.expect_state(&client, "native Escape clears the retained size-fixture selection", |s| selected(s).is_empty())?;
+        h.expect_state(
+            &client,
+            "native Escape clears the retained size-fixture selection",
+            |s| selected(s).is_empty(),
+        )?;
 
         h.case = "loaded empty folder is zero rather than unknown";
         h.click_file(&client, "empty")?;
@@ -3847,18 +3925,6 @@ fn theme_identity(h: &Harness, client: &Client, before: &Value) -> TestResult<()
     Ok(())
 }
 
-fn theme_preview_controls(h: &mut Harness, id: &str) -> TestResult<()> {
-    h.expect_ui(
-        "[data-role=\"yazi.preview-actions\"] button",
-        "only Current retains three visible preview actions",
-        |v| {
-            let visible = nodes(v).iter().filter(|n| theme_visible(n)).count();
-            visible == if id == "current" { 3 } else { 0 }
-        },
-    )?;
-    Ok(())
-}
-
 fn theme_switch(h: &Harness, id: &str) -> TestResult<()> {
     h.ctl("plugins", &["run", &format!("plugin.tern-yazi.theme_{id}")])?;
     Ok(())
@@ -3871,42 +3937,98 @@ fn theme_preview_scroll(h: &Harness) -> TestResult<f64> {
 }
 
 fn theme_unchanged_columns(h: &mut Harness, before: [[f64; 4]; 3]) -> TestResult<()> {
-    h.wait("reserved command row prevents any native column jump", |h| {
-        let after = theme_columns(h)?;
-        if before.iter().zip(after).all(|(old, new)| old.iter().zip(new).all(|(a, b)| (a - b).abs() < 1.0)) {
-            Ok(Some(()))
-        } else { Err(format!("Reserved slot moved columns: {before:?} -> {after:?}")) }
-    })
+    h.wait(
+        "reserved command row prevents any native column jump",
+        |h| {
+            let after = theme_columns(h)?;
+            if before
+                .iter()
+                .zip(after)
+                .all(|(old, new)| old.iter().zip(new).all(|(a, b)| (a - b).abs() < 1.0))
+            {
+                Ok(Some(()))
+            } else {
+                Err(format!(
+                    "Reserved slot moved columns: {before:?} -> {after:?}"
+                ))
+            }
+        },
+    )
 }
 
-fn theme_pointer_hover(h: &mut Harness, selector: &str, name: &str, idle_alpha: f64, hover_alpha: f64) -> TestResult<()> {
+fn theme_pointer_hover(
+    h: &mut Harness,
+    selector: &str,
+    name: &str,
+    idle_alpha: f64,
+    hover_alpha: f64,
+) -> TestResult<()> {
     h.ctl("move", &["0", "0"])?;
     let idle = h.computed(selector, &format!("12-input-{name}-idle"))?;
     let rect = metadata_rect(&h.tree(selector)?)?;
-    h.ctl("move", &[&(rect[0] + rect[2] / 2.0).to_string(), &(rect[1] + rect[3] / 2.0).to_string()])?;
-    h.expect_ui(&format!("{selector}:hover"), "actual pointer reaches the role-bearing native control", |v| nodes(v).len() == 1)?;
+    h.ctl(
+        "move",
+        &[
+            &(rect[0] + rect[2] / 2.0).to_string(),
+            &(rect[1] + rect[3] / 2.0).to_string(),
+        ],
+    )?;
+    h.expect_ui(
+        &format!("{selector}:hover"),
+        "actual pointer reaches the role-bearing native control",
+        |v| nodes(v).len() == 1,
+    )?;
     let alpha = |color: &Value| -> Option<f64> {
         let color = color.as_str()?;
-        if color.starts_with("rgba(") { color.trim_end_matches(')').rsplit(',').next()?.trim().parse().ok() }
-        else if color.starts_with("rgb(") { Some(1.0) } else { None }
+        if color.starts_with("rgba(") {
+            color
+                .trim_end_matches(')')
+                .rsplit(',')
+                .next()?
+                .trim()
+                .parse()
+                .ok()
+        } else if color.starts_with("rgb(") {
+            Some(1.0)
+        } else {
+            None
+        }
     };
-    h.wait("native hovered control visibly changes its own computed background", |h| {
-        let hovered = h.computed(selector, &format!("12-input-{name}-hover"))?;
-        if idle["backgroundColor"] != hovered["backgroundColor"]
-            && alpha(&idle["backgroundColor"]).is_some_and(|value| (value - idle_alpha).abs() < 0.015)
-            && alpha(&hovered["backgroundColor"]).is_some_and(|value| (value - hover_alpha).abs() < 0.015) {
-            Ok(Some(()))
-        } else { Err(format!("Root hover color did not visibly change: idle={idle}, hover={hovered}")) }
-    })
+    h.wait(
+        "native hovered control visibly changes its own computed background",
+        |h| {
+            let hovered = h.computed(selector, &format!("12-input-{name}-hover"))?;
+            if idle["backgroundColor"] != hovered["backgroundColor"]
+                && alpha(&idle["backgroundColor"])
+                    .is_some_and(|value| (value - idle_alpha).abs() < 0.015)
+                && alpha(&hovered["backgroundColor"])
+                    .is_some_and(|value| (value - hover_alpha).abs() < 0.015)
+            {
+                Ok(Some(()))
+            } else {
+                Err(format!(
+                    "Root hover color did not visibly change: idle={idle}, hover={hovered}"
+                ))
+            }
+        },
+    )
 }
 
-fn theme_command_geometry(h: &mut Harness, id: &str, kind: &str, columns: [[f64; 4]; 3], scale: f64) -> TestResult<()> {
+fn theme_command_geometry(
+    h: &mut Harness,
+    id: &str,
+    kind: &str,
+    columns: [[f64; 4]; 3],
+    scale: f64,
+) -> TestResult<()> {
     let label_selector = "[data-role=\"yazi.command-label\"]";
     let bubble_selector = format!("[data-role=\"yazi.command-bubble.{kind}\"]");
     let cancel_selector = "[data-role=\"yazi.command-cancel\"]";
-    h.expect_ui(&bubble_selector, "real typed query remains visible in its theme-specific command bubble", |v| {
-        nodes(v).len() == 1 && theme_visible(nodes(v)[0]) && !ui_text(v).trim().is_empty()
-    })?;
+    h.expect_ui(
+        &bubble_selector,
+        "real typed query remains visible in its theme-specific command bubble",
+        |v| nodes(v).len() == 1 && theme_visible(nodes(v)[0]) && !ui_text(v).trim().is_empty(),
+    )?;
     theme_unchanged_columns(h, columns)?;
     h.wait("theme command label, query and independent cancel stay inside the reserved row", |h| {
         let row = metadata_rect(&h.tree("[data-role=\"yazi.input-row\"]")?)?;
@@ -3917,33 +4039,59 @@ fn theme_command_geometry(h: &mut Harness, id: &str, kind: &str, columns: [[f64;
         let gaps = [bubble[0] - label[0] - label[2], cancel[0] - bubble[0] - bubble[2]];
         if [label, bubble, cancel].iter().all(|rect| metadata_contains(row, *rect))
             && gaps.iter().all(|gap| *gap >= -1.0)
-            && expected_gap.map_or(true, |expected| gaps.iter().all(|gap| (gap - expected).abs() < 1.5))
+            && expected_gap.is_none_or(|expected| gaps.iter().all(|gap| (gap - expected).abs() < 1.5))
             && bubble[2] > 80.0 * scale {
             Ok(Some(()))
         } else { Err(format!("{id}/{kind}: row={row:?}, label={label:?}, bubble={bubble:?}, cancel={cancel:?}, gap={expected_gap:?}")) }
     })?;
     let label = h.computed(label_selector, &format!("12-input-{id}-{kind}-label"))?;
     let bubble = h.computed(&bubble_selector, &format!("12-input-{id}-{kind}-shape"))?;
-    let font_px = |value: &Value| value.as_str().and_then(|s| s.strip_suffix("px")).and_then(|s| s.parse::<f64>().ok());
-    let label_family = label["fontFamily"].as_str().ok_or("No computed mode-label font")?;
-    let bubble_family = bubble["fontFamily"].as_str().ok_or("No computed query font")?;
+    let font_px = |value: &Value| {
+        value
+            .as_str()
+            .and_then(|s| s.strip_suffix("px"))
+            .and_then(|s| s.parse::<f64>().ok())
+    };
+    let label_family = label["fontFamily"]
+        .as_str()
+        .ok_or("No computed mode-label font")?;
+    let bubble_family = bubble["fontFamily"]
+        .as_str()
+        .ok_or("No computed query font")?;
     let ratio = font_px(&label["fontSize"]).ok_or("No actual label font size")?
         / font_px(&bubble["fontSize"]).ok_or("No actual query font size")?;
     let font_correct = match id {
         "aurora" => label_family != bubble_family && (ratio - 11.0 / 12.5).abs() < 0.025,
-        "editorial" => label_family == "serif" && (ratio - 14.0 / 13.0).abs() < 0.025
-            && bubble["backgroundColor"] == "rgba(0, 0, 0, 0)",
-        "amber" => label_family == bubble_family && bubble_family.to_lowercase().contains("mono")
-            && (ratio - 11.0 / 12.0).abs() < 0.025,
+        "editorial" => {
+            label_family == "serif"
+                && (ratio - 14.0 / 13.0).abs() < 0.025
+                && bubble["backgroundColor"] == "rgba(0, 0, 0, 0)"
+        }
+        "amber" => {
+            label_family == bubble_family
+                && bubble_family.to_lowercase().contains("mono")
+                && (ratio - 11.0 / 12.0).abs() < 0.025
+        }
         "current" => !label_family.is_empty() && !bubble_family.is_empty(),
         _ => false,
     };
-    if !font_correct { return Err(format!("Wrong native theme command typography: label={label}, query={bubble}")); }
+    if !font_correct {
+        return Err(format!(
+            "Wrong native theme command typography: label={label}, query={bubble}"
+        ));
+    }
     Ok(())
 }
 
-fn theme_actual_inputs(h: &mut Harness, client: &Client, id: &str, scale: f64, identity: &Value) -> TestResult<()> {
-    h.case = "four themes preserve real shell/find/filter input geometry and Cancel/submit behavior";
+fn theme_actual_inputs(
+    h: &mut Harness,
+    client: &Client,
+    id: &str,
+    scale: f64,
+    identity: &Value,
+) -> TestResult<()> {
+    h.case =
+        "four themes preserve real shell/find/filter input geometry and Cancel/submit behavior";
     theme_switch(h, id)?;
     let columns = theme_wide_layout(h, id, scale)?;
     let alternate_path = text(&h.path("files"));
@@ -3953,8 +4101,14 @@ fn theme_actual_inputs(h: &mut Harness, client: &Client, id: &str, scale: f64, i
     h.paste(client.pane, &query)?;
     theme_command_geometry(h, id, "shell", columns, scale)?;
     h.click_target("[data-role=\"yazi.command-cancel\"]")?;
-    h.expect_ui("[data-role=\"yazi.input-row\"]", "pointer Cancel returns to the blank reserved command slot", |v| ui_text(v).trim().is_empty())?;
-    if effect.exists() { return Err("Canceled shell query executed a real side effect".into()); }
+    h.expect_ui(
+        "[data-role=\"yazi.input-row\"]",
+        "pointer Cancel returns to the blank reserved command slot",
+        |v| ui_text(v).trim().is_empty(),
+    )?;
+    if effect.exists() {
+        return Err("Canceled shell query executed a real side effect".into());
+    }
     let panes = pane_ids(&h.ctl("state", &[])?);
     h.key(";")?;
     h.paste(client.pane, &query)?;
@@ -3969,56 +4123,118 @@ fn theme_actual_inputs(h: &mut Harness, client: &Client, id: &str, scale: f64, i
     h.paste(client.pane, "row-063")?;
     theme_command_geometry(h, id, "find", columns, scale)?;
     h.click_target("[data-role=\"yazi.command-cancel\"]")?;
-    h.expect_ui("[data-role=\"yazi.input-row\"]", "pointer Cancel dismisses the real find query without filtering", |v| ui_text(v).trim().is_empty())?;
-    h.expect_state(client, "find cancellation keeps full native order and original selection", |s| {
-        names(s, "files") == names(identity, "files") && selected(s) == selected(identity)
-    })?;
+    h.expect_ui(
+        "[data-role=\"yazi.input-row\"]",
+        "pointer Cancel dismisses the real find query without filtering",
+        |v| ui_text(v).trim().is_empty(),
+    )?;
+    h.expect_state(
+        client,
+        "find cancellation keeps full native order and original selection",
+        |s| names(s, "files") == names(identity, "files") && selected(s) == selected(identity),
+    )?;
     h.key("/")?;
     h.paste(client.pane, "row-063")?;
     h.key("Enter")?;
-    h.expect_state(client, "submitted find retains full native listing and reaches the exact file", |s| {
-        names(s, "files") == names(identity, "files") && hover(s) == text(&client.cwd.join("row-063.rs"))
-    })?;
+    h.expect_state(
+        client,
+        "submitted find retains full native listing and reaches the exact file",
+        |s| {
+            names(s, "files") == names(identity, "files")
+                && hover(s) == text(&client.cwd.join("row-063.rs"))
+        },
+    )?;
     h.key("Escape")?;
     h.key("f")?;
     h.paste(client.pane, "row-063")?;
-    h.expect_state(client, "theme filter uses Yazi's real listing projection", |s| names(s, "files") == vec!["row-063.rs"])?;
+    h.expect_state(
+        client,
+        "theme filter uses Yazi's real listing projection",
+        |s| names(s, "files") == vec!["row-063.rs"],
+    )?;
     theme_command_geometry(h, id, "filter", columns, scale)?;
     h.click_target("[data-role=\"yazi.command-cancel\"]")?;
-    h.expect_state(client, "pointer Clear restores full native filter order and frozen selection", |s| {
-        names(s, "files") == names(identity, "files") && selected(s) == selected(identity) && s["filter"] == ""
-    })?;
+    h.expect_state(
+        client,
+        "pointer Clear restores full native filter order and frozen selection",
+        |s| {
+            names(s, "files") == names(identity, "files")
+                && selected(s) == selected(identity)
+                && s["filter"] == ""
+        },
+    )?;
     h.key("G")?;
     theme_unchanged_columns(h, columns)?;
-    h.expect_state(client, "input cancellation and final jump retain the original coherent native identity", |s| {
-        ["cwd", "files", "hovered", "selected_urls", "marked_urls", "mode"]
-            .iter().all(|key| s[*key] == identity[*key])
-    })?;
+    h.expect_state(
+        client,
+        "input cancellation and final jump retain the original coherent native identity",
+        |s| {
+            [
+                "cwd",
+                "files",
+                "hovered",
+                "selected_urls",
+                "marked_urls",
+                "mode",
+            ]
+            .iter()
+            .all(|key| s[*key] == identity[*key])
+        },
+    )?;
     theme_identity(h, client, identity)?;
 
     h.case = "four themes render visible root Go/Cancel pointer hover and actual path actions";
     h.open_path_editor(&text(&client.cwd))?;
-    let (idle, hovered) = match id { "current" => (0.04, 0.20), "aurora" => (0.05, 0.24), "editorial" => (0.0, 0.18), "amber" => (0.06, 0.26), _ => unreachable!() };
+    let (idle, hovered) = match id {
+        "current" => (0.04, 0.20),
+        "aurora" => (0.05, 0.24),
+        "editorial" => (0.0, 0.18),
+        "amber" => (0.06, 0.26),
+        _ => unreachable!(),
+    };
     for (role, name) in [("yazi.path-go", "go"), ("yazi.path-cancel", "cancel")] {
-        theme_pointer_hover(h, &format!("[data-role=\"{role}\"]"), &format!("{id}-{name}"), idle, hovered)?;
+        theme_pointer_hover(
+            h,
+            &format!("[data-role=\"{role}\"]"),
+            &format!("{id}-{name}"),
+            idle,
+            hovered,
+        )?;
     }
     h.paste(client.pane, &text(&h.path("files")))?;
     h.click_target("[data-role=\"yazi.path-cancel\"]")?;
-    h.expect_ui("[data-role=\"yazi.path-input\"]", "pointer Cancel dismisses the real path editor", |v| nodes(v).is_empty())?;
+    h.expect_ui(
+        "[data-role=\"yazi.path-input\"]",
+        "pointer Cancel dismisses the real path editor",
+        |v| nodes(v).is_empty(),
+    )?;
     theme_identity(h, client, identity)?;
     h.open_path_editor(&text(&client.cwd))?;
     h.paste(client.pane, &text(&h.path("files")))?;
     h.click_target("[data-role=\"yazi.path-go\"]")?;
-    h.expect_state(client, "pointer Go submits the edited path to real Yazi", |s| s["cwd"] == alternate_path)?;
+    h.expect_state(
+        client,
+        "pointer Go submits the edited path to real Yazi",
+        |s| s["cwd"] == alternate_path,
+    )?;
     h.open_path_editor(&text(&h.path("files")))?;
     h.paste(client.pane, &text(&client.cwd))?;
     h.click_target("[data-role=\"yazi.path-go\"]")?;
-    h.expect_state(client, "pointer Go returns to the original native directory", |s| s["cwd"] == text(&client.cwd))?;
+    h.expect_state(
+        client,
+        "pointer Go returns to the original native directory",
+        |s| s["cwd"] == text(&client.cwd),
+    )?;
     h.key("G")?;
-    h.expect_state(client, "path actions retain original global selection and order", |s| {
-        names(s, "files") == names(identity, "files") && selected(s) == selected(identity)
-            && hover(s) == hover(identity)
-    })?;
+    h.expect_state(
+        client,
+        "path actions retain original global selection and order",
+        |s| {
+            names(s, "files") == names(identity, "files")
+                && selected(s) == selected(identity)
+                && hover(s) == hover(identity)
+        },
+    )?;
     theme_unchanged_columns(h, columns)
 }
 
@@ -4042,9 +4258,12 @@ fn native_layout_themes(h: &mut Harness) -> TestResult<()> {
         "real selected case-sensitive path survives cursor advance",
         |s| selected(s) == BTreeSet::from([text(&first.cwd.join("Selected-Case.txt"))]),
     )?;
-    h.case = "default Ctrl+Shift+P opens the real command palette with all four Yazi layout entries";
+    h.case =
+        "default Ctrl+Shift+P opens the real command palette with all four Yazi layout entries";
     h.key("ctrl+shift+p")?;
-    for key in ["Y", "a", "z", "i", ":", "Space", "L", "a", "y", "o", "u", "t"] {
+    for key in [
+        "Y", "a", "z", "i", ":", "Space", "L", "a", "y", "o", "u", "t",
+    ] {
         h.key(key)?;
     }
     let titles = [
@@ -4053,16 +4272,30 @@ fn native_layout_themes(h: &mut Harness) -> TestResult<()> {
         "Yazi: Layout - Editorial Paper",
         "Yazi: Layout - Amber Ledger",
     ];
-    h.expect_ui("", "all four layout commands are visible in the actual keyboard-opened palette", |v| {
-        titles.iter().all(|title| {
-            nodes(v).iter().any(|node| node["text"].as_str() == Some(*title) && theme_visible(node))
-        })
-    })?;
+    h.expect_ui(
+        "",
+        "all four layout commands are visible in the actual keyboard-opened palette",
+        |v| {
+            titles.iter().all(|title| {
+                nodes(v)
+                    .iter()
+                    .any(|node| node["text"].as_str() == Some(*title) && theme_visible(node))
+            })
+        },
+    )?;
     h.shot("12-native-theme-command-palette")?;
     h.key("Escape")?;
-    h.expect_ui("", "Escape closes the actual palette without leaving the real Yazi pane", |v| {
-        !titles.iter().any(|title| nodes(v).iter().any(|node| node["text"].as_str() == Some(*title) && theme_visible(node)))
-    })?;
+    h.expect_ui(
+        "",
+        "Escape closes the actual palette without leaving the real Yazi pane",
+        |v| {
+            !titles.iter().any(|title| {
+                nodes(v)
+                    .iter()
+                    .any(|node| node["text"].as_str() == Some(*title) && theme_visible(node))
+            })
+        },
+    )?;
     h.case = "native layout geometry and scroll retain the untouched Current baseline";
     h.key("G")?;
     let before = h.expect_state(
@@ -4087,7 +4320,6 @@ fn native_layout_themes(h: &mut Harness) -> TestResult<()> {
         ));
     }
     let baseline = theme_wide_layout(h, "current", scale)?;
-    theme_preview_controls(h, "current")?;
     let preview_rect = metadata_rect(&h.tree(PREVIEW)?)?;
     h.ctl(
         "move",
@@ -4115,7 +4347,6 @@ fn native_layout_themes(h: &mut Harness) -> TestResult<()> {
     ] {
         theme_switch(h, id)?;
         theme_wide_layout(h, id, scale)?;
-        theme_preview_controls(h, id)?;
         theme_identity(h, &first, &before)?;
         h.wait("theme rows retain native final cursor and bounded scrollers", |h| {
             let card = metadata_rect(&h.tree("[data-role=\"yazi.column.current\"]")?)?;
@@ -4279,7 +4510,6 @@ fn native_layout_themes(h: &mut Harness) -> TestResult<()> {
             } else {
                 theme_wide_layout(h, id, scale)?;
             }
-            theme_preview_controls(h, id)?;
             theme_identity(h, &third, &image_before)?;
             h.wait(
                 "actual SVG retains square aspect inside independent preview bounds",
@@ -4325,50 +4555,85 @@ fn native_large_directory(h: &mut Harness) -> TestResult<()> {
         .map(|index| format!("entry-{index:05}-native-global-navigation-fixture.txt"))
         .collect();
     for name in &ordered {
-        h.write_fixture(&format!("large-directory/{name}"), b"REAL_LARGE_DIRECTORY\n")?;
+        h.write_fixture(
+            &format!("large-directory/{name}"),
+            b"REAL_LARGE_DIRECTORY\n",
+        )?;
     }
     let client = h.launch(h.path("large-directory"), true)?;
-    let initial = h.expect_state(&client, "all 5000 names arrive in exact native alphabetical order", |s| {
-        names(s, "files") == ordered && s["file_count"].as_u64() == Some(5000)
-            && hover(s) == text(&client.cwd.join(&ordered[0]))
-    })?;
+    let initial = h.expect_state(
+        &client,
+        "all 5000 names arrive in exact native alphabetical order",
+        |s| {
+            names(s, "files") == ordered
+                && s["file_count"].as_u64() == Some(5000)
+                && hover(s) == text(&client.cwd.join(&ordered[0]))
+        },
+    )?;
     let listing_bytes = fs::metadata(h.inbox().join(format!("listing-{}.json", client.cid)))
-        .map_err(|e| e.to_string())?.len();
-    let state_bytes = fs::metadata(h.state_path(&client)).map_err(|e| e.to_string())?.len();
+        .map_err(|e| e.to_string())?
+        .len();
+    let state_bytes = fs::metadata(h.state_path(&client))
+        .map_err(|e| e.to_string())?
+        .len();
     if !(256 * 1024..16 * 1024 * 1024).contains(&listing_bytes) || state_bytes > 256 * 1024 {
         return Err(format!("Real large listing must cross the dynamic cap: listing={listing_bytes}, state={state_bytes}"));
     }
     let frozen_url = text(&client.cwd.join(&ordered[0]));
     h.key("Space")?;
-    h.expect_state(&client, "Space selects the original global URL and advances", |s| {
-        selected(s) == BTreeSet::from([frozen_url.clone()])
-            && hover(s) == text(&client.cwd.join(&ordered[1]))
-    })?;
+    h.expect_state(
+        &client,
+        "Space selects the original global URL and advances",
+        |s| {
+            selected(s) == BTreeSet::from([frozen_url.clone()])
+                && hover(s) == text(&client.cwd.join(&ordered[1]))
+        },
+    )?;
     let mut actor_ms = Vec::new();
     let mut ui_ms = Vec::new();
     let mut index = 1usize;
     for key in ["j", "Down", "k", "Up"].into_iter().cycle().take(32) {
-        index = if matches!(key, "j" | "Down") { index + 1 } else { index - 1 };
+        index = if matches!(key, "j" | "Down") {
+            index + 1
+        } else {
+            index - 1
+        };
         let started = Instant::now();
         h.key(key)?;
-        h.expect_state(&client, "real input reaches the matching actor cursor with full order intact", |s| {
-            hover(s) == text(&client.cwd.join(&ordered[index])) && names(s, "files") == ordered
-                && selected(s) == BTreeSet::from([frozen_url.clone()])
-        })?;
+        h.expect_state(
+            &client,
+            "real input reaches the matching actor cursor with full order intact",
+            |s| {
+                hover(s) == text(&client.cwd.join(&ordered[index]))
+                    && names(s, "files") == ordered
+                    && selected(s) == BTreeSet::from([frozen_url.clone()])
+            },
+        )?;
         actor_ms.push(started.elapsed().as_secs_f64() * 1000.0);
         h.expect_metadata_selection(&format!("{ROWS}.sel"), &client.cwd.join(&ordered[index]))?;
-        h.expect_ui("[data-role=\"yazi.column.current\"] .sf-list.virtual", "distinct navigation frames retain the mounted middle native list", |v| {
-            nodes(v).len() == 1 && theme_visible(nodes(v)[0])
-        })?;
+        h.expect_ui(
+            "[data-role=\"yazi.column.current\"] .sf-list.virtual",
+            "distinct navigation frames retain the mounted middle native list",
+            |v| nodes(v).len() == 1 && theme_visible(nodes(v)[0]),
+        )?;
         ui_ms.push(started.elapsed().as_secs_f64() * 1000.0);
     }
     h.case = "G reveals the global final item in a bounded virtual pool";
     h.key("G")?;
-    h.expect_state(&client, "G reaches global index 4999 without truncation or selection loss", |s| {
-        hover(s) == text(&client.cwd.join(&ordered[4999])) && s["cursor"].as_u64() == Some(5000)
-            && names(s, "files") == ordered && selected(s) == BTreeSet::from([frozen_url.clone()])
-    })?;
-    h.expect_metadata_selection(&row_selector(ROWS, &ordered[4999]), &client.cwd.join(&ordered[4999]))?;
+    h.expect_state(
+        &client,
+        "G reaches global index 4999 without truncation or selection loss",
+        |s| {
+            hover(s) == text(&client.cwd.join(&ordered[4999]))
+                && s["cursor"].as_u64() == Some(5000)
+                && names(s, "files") == ordered
+                && selected(s) == BTreeSet::from([frozen_url.clone()])
+        },
+    )?;
+    h.expect_metadata_selection(
+        &row_selector(ROWS, &ordered[4999]),
+        &client.cwd.join(&ordered[4999]),
+    )?;
     let (mounted, capacity) = h.wait("global selected item is revealed inside a bounded native virtual pool", |h| {
         let scroller = metadata_rect(&h.tree("[data-role=\"yazi.column.current\"] .sf-list-scroll.max")?)?;
         let row = metadata_rect(&h.tree(&row_selector(ROWS, &ordered[4999]))?)?;
@@ -4388,63 +4653,413 @@ fn native_large_directory(h: &mut Harness) -> TestResult<()> {
     })?;
     for _ in 0..4 {
         h.open_path_editor(&text(&client.cwd))?;
-        h.expect_ui("[data-role=\"yazi.column.current\"] .sf-list.virtual", "path-hover overlay render does not erase the middle column", |v| {
-            nodes(v).len() == 1 && theme_visible(nodes(v)[0])
-        })?;
+        h.expect_ui(
+            "[data-role=\"yazi.column.current\"] .sf-list.virtual",
+            "path-hover overlay render does not erase the middle column",
+            |v| nodes(v).len() == 1 && theme_visible(nodes(v)[0]),
+        )?;
         h.expect_metadata_selection(&format!("{ROWS}.sel"), &client.cwd.join(&ordered[4999]))?;
         h.click_target("[data-role=\"yazi.path-cancel\"]")?;
         h.expect_metadata_selection(&format!("{ROWS}.sel"), &client.cwd.join(&ordered[4999]))?;
     }
     h.click_file(&client, &ordered[4998])?;
-    h.expect_state(&client, "pointer selects pooled row using its global item identity, not pool index", |s| {
-        s["cursor"].as_u64() == Some(4999) && selected(s) == BTreeSet::from([frozen_url.clone()])
-    })?;
+    h.expect_state(
+        &client,
+        "pointer selects pooled row using its global item identity, not pool index",
+        |s| {
+            s["cursor"].as_u64() == Some(4999)
+                && selected(s) == BTreeSet::from([frozen_url.clone()])
+        },
+    )?;
     h.key("v")?;
     h.key("k")?;
-    let range = BTreeSet::from([text(&client.cwd.join(&ordered[4997])), text(&client.cwd.join(&ordered[4998]))]);
-    h.expect_state(&client, "high-index visual range marks authoritative global URLs", |s| {
-        s["mode"] == "select" && names(s, "marked_urls").into_iter().collect::<BTreeSet<_>>() == range
-    })?;
+    let range = BTreeSet::from([
+        text(&client.cwd.join(&ordered[4997])),
+        text(&client.cwd.join(&ordered[4998])),
+    ]);
+    h.expect_state(
+        &client,
+        "high-index visual range marks authoritative global URLs",
+        |s| {
+            s["mode"] == "select"
+                && names(s, "marked_urls").into_iter().collect::<BTreeSet<_>>() == range
+        },
+    )?;
     h.key("Escape")?;
     h.key("ctrl+a")?;
-    let all_urls: BTreeSet<String> = ordered.iter().map(|name| text(&client.cwd.join(name))).collect();
-    h.expect_state(&client, "native toggle-all keeps every one of the 5000 global URLs", |s| selected(s) == all_urls)?;
+    let all_urls: BTreeSet<String> = ordered
+        .iter()
+        .map(|name| text(&client.cwd.join(name)))
+        .collect();
+    h.expect_state(
+        &client,
+        "native toggle-all keeps every one of the 5000 global URLs",
+        |s| selected(s) == all_urls,
+    )?;
     h.case = "large listing/filter pairs remain coherent while selection URLs stay global";
     h.key("f")?;
     h.paste(client.pane, "entry-04999")?;
-    let filtered = h.expect_state(&client, "filtered coherent pair contains only the exact high-index filename", |s| {
-        names(s, "files") == vec![ordered[4999].clone()] && selected(s) == all_urls
-            && hover(s) == text(&client.cwd.join(&ordered[4999]))
-    })?;
-    h.expect_metadata_selection(&row_selector(ROWS, &ordered[4999]), &client.cwd.join(&ordered[4999]))?;
+    let filtered = h.expect_state(
+        &client,
+        "filtered coherent pair contains only the exact high-index filename",
+        |s| {
+            names(s, "files") == vec![ordered[4999].clone()]
+                && selected(s) == all_urls
+                && hover(s) == text(&client.cwd.join(&ordered[4999]))
+        },
+    )?;
+    h.expect_metadata_selection(
+        &row_selector(ROWS, &ordered[4999]),
+        &client.cwd.join(&ordered[4999]),
+    )?;
     h.click_target("[data-role=\"yazi.command-cancel\"]")?;
-    let restored = h.expect_state(&client, "clearing the actual filter restores every entry in original order", |s| {
-        names(s, "files") == ordered && selected(s) == all_urls && s["filter"] == ""
-    })?;
+    let restored = h.expect_state(
+        &client,
+        "clearing the actual filter restores every entry in original order",
+        |s| names(s, "files") == ordered && selected(s) == all_urls && s["filter"] == "",
+    )?;
     if initial["listing_epoch"] != filtered["listing_epoch"]
         || filtered["listing_epoch"] != restored["listing_epoch"]
-        || filtered["listing_revision"] == restored["listing_revision"] {
+        || filtered["listing_revision"] == restored["listing_revision"]
+    {
         return Err(format!("Real filter listing revisions did not advance coherently: initial={initial}, filtered={filtered}, restored={restored}"));
     }
     actor_ms.sort_by(f64::total_cmp);
     ui_ms.sort_by(f64::total_cmp);
-    let distribution = |samples: &[f64]| json!({
-        "samples": samples.len(), "median_ms": samples[samples.len() / 2],
-        "p95_ms": samples[(samples.len() * 95 + 99) / 100 - 1],
-        "max_ms": samples[samples.len() - 1],
-    });
-    println!("Actual AFTER large-directory input latency (includes ctl process and 40ms polling): {}", json!({
-        "entries": 5000, "listing_bytes": listing_bytes, "dynamic_bytes": state_bytes,
-        "mounted": mounted, "pool_capacity": capacity,
-        "input_to_actor": distribution(&actor_ms), "input_to_visible_ui": distribution(&ui_ms),
-    }));
+    let distribution = |samples: &[f64]| {
+        json!({
+            "samples": samples.len(), "median_ms": samples[samples.len() / 2],
+            "p95_ms": samples[(samples.len() * 95).div_ceil(100) - 1],
+            "max_ms": samples[samples.len() - 1],
+        })
+    };
+    println!(
+        "Actual AFTER large-directory input latency (includes ctl process and 40ms polling): {}",
+        json!({
+            "entries": 5000, "listing_bytes": listing_bytes, "dynamic_bytes": state_bytes,
+            "mounted": mounted, "pool_capacity": capacity,
+            "input_to_actor": distribution(&actor_ms), "input_to_visible_ui": distribution(&ui_ms),
+        })
+    );
     h.shot("14-native-large-directory-global-selection")?;
     h.key("Escape")?;
-    h.expect_state(&client, "native Escape clears all large-directory selection", |s| selected(s).is_empty())?;
+    h.expect_state(
+        &client,
+        "native Escape clears all large-directory selection",
+        |s| selected(s).is_empty(),
+    )?;
     let watched = descendants(client.supervisor);
     h.owned.extend(watched.iter().copied());
     h.key("q")?;
     h.removed(&client, &watched)
+}
+
+fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
+    h.case = "native yank copy and cut register downstream paste outcomes";
+    for (name, key, dest, source_remains) in [
+        ("copy.txt", "y", "copydest", true),
+        ("cut.txt", "x", "cutdest", false),
+    ] {
+        h.click_file(first, name)?;
+        h.key(key)?;
+        h.click_node(ROWS, dest, true)?;
+        h.expect_state(
+            first,
+            "UI navigation reaches isolated paste destination",
+            |s| s["cwd"] == text(&first.cwd.join(dest)),
+        )?;
+        // Keyboard 'p' triggers native paste action.
+        h.key("p")?;
+        let source = first.cwd.join(name);
+        let destination = first.cwd.join(dest).join(name);
+        h.wait("native yank register drives actual copy/cut filesystem task", |_| {
+            let contents = fs::read_to_string(&destination).unwrap_or_default();
+            let expected = if source_remains { "COPY_ORIGINAL\n" } else { "CUT_ORIGINAL\n" };
+            if contents == expected && source.exists() == source_remains { Ok(Some(())) }
+            else { Err(format!("destination {} contents {contents:?}; source exists {} expected {source_remains}", text(&destination), source.exists())) }
+        })?;
+        h.key("h")?;
+        h.expect_state(first, "return from paste destination", |s| {
+            s["cwd"] == text(&first.cwd)
+        })?;
+    }
+    // Test unyank ('Y'): yank copy.txt, then unyank ('Y'), verify yank is cleared.
+    let unyank_dir = first.cwd.join("unyankdest");
+    fs::create_dir_all(&unyank_dir).map_err(|e| e.to_string())?;
+    h.click_file(first, "copy.txt")?;
+    h.key("y")?;
+    h.key("Y")?;
+    h.click_node(ROWS, "unyankdest", true)?;
+    h.expect_state(
+        first,
+        "UI navigation reaches unyankdest after unyank",
+        |s| s["cwd"] == text(&unyank_dir),
+    )?;
+    h.key("p")?;
+    thread::sleep(Duration::from_millis(200));
+    let copied_in_dest = unyank_dir.join("copy.txt");
+    if copied_in_dest.exists() {
+        return Err(
+            "Unyank failed: copy.txt was pasted into unyankdest despite unyank ('Y')".to_string(),
+        );
+    }
+    h.key("h")?;
+    let _ = fs::remove_dir_all(&unyank_dir);
+    h.expect_state(first, "return from unyankdest after unyank check", |s| {
+        s["cwd"] == text(&first.cwd)
+    })?;
+    h.case = "native tab management via tt, 1-9, brackets and Ctrl+c";
+    // First t sets pending leader; does not create tab yet.
+    h.key("t")?;
+    // Second t creates tab 2 in current working directory.
+    h.key("t")?;
+    h.expect_ui(
+        "[data-role=\"yazi.tab-bar\"]",
+        "tab bar appears when multiple tabs exist",
+        |v| nodes(v).len() == 1,
+    )?;
+    // In tab 2, navigate into child directory.
+    h.click_node(ROWS, "child", true)?;
+    h.expect_state(first, "tab 2 navigates into child directory", |s| {
+        s["cwd"] == text(&first.cwd.join("child"))
+    })?;
+    h.expect_ui(
+        "[data-role=\"yazi.tab-bar\"]",
+        "tab labels follow real directories",
+        |v| ui_text(v).contains("1 files") && ui_text(v).contains("2 child"),
+    )?;
+    h.click_node("[data-role=\"yazi.tab-bar\"] .sf-badge", "1 files", false)?;
+    h.expect_state(first, "mouse switches to tab one", |s| {
+        s["cwd"] == text(&first.cwd) && s["tabs"]["idx"] == 1
+    })?;
+    // Switch to tab 1 (number '1') -> restores root cwd!
+    h.key("1")?;
+    h.expect_state(first, "switch to tab 1 restores root cwd", |s| {
+        s["cwd"] == text(&first.cwd)
+    })?;
+    // Switch to tab 2 (number '2') -> restores child cwd!
+    h.key("2")?;
+    h.expect_state(first, "switch to tab 2 restores child cwd", |s| {
+        s["cwd"] == text(&first.cwd.join("child"))
+    })?;
+    // Relative switch prev '[' -> tab 1 root cwd!
+    h.key("[")?;
+    h.expect_state(first, "relative switch [ to tab 1 restores root cwd", |s| {
+        s["cwd"] == text(&first.cwd)
+    })?;
+    // Relative switch next ']' -> tab 2 child cwd!
+    h.key("]")?;
+    h.expect_state(
+        first,
+        "relative switch ] to tab 2 restores child cwd",
+        |s| s["cwd"] == text(&first.cwd.join("child")),
+    )?;
+    h.key("{")?;
+    h.expect_state(first, "swap left moves child tab to first index", |s| {
+        s["tabs"]["idx"] == 1 && s["tabs"]["items"][0]["name"] == "child"
+    })?;
+    h.key("}")?;
+    h.expect_state(first, "swap right restores child tab index", |s| {
+        s["tabs"]["idx"] == 2 && s["tabs"]["items"][1]["name"] == "child"
+    })?;
+    h.shot("native-tabs-keyboard-and-mouse")?;
+    // Close tab 2 via Ctrl+c -> returns to tab 1 root cwd!
+    h.cli(&["send", &first.pane.to_string(), "keys", "ctrl+c"])?;
+    h.expect_state(first, "closing tab 2 returns to tab 1 root cwd", |s| {
+        s["cwd"] == text(&first.cwd)
+    })?;
+    h.expect_ui(
+        "[data-role=\"yazi.tab-bar\"]",
+        "tab bar hides when only single tab remains",
+        |v| nodes(v).is_empty(),
+    )?;
+    h.case = "native interactive create ('a') and rename ('r') shortcuts";
+    // Press 'a' to enter create mode
+    h.key("a")?;
+    h.expect_ui(
+        "[data-role=\"yazi.command-bubble.create\"]",
+        "create prompt bar opens with active badge",
+        |v| nodes(v).len() == 1,
+    )?;
+    // Cancel with Escape
+    h.key("Escape")?;
+    h.expect_ui(
+        "[data-role=\"yazi.command-bubble.create\"]",
+        "Escape dismisses create bar",
+        |v| nodes(v).is_empty(),
+    )?;
+    // Re-enter create mode and submit a new file
+    h.key("a")?;
+    h.paste(first.pane, "created-probe.txt")?;
+    h.key("Enter")?;
+    let created_path = first.cwd.join("created-probe.txt");
+    h.wait(
+        "created file exists on filesystem and appears in Yazi listing",
+        |h| {
+            let snapshot = h.snapshot(first);
+            let files = names(&snapshot, "files");
+            if created_path.exists() && files.contains(&"created-probe.txt".to_string()) {
+                Ok(Some(()))
+            } else {
+                Err(format!(
+                    "created file exists: {}, files listing: {files:?}",
+                    created_path.exists()
+                ))
+            }
+        },
+    )?;
+    // Hover the newly created file and press 'r' to rename
+    h.click_file(first, "created-probe.txt")?;
+    h.key("r")?;
+    h.expect_ui(
+        "[data-role=\"yazi.command-bubble.rename\"]",
+        "rename prompt bar opens with prefilled name",
+        |v| ui_text(v).contains("created-probe.txt"),
+    )?;
+    // Cancel with Escape
+    h.key("Escape")?;
+    // Re-enter rename mode, clear, type new name, and submit
+    h.key("r")?;
+    h.cli(&["send", &first.pane.to_string(), "keys", "ctrl+a"])?;
+    for key in ["q", "d", "j", "k", "y"] {
+        h.key(key)?;
+    }
+    h.expect_ui(
+        "[data-role=\"yazi.command-bubble.rename\"]",
+        "shortcut letters stay inside rename editor",
+        |v| ui_text(v) == "qdjky",
+    )?;
+    h.cli(&["send", &first.pane.to_string(), "keys", "ctrl+a"])?;
+    h.paste(first.pane, "renamed-probe.txt")?;
+    h.key("Enter")?;
+    let renamed_path = first.cwd.join("renamed-probe.txt");
+    h.wait(
+        "renamed file exists on filesystem and original no longer exists",
+        |h| {
+            let snapshot = h.snapshot(first);
+            let files = names(&snapshot, "files");
+            if renamed_path.exists()
+                && !created_path.exists()
+                && files.contains(&"renamed-probe.txt".to_string())
+                && hover(&snapshot) == text(&renamed_path)
+            {
+                Ok(Some(()))
+            } else {
+                Err(format!(
+                    "renamed exists: {}, old exists: {}, files: {files:?}",
+                    renamed_path.exists(),
+                    created_path.exists()
+                ))
+            }
+        },
+    )?;
+    let _ = fs::remove_file(renamed_path);
+
+    h.case = "create nested directories, POSIX special filenames and failure preservation";
+    for name in ["nested/newdir/", "雪's\\literal.txt", "trailing\\"] {
+        h.key("a")?;
+        h.paste(first.pane, name)?;
+        h.key("Enter")?;
+        let target = first.cwd.join(name.trim_end_matches('/'));
+        h.expect_state(first, "created target is authoritative hover", |s| {
+            hover(s) == text(&target)
+        })?;
+        if !target.exists()
+            || (name.ends_with('/') && !target.is_dir())
+            || (name.ends_with('\\') && !target.is_file())
+        {
+            return Err(format!("Incorrect created target {}", text(&target)));
+        }
+        if name.contains('/') {
+            h.key("h")?;
+            h.expect_state(first, "return to root after nested reveal", |s| {
+                s["cwd"] == text(&first.cwd)
+            })?;
+        }
+    }
+    h.click_file(first, "nested")?;
+    h.key("r")?;
+    h.cli(&["send", &first.pane.to_string(), "keys", "ctrl+a"])?;
+    h.paste(first.pane, "renamed-directory")?;
+    h.key("Enter")?;
+    h.expect_state(
+        first,
+        "directory rename preserves contents and hover",
+        |s| hover(s) == text(&first.cwd.join("renamed-directory")),
+    )?;
+    if !first.cwd.join("renamed-directory/newdir").is_dir() || first.cwd.join("nested").exists() {
+        return Err("Directory rename lost nested contents".into());
+    }
+    h.click_file(first, "copy.txt")?;
+    let original = fs::read(first.cwd.join("copy.txt")).map_err(|e| e.to_string())?;
+    for (op, name) in [
+        ("create", "copy.txt"),
+        ("rename", "beta.txt"),
+        ("create", "copy.txt/blocked"),
+        ("create", "/"),
+    ] {
+        h.key(if op == "create" { "a" } else { "r" })?;
+        if op == "rename" {
+            h.cli(&["send", &first.pane.to_string(), "keys", "ctrl+a"])?;
+        }
+        h.paste(first.pane, name)?;
+        h.key("Enter")?;
+        // Toasts are window chrome outside the block surface tree, so the
+        // observable contract is the authoritative no-op: cursor, listing and
+        // bytes stay exactly as they were.
+        h.expect_state(
+            first,
+            "rejected operation leaves authoritative state untouched",
+            |s| {
+                hover(s) == text(&first.cwd.join("copy.txt"))
+                    && names(s, "files").contains(&"copy.txt".to_string())
+                    && names(s, "files").contains(&"beta.txt".to_string())
+            },
+        )?;
+        h.expect_ui(
+            "[data-role=\"yazi.input-row\"]",
+            "rejected operation closes the prompt without pretending success",
+            |v| ui_text(v).trim().is_empty(),
+        )?;
+        if fs::read(first.cwd.join("copy.txt")).map_err(|e| e.to_string())? != original
+            || fs::read_to_string(first.cwd.join("beta.txt")).map_err(|e| e.to_string())?
+                != "BETA_CONTENT\n"
+        {
+            return Err("Rejected operation changed an existing file".into());
+        }
+    }
+    h.shot("native-create-rename-collisions")?;
+
+    Ok(())
+}
+
+#[test]
+fn real_native_shortcuts() {
+    let mut harness = Harness::new().expect("Real shortcut runtime setup");
+    let result = harness
+        .launch(harness.path("files"), false)
+        .and_then(|client| {
+            shortcut_flow(&mut harness, &client)?;
+            harness.shot("native-shortcuts-complete")?;
+            let watched = descendants(client.supervisor);
+            harness.owned.extend(watched.iter().copied());
+            harness.key("q")?;
+            harness.removed(&client, &watched)
+        });
+    match result {
+        Ok(()) => {
+            harness.success = true;
+            println!("Real native shortcut cases passed.");
+        }
+        Err(error) => {
+            harness.diagnostics(&error);
+            panic!(
+                "Shortcut case '{}' failed: {error}; artifacts {}",
+                harness.case,
+                text(&harness.root)
+            );
+        }
+    }
 }
 
 #[test]

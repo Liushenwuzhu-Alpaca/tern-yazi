@@ -34,7 +34,10 @@ local function sync_hover(state: any, yz: YaziState?)
 	end
 	local source = safe_cid(yz.client_id)
 	local hovered = yz.hovered and yz.hovered.url
-	if state.source_client ~= source or state.source_cwd ~= yz.cwd then state.pending_g = nil end
+	if state.source_client ~= source or state.source_cwd ~= yz.cwd then
+		state.pending_g = nil
+		state.pending_t = nil
+	end
 	if state.source_client ~= source or state.source_cwd ~= yz.cwd or state.source_hover ~= hovered then
 		state.active_file = nil
 		state.optimistic_cwd = nil
@@ -109,16 +112,20 @@ local function byte_at_utf16(text: string, offset: number): number
 	return #text + 1
 end
 
-local function replace_path(state: any, text: string, first: number?, last: number?)
-	local query = state.path_query or ""
-	local cursor = state.path_cursor or utf16_size(query)
-	local anchor = state.path_anchor or cursor
+local function replace_edit(state: any, field: string, text: string, first: number?, last: number?)
+	local query = state[field .. "_query"] or ""
+	local cursor = state[field .. "_cursor"] or utf16_size(query)
+	local anchor = state[field .. "_anchor"] or cursor
 	first = first or math.min(cursor, anchor)
 	last = last or math.max(cursor, anchor)
-	state.path_query = query:sub(1, byte_at_utf16(query, first) - 1)
+	state[field .. "_query"] = query:sub(1, byte_at_utf16(query, first) - 1)
 		.. text .. query:sub(byte_at_utf16(query, last))
-	state.path_cursor = first + utf16_size(text)
-	state.path_anchor = state.path_cursor
+	state[field .. "_cursor"] = first + utf16_size(text)
+	state[field .. "_anchor"] = state[field .. "_cursor"]
+end
+
+local function replace_path(state: any, text: string, first: number?, last: number?)
+	replace_edit(state, "path", text, first, last)
 end
 
 local function resolve_directory(query: string, cwd: string): string?
@@ -162,7 +169,10 @@ local function handle_key(state: any, key: any, cx: any, yz: YaziState?): boolea
 	local plain_g = k == "g" and not key.shift and raw == k and not key.ctrl and not key.alt and not key.meta
 	local pending_g = state.pending_g == true
 	state.pending_g = nil
-	if not state.live then
+	local plain_t = k == "t" and not key.shift and raw == k and not key.ctrl and not key.alt and not key.meta
+	local pending_t = state.pending_t == true
+	state.pending_t = nil
+	if not state.live or not yz then
 		if (k == "q" or escape) and not key.ctrl and not key.alt and not key.meta then
 			state.close(cx)
 		else cx:toast("error", "Yazi is offline", "Reconnect before using file actions") end
@@ -259,6 +269,68 @@ local function handle_key(state: any, key: any, cx: any, yz: YaziState?): boolea
 		end
 		return true
 	end
+	if state.create_mode then
+		if escape then state.create_mode = false; state.create_query = ""
+		elseif enter then
+			local query = state.create_query or ""
+			state.create_mode = false
+			state.create_query = ""
+			if query ~= "" then
+				actions.request(state, yz, { op = "create", name = query })
+			end
+		else
+			local query = state.create_query or ""
+			if k == "backspace" then query = erase_codepoint(query)
+			else
+				local text = typed_text(key)
+				if text then query ..= text end
+			end
+			state.create_query = query
+		end
+		return true
+	end
+	if state.rename_mode then
+		if escape then state.rename_mode = false; state.rename_query = ""; state.rename_target = nil
+		elseif enter then
+			local query, target = state.rename_query or "", state.rename_target
+			state.rename_mode = false
+			state.rename_query = ""
+			state.rename_target = nil
+			if query ~= "" and target then
+				actions.request(state, yz, { op = "rename", target = target, new_name = query })
+			end
+		else
+			local query = state.rename_query or ""
+			local cursor = state.rename_cursor or utf16_size(query)
+			local anchor = state.rename_anchor or cursor
+			if key.ctrl and k == "a" then
+				state.rename_anchor, state.rename_cursor = 0, utf16_size(query)
+			elseif k == "backspace" or k == "delete" then
+				if cursor ~= anchor then replace_edit(state, "rename", "")
+				elseif k == "backspace" and cursor > 0 then
+					local prefix = query:sub(1, byte_at_utf16(query, cursor) - 1)
+					replace_edit(state, "rename", "", utf16_size(erase_codepoint(prefix)), cursor)
+				elseif k == "delete" then
+					local next_byte = utf8.offset(query, 2, byte_at_utf16(query, cursor)) or (#query + 1)
+					replace_edit(state, "rename", "", cursor, utf16_size(query:sub(1, next_byte - 1)))
+				end
+			elseif k == "home" or k == "end" then
+				state.rename_cursor = k == "home" and 0 or utf16_size(query)
+				if not key.shift then state.rename_anchor = state.rename_cursor end
+			elseif k == "left" or k == "arrowleft" or k == "right" or k == "arrowright" then
+				local pos = byte_at_utf16(query, cursor)
+				if k == "left" or k == "arrowleft" then
+					pos = utf8.offset(query, -1, pos) or 1
+				else pos = utf8.offset(query, 2, pos) or (#query + 1) end
+				state.rename_cursor = utf16_size(query:sub(1, pos - 1))
+				if not key.shift then state.rename_anchor = state.rename_cursor end
+			else
+				local text = typed_text(key)
+				if text then replace_edit(state, "rename", text) end
+			end
+		end
+		return true
+	end
 	if key.alt or key.meta then return false end
 	if escape then
 		state.filter_mode = false
@@ -268,6 +340,8 @@ local function handle_key(state: any, key: any, cx: any, yz: YaziState?): boolea
 	if key.ctrl then
 		if k == "a" then actions.action(state, yz, "toggle_all", { state = "on" }); return true end
 		if k == "r" then actions.action(state, yz, "toggle_all", {}); return true end
+		if k == "c" then actions.action(state, yz, "close", {}); return true end
+		if (k == "-" or k == "minus") and not key.shift then actions.action(state, yz, "hardlink", {}); return true end
 		if k ~= "d" and k ~= "u" and k ~= "f" and k ~= "b" then return false end
 	end
 	local upper = key.shift or raw ~= k
@@ -286,11 +360,20 @@ local function handle_key(state: any, key: any, cx: any, yz: YaziState?): boolea
 		else state.pending_g = true end
 		return true
 	end
+	if plain_t then
+		if pending_t then actions.action(state, yz, "tab_create", { current = true })
+		else state.pending_t = true end
+		return true
+	end
 	if k == "n" then actions.action(state, yz, "find_arrow", { previous = upper }); return true end
 	if upper and k:match("^[a-z]$") then
 		if k == "v" then actions.action(state, yz, "visual_mode", { unset = true })
 		elseif k == "h" then actions.action(state, yz, "back", {})
 		elseif k == "l" then actions.action(state, yz, "forward", {})
+		elseif k == "p" then actions.action(state, yz, "paste", { force = true })
+		elseif k == "y" or k == "x" then actions.action(state, yz, "unyank", {})
+		elseif k == "j" then actions.action(state, yz, "seek", { "5" })
+		elseif k == "k" then actions.action(state, yz, "seek", { "-5" })
 		else return false end
 		return true
 	end
@@ -313,6 +396,9 @@ local function handle_key(state: any, key: any, cx: any, yz: YaziState?): boolea
 	elseif k == "v" then actions.action(state, yz, "visual_mode", {})
 	elseif k == "y" then actions.action(state, yz, "yank", {})
 	elseif k == "x" then actions.action(state, yz, "yank", { cut = true })
+	elseif k == "p" then actions.action(state, yz, "paste", {})
+	elseif (k == "-" or k == "minus") and not upper then actions.action(state, yz, "link", {})
+	elseif k == "_" or k == "underscore" or ((k == "-" or k == "minus") and upper) then actions.action(state, yz, "link", { relative = true })
 	elseif k == "d" then
 		actions.request(state, yz, { op = "trash_prepare" }, function(reply)
 			if reply.ok and reply.paths and #reply.paths > 0 then
@@ -326,6 +412,30 @@ local function handle_key(state: any, key: any, cx: any, yz: YaziState?): boolea
 		state.find_previous = k == "?" or key.shift == true
 	elseif (k == ";" or k == "semicolon") and not key.shift then state.cmd_mode = true; state.cmd_block = false; state.cmd_query = ""
 	elseif k == ":" or k == "colon" or ((k == ";" or k == "semicolon") and key.shift) then state.cmd_mode = true; state.cmd_block = true; state.cmd_query = ""
+	elseif not upper and k:match("^[1-9]$") then
+		actions.action(state, yz, "tab_switch", { tostring(tonumber(k) - 1) })
+	elseif k == "{" or k == "braceleft" or (upper and (k == "[" or k == "bracketleft")) then
+		actions.action(state, yz, "tab_swap", { "-1" })
+	elseif k == "}" or k == "braceright" or (upper and (k == "]" or k == "bracketright")) then
+		actions.action(state, yz, "tab_swap", { "1" })
+	elseif not upper and (k == "[" or k == "bracketleft") then
+		actions.action(state, yz, "tab_switch", { "-1", relative = true })
+	elseif not upper and (k == "]" or k == "bracketright") then
+		actions.action(state, yz, "tab_switch", { "1", relative = true })
+	elseif k == "a" then
+		state.create_mode = true
+		state.create_query = ""
+	elseif k == "r" then
+		local hovered = yz and yz.hovered and yz.hovered.url
+		if hovered then
+			state.rename_mode = true
+			state.rename_target = hovered
+			state.rename_query = basename(hovered)
+			local name = state.rename_query
+			local dot = yz.hovered.dir ~= true and name:match("^.*()%.") or nil
+			state.rename_cursor = dot and dot > 1 and utf16_size(name:sub(1, dot - 1)) or utf16_size(name)
+			state.rename_anchor = state.rename_cursor
+		end
 	elseif k == "." or k == "period" then actions.action(state, yz, "hidden", { state = "toggle" })
 	elseif k == "q" then state.close(cx)
 	else return false end
@@ -345,6 +455,7 @@ local function event(state: any, ev: any, cx: any, yz: YaziState?)
 			return
 		end
 		state.pending_g = nil
+		state.pending_t = nil
 		if act == "path_edit" then
 			state.path_mode, state.path_menu = true, false
 			state.cmd_mode, state.find_mode, state.filter_mode = false, false, false
@@ -362,6 +473,17 @@ local function event(state: any, ev: any, cx: any, yz: YaziState?)
 			return
 		elseif type(act) == "string" and act:sub(1, 8) == "path_cd:" then
 			jump_directory(state, yz, cx, act:sub(9))
+			return
+		elseif state.rename_mode and ev.id == "main.browser.input.rename" then
+			if ev.ev == "focus" then
+				state.rename_cursor, state.rename_anchor = nil, nil
+			elseif ev.ev == "edit" and ev.len == utf16_size(state.rename_query or "") then
+				replace_edit(state, "rename", ev.text or "", ev.from, ev.to)
+				state.rename_cursor, state.rename_anchor = ev.cursor, ev.cursor
+			elseif ev.ev == "send" then
+				state.rename_query = ev.text or state.rename_query
+				handle_key(state, { name = "enter" }, cx, yz)
+			end
 			return
 		elseif ev.id == PATH_FIELD and state.path_mode then
 			if ev.ev == "focus" then
@@ -449,6 +571,16 @@ local function event(state: any, ev: any, cx: any, yz: YaziState?)
 		elseif act == "clear_cmd" then
 			state.cmd_mode = false
 			state.cmd_query = ""
+		elseif act == "clear_create" then
+			state.create_mode = false
+			state.create_query = ""
+		elseif act == "clear_rename" then
+			state.rename_mode = false
+			state.rename_query = ""
+			state.rename_target = nil
+		elseif type(act) == "string" and act:sub(1, 11) == "tab_switch:" then
+			local idx = act:sub(12)
+			actions.action(state, yz, "tab_switch", { idx })
 		end
 
 end
@@ -459,6 +591,8 @@ local function init(state: any)
 	state.filter_mode, state.filter_query = false, ""
 	state.find_mode, state.find_query, state.find_previous = false, "", false
 	state.cmd_mode, state.cmd_query, state.cmd_block = false, "", false
+	state.create_mode, state.create_query = false, ""
+	state.rename_mode, state.rename_query, state.rename_target = false, "", nil
 end
 
 local function restore_command(state: any, block: boolean, query: string)
@@ -467,6 +601,8 @@ end
 
 local function close(state: any)
 	state.find_mode, state.find_query, state.find_previous = false, "", false
+	state.create_mode, state.create_query = false, ""
+	state.rename_mode, state.rename_query, state.rename_target = false, "", nil
 end
 
 local function reset(state: any, clear_trash: boolean?)

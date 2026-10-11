@@ -23,7 +23,7 @@ local function clickable(node: any, act: string): any
 	return node
 end
 
-local function build_rich_preview(data: any, active_name: string, cx: any): Node
+local function build_rich_preview(data: any, active_name: string, cx: any, offset: number?): Node
 	if data.tag == "settings-unavailable" then
 		return ui.text({ ui.span("Preview settings unavailable", "warn") })
 	elseif data.tag == "unavailable" then
@@ -62,6 +62,15 @@ local function build_rich_preview(data: any, active_name: string, cx: any): Node
 	end
 
 	local content = data.content
+	if offset and offset > 0 and (data.tag == "code" or data.tag == "markdown") and type(content) == "string" then
+		local start = 1
+		for _ = 1, offset do
+			local next_nl = content:find("\n", start, true)
+			if not next_nl then break end
+			start = next_nl + 1
+		end
+		content = content:sub(start)
+	end
 	-- 1. SVG and Image Native Preview (via cx:blob + ui.node("image", ...))
 	if data.tag == "image" then
 		if #content == 0 then
@@ -472,6 +481,18 @@ local function render(state: any, cx: any, yz: YaziState?, prepared: any?, previ
 	local cur_cwd = prepared.cur_cwd
 	local layout = state.layout_theme or "current"
 		local top_rows = {}
+		if yz and yz.tabs and yz.tabs.total and yz.tabs.total > 1 then
+			local tab_nodes = {}
+			for index, tab in ipairs(yz.tabs.items or {}) do
+				local label = string.format("%d %s", index, tab.name or tostring(index))
+				local tone = tab.active and "accent" or "muted"
+				local node = clickable(ui.badge(label, tone), "tab_switch:" .. tostring(index - 1))
+				node.p.key = "tab" .. tostring(index)
+				node.p.active = tab.active == true
+				table.insert(tab_nodes, node)
+			end
+			table.insert(top_rows, ui.node("row", { role = "yazi.tab-bar", key = "tabs", gap = "xs" }, tab_nodes))
+		end
 		local header, path_layer = path_header(state, cur_cwd, cx)
 		table.insert(top_rows, header)
 
@@ -501,8 +522,25 @@ local function render(state: any, cx: any, yz: YaziState?, prepared: any?, previ
 				}),
 				clickable(ui.badge("Clear [Esc]", "muted"), "clear_filter"),
 			})
+		elseif state.create_mode then
+			input_bar = ui.row({
+				ui.badge("Create [a]", "accent"),
+				ui.text({
+					ui.span(" " .. (state.create_query or ""), "strong"),
+					ui.span(" ▎", "accent"),
+				}),
+				clickable(ui.badge("Cancel [Esc]", "muted"), "clear_create"),
+			})
+		elseif state.rename_mode then
+			input_bar = ui.row({
+				ui.badge("Rename [r]", "accent"),
+				ui.node("input", { key = "rename", text = state.rename_query or "",
+					cursor = state.rename_cursor, anchor = state.rename_anchor,
+					sendable = true, grow = 1, min = { w = 0 } }),
+				clickable(ui.badge("Cancel [Esc]", "muted"), "clear_rename"),
+			})
 		end
-		local input_kind = state.cmd_mode and "shell" or (state.find_mode and "find" or (state.filter_mode and "filter" or nil))
+		local input_kind = state.cmd_mode and "shell" or (state.find_mode and "find" or (state.filter_mode and "filter" or (state.create_mode and "create" or (state.rename_mode and "rename" or nil))))
 		if input_kind then
 			-- Presentation hooks keep the existing widgets, positional keys and actions.
 			for index, role in ipairs({ "yazi.command-label", "yazi.command-bubble." .. input_kind, "yazi.command-cancel" }) do
@@ -558,7 +596,7 @@ local function render(state: any, cx: any, yz: YaziState?, prepared: any?, previ
 			})
 		else
 			-- Rich File Preview (Code, Markdown, Image, Archive table of contents)
-			local preview_content = build_rich_preview(preview_data, active_name, cx)
+			local preview_content = build_rich_preview(preview_data, active_name, cx, yz.preview_skip)
 			right_col_card = ui.card(
 				{ ui.span(active_name, "strong") },
 				{
@@ -587,8 +625,8 @@ local function render(state: any, cx: any, yz: YaziState?, prepared: any?, previ
 		table.insert(top_rows, miller_columns)
 
 		-- ---------------- Bottom Status Bar (Yazi-style Pill Status Bar)
-		local mode_str = state.cmd_mode and "CMD" or (state.find_mode and "FIND" or (state.filter_mode and "FILTER" or (yz.mode == "select" and "VIS" or (yz.mode == "unset" and "UNSET" or "NOR"))))
-		local mode_tone = (state.cmd_mode or (yz.mode and yz.mode ~= "normal")) and "warn" or "accent"
+		local mode_str = state.cmd_mode and "CMD" or (state.find_mode and "FIND" or (state.filter_mode and "FILTER" or (state.create_mode and "CREATE" or (state.rename_mode and "RENAME" or (yz.mode == "select" and "VIS" or (yz.mode == "unset" and "UNSET" or "NOR"))))))
+		local mode_tone = (state.cmd_mode or state.create_mode or state.rename_mode or (yz.mode and yz.mode ~= "normal")) and "warn" or "accent"
 
 		local pct_num = (#file_list > 0) and math.floor((cur_idx / #file_list) * 100) or 0
 		local pct_str = string.format("%d%%", pct_num)

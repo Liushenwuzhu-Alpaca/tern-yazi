@@ -294,10 +294,36 @@ local function dump_state()
 		if not write_inbox(sdir, cid, "listing", encoded) then return end
 		last_listing_key, listing_revision = listing_key, revision
 	end
+	local tabs_data = nil
+	local ok_tabs, tabs = pcall(function() return cx.tabs end)
+	if ok_tabs and tabs then
+		local count = #tabs
+		if count > 1 then
+			local list = {}
+			for i = 1, count do
+				local t = tabs[i]
+				local t_cwd = t and t.current and t.current.cwd
+				local t_name = t and t.name
+				if not t_name or t_name == "" then
+					t_name = t_cwd and (t_cwd.name or tostring(t_cwd):match("([^/]+)$")) or tostring(i)
+				end
+				list[i] = {
+					name = t_name,
+					active = (i == tabs.idx),
+				}
+			end
+			tabs_data = {
+				idx = tabs.idx,
+				total = count,
+				items = list,
+			}
+		end
+	end
 	local payload = {
 		listing_epoch = listing_epoch,
 		listing_revision = listing_revision,
 		cursor = active.current.cursor + 1,
+		preview_skip = active.preview.skip,
 		icon_overrides = read_icon_overrides(active.current),
 		parent_icon_overrides = parent and read_icon_overrides(active.parent) or nil,
 		preview_icon_overrides = preview and read_icon_overrides(active.preview.folder) or nil,
@@ -307,6 +333,7 @@ local function dump_state()
 		mode = mode,
 		hovered = hovered.url and hovered or nil,
 		tasks = tasks_data,
+		tabs = tabs_data,
 	}
 	local ok_encoded, key = pcall(ya.json_encode, payload)
 	if not ok_encoded or not key or key == last_dump_key then return end
@@ -416,6 +443,56 @@ local snapshot = ya.sync(function()
 	last_dump_key = nil
 	dump_state()
 end)
+
+local current_cwd = ya.sync(function()
+	local ok, cwd = pcall(function() return tostring(cx.active.current.cwd) end)
+	assert(ok, "Current directory unavailable")
+	return cwd
+end)
+
+local function missing_target(target)
+	local cha, err = fs.cha(target)
+	assert(not cha, "Destination already exists")
+	assert(err and err.kind == "NotFound", tostring(err))
+end
+
+local function rename_helper()
+	local bridge = os.getenv("TERN_YAZI_BRIDGE")
+	if bridge then return assert(ya.json_decode(bridge).helper, "Missing managed helper") end
+	local configured = os.getenv("TERN_YAZI_LAUNCHER_PATH")
+	if configured then return configured end
+	for directory in (os.getenv("PATH") or ""):gmatch("[^:]+") do
+		if directory:sub(1, 1) == "/" then
+			local candidate = directory .. "/../libexec/tern-yazi-launch"
+			local cha = fs.cha(Url(candidate))
+			if cha and not cha.is_dir then return candidate end
+		end
+	end
+	return (os.getenv("HOME") or "") .. "/.local/libexec/tern-yazi-launch"
+end
+
+local listed = ya.sync(function(_, url)
+	local ok, found = pcall(function()
+		local files = cx.active.current.files
+		for i = 1, #files do
+			if tostring(files[i].url) == url then return true end
+		end
+		return false
+	end)
+	return ok and found or false
+end)
+
+-- The watcher updates Yazi's listing asynchronously; revealing before the new
+-- entry exists leaves the cursor on an unrelated row.
+local function reveal_listed(target)
+	local url = tostring(target)
+	for _ = 1, 40 do
+		if listed(url) then break end
+		ya.sleep(0.05)
+	end
+	ya.exec("reveal", { target, no_dummy = true })
+	snapshot()
+end
 
 local targets = ya.sync(function(_, target)
 	local paths = {}
@@ -538,7 +615,7 @@ local function prepare_shell(req, run)
 end
 
 local companion_actors = {}
-for name in ("cd arrow leave enter back forward reveal yank toggle toggle_all visual_mode escape hidden find_arrow"):gmatch("%S+") do
+for name in ("cd arrow leave enter back forward reveal yank toggle toggle_all visual_mode escape hidden find_arrow paste unyank link hardlink seek tab_create tab_switch tab_swap tab_close close"):gmatch("%S+") do
 	companion_actors[name] = true
 end
 
@@ -642,6 +719,42 @@ function M:entry(job)
 			ya.exec("find_do", { req.query, smart = true, previous = req.previous == true })
 			snapshot()
 			reply(req, { ok = true })
+		elseif req.op == "create" then
+			assert(type(req.name) == "string" and req.name ~= "" and not req.name:find("%z"), "Creation requires a valid name")
+			local is_dir = req.name:sub(-1) == "/"
+			local clean_name = req.name:gsub("/+$", "")
+			assert(clean_name ~= "", "Creation requires a name, not a directory separator")
+			local target = Url(current_cwd()):join(clean_name)
+			missing_target(target)
+			local parent = assert(target.parent, "Cannot create at root")
+			local made, make_err = fs.create("dir_all", parent)
+			assert(made, tostring(make_err))
+			if is_dir then
+				local created, create_err = fs.create("dir", target)
+				assert(created, tostring(create_err))
+			else
+				local fd, open_err = fs.access():write(true):create_new(true):open(target)
+				assert(fd, tostring(open_err))
+			end
+			reveal_listed(target)
+			reply(req, { ok = true, target = tostring(target) })
+		elseif req.op == "rename" then
+			assert(type(req.target) == "string" and req.target ~= "" and not req.target:find("%z"), "Rename requires a target")
+			assert(type(req.new_name) == "string" and req.new_name ~= "" and not req.new_name:find("%z"), "Rename requires a new name")
+			local source = Url(req.target:gsub("/+$", ""))
+			local source_cha, source_err = fs.cha(source)
+			assert(source_cha, tostring(source_err))
+			local parent = assert(source.parent, "Cannot rename root")
+			local target = parent:join(req.new_name)
+			if source ~= target then
+				missing_target(target)
+				local result, run_err = Command(rename_helper()):arg("--rename-no-replace")
+					:arg(tostring(source)):arg(tostring(target)):output()
+				assert(result, tostring(run_err))
+				assert(result.status.success, result.stderr ~= "" and result.stderr or "Rename failed")
+			end
+			reveal_listed(target)
+			reply(req, { ok = true, target = tostring(target) })
 		elseif req.op == "action" then
 			assert(companion_actors[req.action], "Unsupported companion action")
 			ya.exec(req.action, req.args or {})
@@ -667,7 +780,12 @@ function M:setup()
 		pulse()
 		dump_state()
 	end)
-
+	ps.sub("tab", function()
+		publish_folder()
+		publish_hover()
+		pulse()
+		dump_state()
+	end)
 	-- Companion command channel.
 	--   {"op":"hello"} -> full snapshot (companion startup / reattach)
 	--   anything else  -> ack echo (round-trip probe)

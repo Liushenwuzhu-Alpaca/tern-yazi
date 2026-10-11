@@ -334,11 +334,6 @@
     min-width: 0;
     overflow-wrap: anywhere;
 }
-
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.preview-actions"] {
-    flex-shrink: 0;
-}
-
 [data-surface="plugin.tern-yazi.companion"] [data-role="yazi.image-preview"] {
     height: 100%;
     min-height: 0;
@@ -637,13 +632,6 @@
     padding: var(--yazi-preview-padding);
     box-sizing: border-box;
 }
-
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.preview-actions"],
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.preview-actions"],
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.preview-actions"] {
-    display: none;
-}
-
 /* Region roots are stripped by Tern, so dock ordering lives on the region. */
 .sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"],
 .sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"],
