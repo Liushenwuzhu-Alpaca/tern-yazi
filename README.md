@@ -49,7 +49,5 @@ require("tern"):setup()
 - **Outside Tern**: The wrapper executes your original `/usr/bin/yazi` with all arguments passed through transparently.
 ## Roadmap
 
-- [ ] Pass through navigation shortcuts colliding with terminal presets (`Ctrl+D/U/F/B`, `Shift+PageUp/Down`).
-- [ ] Native interactive dialogs for Yazi operations: `a` (create file/dir), `r` (rename), `p`/`P` (paste/overwrite), and `s`/`S` (recursive search).
-- [ ] Multi-tab bar visualization and tab switching (`t`, `w`, `1-9`).
+- [ ] Native interactive dialog for Yazi recursive search (`s`/`S`).
 - [ ] Document and media previews (PDF rendering, audio/video metadata, archive inspection).

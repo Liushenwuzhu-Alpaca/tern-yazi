@@ -385,23 +385,40 @@ impl Inbox {
         let state: serde_json::Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
         let valid_client = state.get("client_id").is_some_and(|cid| {
             cid.as_str() == Some(self.cid.as_str())
-                || cid.as_u64().is_some_and(|id| self.cid.parse::<u64>().ok() == Some(id))
+                || cid
+                    .as_u64()
+                    .is_some_and(|id| self.cid.parse::<u64>().ok() == Some(id))
         });
-        let Some(epoch) = state.get("listing_epoch").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) else {
+        let Some(epoch) = state
+            .get("listing_epoch")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+        else {
             return Ok(false);
         };
-        let Some(revision) = state.get("listing_revision").and_then(|v| v.as_u64()).filter(|v| *v > 0) else {
+        let Some(revision) = state
+            .get("listing_revision")
+            .and_then(|v| v.as_u64())
+            .filter(|v| *v > 0)
+        else {
             return Ok(false);
         };
-        if !valid_client || !state.get("seq").and_then(|v| v.as_u64()).is_some_and(|seq| seq > 0) {
+        if !valid_client
+            || state
+                .get("seq")
+                .and_then(|v| v.as_u64())
+                .is_none_or(|seq| seq == 0)
+        {
             return Ok(false);
         }
-        let (bytes, _) = match self.read(&format!("listing-{}.json", self.cid), LISTING_CAP, false) {
+        let (bytes, _) = match self.read(&format!("listing-{}.json", self.cid), LISTING_CAP, false)
+        {
             Ok(snapshot) => snapshot,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error),
         };
-        let listing: serde_json::Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        let listing: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(io::Error::other)?;
         let valid_files = listing.get("files").is_some_and(|files| {
             files.is_array() || files.as_object().is_some_and(|files| files.is_empty())
         });
@@ -1623,12 +1640,38 @@ fn native_terminal(path: &Path) -> io::Result<i32> {
     Ok(0)
 }
 
+// The Lua filesystem API only exposes overwriting rename. Keep collision
+// refusal atomic at the existing Linux process boundary instead of stat+rename.
+fn rename_no_replace(args: &[OsString]) -> io::Result<i32> {
+    if args.len() != 2 {
+        return Err(invalid("rename requires source and destination"));
+    }
+    let source = cstr(&args[0])?;
+    let target = cstr(&args[1])?;
+    if unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    } != 0
+    {
+        return Err(last_error());
+    }
+    Ok(0)
+}
+
 fn run() -> io::Result<i32> {
     let first = env::args_os().next();
     if first.as_deref().and_then(|v| Path::new(v).file_name()) == Some(OsStr::new("sh")) {
         return native_shell(&env::args_os().skip(1).collect::<Vec<_>>());
     }
     match env::args_os().nth(1).as_deref() {
+        Some(mode) if mode == "--rename-no-replace" => {
+            return rename_no_replace(&env::args_os().skip(2).collect::<Vec<_>>());
+        }
         Some(mode) if mode == "--native-shell" => {
             return native_shell(&env::args_os().skip(2).collect::<Vec<_>>());
         }
@@ -1796,9 +1839,7 @@ fn run() -> io::Result<i32> {
                         && fields
                             .next()
                             .and_then(|v| v.parse::<u64>().ok())
-                            .is_some_and(|v| {
-                                v > 0 && standalone_pane.map_or(true, |pane| v == pane)
-                            })
+                            .is_some_and(|v| v > 0 && standalone_pane.is_none_or(|pane| v == pane))
                     {
                         let size = (
                             fields
@@ -2067,19 +2108,31 @@ mod tests {
             "client_id": fixture.inbox.cid, "seq": 1,
             "listing_epoch": "current", "listing_revision": 2
         });
-        fixture.inbox.atomic_json("state-12345.json", &state, false).unwrap();
+        fixture
+            .inbox
+            .atomic_json("state-12345.json", &state, false)
+            .unwrap();
         assert!(!fixture.inbox.ready().unwrap());
         let mut listing = serde_json::json!({
             "epoch": "current", "revision": 1, "cwd": "/tmp/files", "files": ["alpha.txt"]
         });
-        fixture.inbox.atomic_json("listing-12345.json", &listing, false).unwrap();
+        fixture
+            .inbox
+            .atomic_json("listing-12345.json", &listing, false)
+            .unwrap();
         assert!(!fixture.inbox.ready().unwrap());
         listing["epoch"] = "previous".into();
         listing["revision"] = 2.into();
-        fixture.inbox.atomic_json("listing-12345.json", &listing, true).unwrap();
+        fixture
+            .inbox
+            .atomic_json("listing-12345.json", &listing, true)
+            .unwrap();
         assert!(!fixture.inbox.ready().unwrap());
         listing["epoch"] = "current".into();
-        fixture.inbox.atomic_json("listing-12345.json", &listing, true).unwrap();
+        fixture
+            .inbox
+            .atomic_json("listing-12345.json", &listing, true)
+            .unwrap();
         assert!(fixture.inbox.ready().unwrap());
     }
 

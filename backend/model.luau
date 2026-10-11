@@ -38,6 +38,8 @@ export type YaziState = {
 	listing_epoch: string,
 	listing_revision: number,
 	cursor: number?,
+	preview_skip: number?,
+	tabs: { idx: number, total: number, items: { { name: string, active: boolean } } }?,
 	parent: ParentInfo?,
 	preview: ParentInfo?,
 	cwd: string,

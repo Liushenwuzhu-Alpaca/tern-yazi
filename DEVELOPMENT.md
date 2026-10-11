@@ -513,6 +513,16 @@ The preview column is focused strictly on content display: bottom action buttons
 | `.` | Yazi `hidden` with `state="toggle"` |
 | Ctrl+A | Native `toggle_all` with `state="on"` |
 | Ctrl+R | Native `toggle_all` (toggle all, replacing former refresh) |
+| `a` | Local create editor; Enter submits native `create`, Esc cancels |
+| `r` | Local rename editor prefilled with the hovered basename and caret before the extension; Enter submits native `rename`, Esc cancels |
+| `p` / `P` | Native `paste` / `paste` with `force = true` |
+| `-` / `_` | Native `link` (symbolic) / relative symbolic link |
+| Ctrl+- | Native `hardlink` |
+| Ctrl+C | Native `close` (closes the active Yazi tab); while the companion is focused, the window copy-command override forwards the chord as this shortcut because Tern's preset owns Ctrl+C |
+| `t` then `t` | Native `tab_create` with `current = true` (leader `t`, then second `t`) |
+| `1`-`9` | Native `tab_switch` to the zero-based tab index |
+| `[` / `]` | Native relative `tab_switch -1` / `1` |
+| `{` / `}` (or shifted `[` / `]`) | Native `tab_swap -1` / `1` |
 | Esc | Sends native Yazi `escape` when online (visual mode and find clear before a retained filter; selection follows upstream handling); cancels local input/trash and clears the corresponding native find/filter while editing; closes companion only when offline |
 | `q` | Close outside local editing/confirmation; restore owner shell in its prior zoom state, or leave ordinary attached Yazi running |
 Shifted letters have explicit actions for `G`, `H`, `L`, `N` and `V`; other shifted letters are not silently treated as their unshifted actions. Normal-mode Alt/Meta chords are not claimed by the handler.
@@ -524,11 +534,12 @@ Find (`/`/`?`), filter (`f`) and shell (`;`/`:`) input bars accept printable key
 Find editing sends native `find` requests as text changes and again on Enter, retaining Yazi's find state for `n/N` after the prompt closes. `/` searches forward; `?` searches backward via the boolean `previous` flag. Smart matching delegates case handling to Yazi. Find moves hover through the existing listing, including an already filtered listing; it is not a filter alias. Esc while editing closes the prompt and sends `escape` with `find=true`, leaving an existing filter intact.
 
 Filter editing (`f`) sends `filter` requests with `smart=true` and `done=false` as text changes. Enter sends `done=true` and leaves editing while retaining the filter. Lowercase smart-filter queries match either case; uppercase queries are case-sensitive. Esc while editing clears the filter query and native filter. Active filter state is reported via `yz.filter` in snapshots (`string` when active, `false` when cleared). In normal mode, native Esc first leaves an active visual mode without removing the retained filter; another Esc clears that filter. With an active find over a retained filter, the first Esc clears find and leaves the filtered rows intact; the following Esc clears the filter. Shell/path input and Trash confirmation cancel locally without navigation or a Trash mutation.
+Create and rename editors accept printable text, paste, Backspace/Delete around the caret, Home/End, and arrow movement. The rename editor additionally supports Ctrl+A select-all with shift-extended selection; Enter submits only non-empty text and leaves editing, while a failed submission keeps the editor available. When Yazi reports more than one tab, the surface renders an ordered clickable `yazi.tab-bar` of tab badges; pointer clicks dispatch the same `tab_switch` action as the digit keys.
 
 ### Unsupported actions and keys
 
 The companion aligns strictly with implemented upstream Yazi actions. Specific unsupported inputs include:
-- Key combinations such as `cc`, `p` (paste), and `r` are not implemented and are not emulated by synthetic frontend actions.
+- Key combinations such as `cc` are not implemented and are not emulated by synthetic frontend actions. `p`, `P`, `r`, and `a` map to native paste, forced paste, rename, and create instead of being rejected.
 - Backspace in normal mode does not execute `leave` (it only erases text during input bar editing).
 ### Shell execution semantics
 
