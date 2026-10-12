@@ -108,10 +108,19 @@ const ALT_SCREEN: &[u8] = b"\x1b[?1049";
 /// Yazi leaves its alternate screen to lend its terminal to a subprocess (`shell --block`,
 /// `ui.hide()` plugins such as fzf and zoxide, task inspection) and enters it again to resume.
 /// While it is away its output belongs on the pane; otherwise it is the hidden TUI.
+///
+/// The subprocess may switch the alternate screen too (fzf, an editor, a pager). Yazi asks the
+/// terminal for its device attributes (DA1, ending its query burst) right before it enters the
+/// alternate screen again, which a subprocess entering it does not; only that switch returns
+/// the terminal to Yazi.
 #[derive(Debug, Default)]
 pub(crate) struct Lent {
     pub(crate) active: bool,
     matched: usize,
+    /// The last bytes relayed, to spot a DA1 query.
+    recent: [u8; 4],
+    /// A DA1 query was relayed since the last alternate-screen switch.
+    asked: bool,
     relay: Vec<u8>,
 }
 
@@ -137,17 +146,26 @@ impl Lent {
         }
         match (self.active, switch) {
             // `take` holds a partial switch back, so the prefix is still buffered here.
-            (true, Some(true)) => {
+            (true, Some(true)) if self.asked => {
                 self.relay.truncate(self.relay.len() - ALT_SCREEN.len());
                 self.active = false;
                 true
             }
-            (true, _) => {
+            (true, switch) => {
                 self.relay.push(byte);
+                if switch.is_some() {
+                    self.asked = false;
+                } else {
+                    self.recent.rotate_left(1);
+                    self.recent[3] = byte;
+                    self.asked |= self.recent[1..] == *b"\x1b[c" || self.recent == *b"\x1b[0c";
+                }
                 false
             }
             (false, Some(false)) => {
                 self.active = true;
+                self.asked = false;
+                self.recent = [0; 4];
                 true
             }
             (false, _) => true,
@@ -443,6 +461,9 @@ mod tests {
         }
     }
 
+    /// What Yazi 26.9 writes when it resumes: its query burst, ending in DA1, then the switch.
+    const RESUME: &[u8] = b"\x1b7\x1b]11;?\x07\x1b[0c\x1b[1K\x1b8\x1b[?1049h";
+
     #[test]
     fn relays_only_what_yazi_writes_outside_its_alternate_screen() {
         let mut lent = Lent::default();
@@ -451,16 +472,34 @@ mod tests {
         assert_eq!(lent.take(), b"");
         feed(&mut lent, b"$ ls\r\nfile\r\n");
         assert_eq!(lent.take(), b"$ ls\r\nfile\r\n");
-        feed(&mut lent, b"done\x1b[?1049h\x1b[0cTUI again");
+        feed(&mut lent, b"done");
+        feed(&mut lent, RESUME);
+        feed(&mut lent, b"\x1b[?2004hTUI again");
         assert!(!lent.active);
-        assert_eq!(lent.take(), b"done");
+        assert_eq!(lent.take(), [b"done", &RESUME[..RESUME.len() - 8]].concat());
+    }
+
+    #[test]
+    fn a_subprocess_switching_screens_keeps_the_terminal() {
+        let mut lent = Lent::default();
+        feed(&mut lent, b"\x1b[?2004l\x1b[?25h\x1b[?1049l");
+        let fzf = b"\x1b[?1049h\x1b[6n> query\x1b[?1049l";
+        feed(&mut lent, fzf);
+        assert!(lent.active);
+        assert_eq!(lent.take(), fzf);
+        // DA1 asked before a subprocess's own switch pair does not count for Yazi's return.
+        feed(&mut lent, b"\x1b[c\x1b[?1049h\x1b[?1049l");
+        assert!(lent.active);
+        lent.take();
+        feed(&mut lent, RESUME);
+        assert!(!lent.active);
     }
 
     #[test]
     fn holds_a_split_switch_until_it_completes() {
         let mut lent = Lent::default();
-        feed(&mut lent, b"\x1b[?1049lout\x1b[?10");
-        assert_eq!(lent.take(), b"out");
+        feed(&mut lent, b"\x1b[?1049lout\x1b[0c\x1b[?10");
+        assert_eq!(lent.take(), b"out\x1b[0c");
         feed(&mut lent, b"49h");
         assert!(!lent.active);
         assert_eq!(lent.take(), b"");

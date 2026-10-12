@@ -362,8 +362,8 @@ pub(crate) fn run(launch: &Launch, real: &OsStr, args: &[OsString]) -> io::Resul
     // The session saves these and restores them on close, so a hangup that arrives while the
     // pane goes away still ends in the bounded shutdown rather than the default action.
     install_signals();
-    let Some(mut session) =
-        Session::<Msg>::connect(Options::new().app("tern-yazi")).map_err(sdk)?
+    let Some((mut session, link)) =
+        handover::connect(Options::new().app("tern-yazi")).map_err(sdk)?
     else {
         return supervisor::passthrough(real, args);
     };
@@ -438,7 +438,7 @@ pub(crate) fn run(launch: &Launch, real: &OsStr, args: &[OsString]) -> io::Resul
         }
         if backend.lent.active {
             if let Err(error) =
-                handover::lend(&mut app.session, app.sf, &mut backend, &mut app.pane)
+                handover::lend(&mut app.session, &link, app.sf, &mut backend, &mut app.pane)
             {
                 break Err(error);
             }

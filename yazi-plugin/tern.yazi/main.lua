@@ -613,11 +613,12 @@ function M:entry(job)
 			reply(req, { ok = true })
 		elseif req.op == "tasks" then
 			-- Yazi's task manager actions (`w` opens it; `tasks:inspect` borrows the terminal).
+			-- The launcher runs these as sync entries: an async run is itself a task and would
+			-- shift `cx.tasks.cursor`. Redraws snapshot the result.
 			assert(task_actions[req.action], "Unsupported task manager action")
 			assert(req.step == nil or req.step == "prev" or req.step == "next", "Invalid task step")
 			reply(req, { ok = true })
-			ya.exec("tasks:" .. req.action, req.step and { req.step } or {})
-			snapshot()
+			ya.emit("tasks:" .. req.action, req.step and { req.step } or {})
 		elseif req.op == "search" then
 			assert(type(req.query) == "string" and req.query ~= "", "Search requires a query")
 			assert(req.via == "fd" or req.via == "rg", "Search runs via fd or rg")

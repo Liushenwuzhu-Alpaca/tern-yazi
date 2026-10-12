@@ -3,10 +3,13 @@
 //! then steps aside and the pane's tty is relayed to Yazi's PTY until Yazi takes it back, so
 //! the subprocess runs and stays in the pane as if Yazi ran there.
 
+use std::cell::{Cell, RefCell};
 use std::io::{self, Write};
-use std::time::Duration;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
-use tern_sdk::{Session, Surface};
+use tern_sdk::term::{self, Terminal, Tty};
+use tern_sdk::{Options, Session, Surface};
 
 use super::input::Msg;
 use super::panesize::PaneSize;
@@ -19,8 +22,75 @@ const MODES_ON: &[u8] = b"\x1b[?2004h\x1b[>1u";
 /// TSP message introducers (APC and OSC).
 const TSP: [&[u8]; 2] = [b"\x1b_tsp;", b"\x1b]877;tsp;"];
 const POLL_MS: i32 = 20;
+/// How long the suspension may wait for flow-control credit before the pane is lent anyway.
+const SUSPEND_WAIT: Duration = Duration::from_secs(1);
+/// How long, after Yazi takes its screen back, the pane's answers to Yazi's last queries may take.
+const ANSWER_WAIT: Duration = Duration::from_millis(300);
 
-/// Drops Tern's TSP messages from the pane's input; everything else is Yazi's.
+/// What the lent terminal shares with the session's terminal.
+#[derive(Clone, Default)]
+pub(crate) struct Link {
+    /// Writes the session has made, to see when a queued frame goes out.
+    writes: Rc<Cell<u64>>,
+    /// TSP input the relay set aside (acks, resizes, ...), for the session to read first.
+    held: Rc<RefCell<Vec<u8>>>,
+}
+
+/// The session's terminal: the pane's tty, plus the TSP input held while the pane was lent.
+struct Pane {
+    tty: Tty,
+    link: Link,
+}
+
+impl Terminal for Pane {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.tty.write(bytes)?;
+        self.link.writes.set(self.link.writes.get() + 1);
+        Ok(())
+    }
+
+    fn read(&mut self, buf: &mut [u8], timeout: Option<Duration>) -> io::Result<Option<usize>> {
+        let mut held = self.link.held.borrow_mut();
+        if held.is_empty() {
+            drop(held);
+            return self.tty.read(buf, timeout);
+        }
+        let count = held.len().min(buf.len());
+        buf[..count].copy_from_slice(&held[..count]);
+        held.drain(..count);
+        Ok(Some(count))
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        self.tty.restore()
+    }
+
+    fn modes(&mut self, paste: bool, kitty: bool) {
+        self.tty.modes(paste, kitty);
+    }
+}
+
+/// [`Session::connect`] over a [`Pane`]: `Ok(None)` where the SDK would not speak TSP
+/// (`TERN_TSP=0`, tmux, screen, zellij, no tty, or no answer).
+pub(crate) fn connect(options: Options) -> Result<Option<(Session<Msg>, Link)>, tern_sdk::Error> {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|v| !v.is_empty());
+    if std::env::var_os("TERN_TSP").is_some_and(|v| v == "0")
+        || set("TMUX")
+        || set("STY")
+        || set("ZELLIJ")
+        || !term::is_tty()
+    {
+        return Ok(None);
+    }
+    let link = Link::default();
+    let pane = Pane {
+        tty: Tty::open()?,
+        link: link.clone(),
+    };
+    Ok(Session::with_terminal(pane, options)?.map(|session| (session, link)))
+}
+
+/// Splits the pane's input into Tern's TSP messages and everything else, which is Yazi's.
 #[derive(Debug, Default)]
 pub(crate) struct Filter {
     held: Vec<u8>,
@@ -30,9 +100,10 @@ pub(crate) struct Filter {
 }
 
 impl Filter {
-    pub(crate) fn feed(&mut self, bytes: &[u8], out: &mut Vec<u8>) {
+    pub(crate) fn feed(&mut self, bytes: &[u8], keys: &mut Vec<u8>, tsp: &mut Vec<u8>) {
         for &byte in bytes {
             if let Some(osc) = self.inside {
+                tsp.push(byte);
                 if (osc && byte == 0x07) || (self.escaped && byte == b'\\') {
                     self.inside = None;
                     self.escaped = false;
@@ -42,29 +113,34 @@ impl Filter {
                 continue;
             }
             if self.held.is_empty() && byte != 0x1b {
-                out.push(byte);
+                keys.push(byte);
                 continue;
             }
             self.held.push(byte);
             if let Some(intro) = TSP.iter().find(|intro| **intro == self.held.as_slice()) {
                 self.inside = Some(intro[1] == b']');
-                self.held.clear();
+                tsp.append(&mut self.held);
             } else if !TSP.iter().any(|intro| intro.starts_with(&self.held)) {
                 // Only the first held byte is an Escape; a new one may start an introducer.
                 let last = self.held.pop().unwrap_or_default();
-                out.append(&mut self.held);
+                keys.append(&mut self.held);
                 if last == 0x1b {
                     self.held.push(last);
                 } else {
-                    out.push(last);
+                    keys.push(last);
                 }
             }
         }
     }
 
     /// Releases a held partial introducer after quiet input: a lone Escape key.
-    pub(crate) fn flush(&mut self, out: &mut Vec<u8>) {
-        out.append(&mut self.held);
+    pub(crate) fn flush(&mut self, keys: &mut Vec<u8>) {
+        keys.append(&mut self.held);
+    }
+
+    /// At hand-back, input still undecided belongs to the session again.
+    fn finish(mut self, tsp: &mut Vec<u8>) {
+        tsp.append(&mut self.held);
     }
 }
 
@@ -105,80 +181,135 @@ fn read_in(buf: &mut [u8]) -> io::Result<Option<usize>> {
 /// termination signal arrives; the surface is suspended meanwhile and resumed afterwards.
 pub(crate) fn lend(
     session: &mut Session<Msg>,
+    link: &Link,
     sf: Surface,
     backend: &mut Backend,
     pane: &mut PaneSize,
 ) -> io::Result<()> {
     let sdk = |error: tern_sdk::Error| io::Error::other(error.to_string());
+    // The suspension waits behind frames out of credit; only once it is written does the
+    // pane's input belong to Yazi.
+    let writes = link.writes.get();
     session.suspend(sf).map_err(sdk)?;
-    // Settle the suspension's acknowledgement before the pane's input belongs to Yazi.
-    session.pump(Duration::from_millis(30)).map_err(sdk)?;
+    let deadline = Instant::now() + SUSPEND_WAIT;
+    while link.writes.get() == writes && Instant::now() < deadline {
+        session.pump(Duration::from_millis(10)).map_err(sdk)?;
+    }
     write_out(MODES_OFF)?;
-    let result = relay(backend, pane);
+    let result = relay(backend, pane, link);
     write_out(MODES_ON)?;
+    // Acks held during the relay restore the credit the resumption may need.
+    session.pump(Duration::ZERO).map_err(sdk)?;
     session.resume(sf).map_err(sdk)?;
     result
 }
 
-fn relay(backend: &mut Backend, pane: &mut PaneSize) -> io::Result<()> {
+fn relay(backend: &mut Backend, pane: &mut PaneSize, link: &Link) -> io::Result<()> {
     let mut filter = Filter::default();
     let mut buf = [0u8; 4096];
     let mut keys = Vec::with_capacity(buf.len());
-    loop {
+    // Yazi queries the pane just before it takes its screen back; the answers, which end with
+    // the device attributes, are still Yazi's.
+    let mut owed = false;
+    let mut returned: Option<Instant> = None;
+    let result = loop {
         backend.drain()?;
         let output = backend.lent.take();
         if !output.is_empty() {
             write_out(&output)?;
+            owed |= da1_query(&output);
         }
-        if !backend.lent.active || pending_signal() != 0 || backend.poll_child()?.is_some() {
-            return Ok(());
+        if pending_signal() != 0 || backend.poll_child()?.is_some() {
+            break Ok(());
+        }
+        if !backend.lent.active {
+            let since = *returned.get_or_insert_with(Instant::now);
+            if !owed || since.elapsed() >= ANSWER_WAIT {
+                break Ok(());
+            }
         }
         if let Some((rows, cols)) = pane.current(super::pane_size()) {
             backend.resize(rows, cols);
         }
         keys.clear();
-        match read_in(&mut buf)? {
-            Some(0) => return Ok(()),
-            Some(count) => filter.feed(&buf[..count], &mut keys),
-            None => filter.flush(&mut keys),
+        match read_in(&mut buf) {
+            Ok(Some(0)) => break Ok(()),
+            Ok(Some(count)) => {
+                filter.feed(&buf[..count], &mut keys, &mut link.held.borrow_mut());
+            }
+            Ok(None) => filter.flush(&mut keys),
+            Err(error) => break Err(error),
         }
         if !keys.is_empty() {
+            owed &= !da1_reply(&keys);
             backend.type_in(&keys)?;
         }
-    }
+    };
+    filter.finish(&mut link.held.borrow_mut());
+    result
+}
+
+/// Whether `output` asks the terminal for its primary device attributes (`CSI c`, `CSI 0 c`).
+fn da1_query(output: &[u8]) -> bool {
+    output.windows(3).any(|w| w == b"\x1b[c") || output.windows(4).any(|w| w == b"\x1b[0c")
+}
+
+/// Whether `input` holds a primary device attributes answer (`CSI ? Ps ; ... c`).
+fn da1_reply(input: &[u8]) -> bool {
+    input.windows(3).enumerate().any(|(at, w)| {
+        w == b"\x1b[?"
+            && input[at + 3..]
+                .iter()
+                .position(|b| !(b.is_ascii_digit() || *b == b';'))
+                .is_some_and(|end| end > 0 && input[at + 3 + end] == b'c')
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Filter;
+    use super::{da1_query, da1_reply, Filter};
 
-    fn run(chunks: &[&[u8]]) -> Vec<u8> {
+    fn run(chunks: &[&[u8]]) -> (Vec<u8>, Vec<u8>) {
         let mut filter = Filter::default();
-        let mut out = Vec::new();
+        let (mut keys, mut tsp) = (Vec::new(), Vec::new());
         for chunk in chunks {
-            filter.feed(chunk, &mut out);
+            filter.feed(chunk, &mut keys, &mut tsp);
         }
-        out
+        (keys, tsp)
     }
 
     #[test]
-    fn drops_tsp_messages_split_across_reads() {
-        let out = run(&[
+    fn sets_aside_tsp_messages_split_across_reads() {
+        let (keys, tsp) = run(&[
             b"a\x1b_ts",
             b"p;e;{\"ev\":\"ack\"}\x1b",
             b"\\b\x1b]877;tsp;e;{}\x07c",
         ]);
-        assert_eq!(out, b"abc");
+        assert_eq!(keys, b"abc");
+        assert_eq!(tsp, b"\x1b_tsp;e;{\"ev\":\"ack\"}\x1b\\\x1b]877;tsp;e;{}\x07");
     }
 
     #[test]
     fn passes_keys_and_other_escape_sequences() {
-        assert_eq!(run(&[b"\x1b[A\x1b\x1b_x"]), b"\x1b[A\x1b\x1b_x");
+        let (keys, tsp) = run(&[b"\x1b[A\x1b\x1b_x"]);
+        assert_eq!(keys, b"\x1b[A\x1b\x1b_x");
+        assert!(tsp.is_empty());
         let mut filter = Filter::default();
-        let mut out = Vec::new();
-        filter.feed(b"q\x1b", &mut out);
-        assert_eq!(out, b"q");
-        filter.flush(&mut out);
-        assert_eq!(out, b"q\x1b");
+        let (mut keys, mut tsp) = (Vec::new(), Vec::new());
+        filter.feed(b"q\x1b", &mut keys, &mut tsp);
+        assert_eq!(keys, b"q");
+        filter.flush(&mut keys);
+        assert_eq!(keys, b"q\x1b");
+    }
+
+    #[test]
+    fn recognizes_the_device_attributes_that_end_a_query_burst() {
+        assert!(da1_query(b"\x1b]11;?\x07\x1b[>q\x1b[0c\x1b[1K"));
+        assert!(da1_query(b"\x1b[c"));
+        assert!(!da1_query(b"\x1b[?12$p\x1b[16t"));
+        assert!(da1_reply(b"\x1b[?1u\x1bP>|kitty(0.48.2)\x1b\\\x1b[?62;22c"));
+        assert!(!da1_reply(b"\x1b[?1u\x1b[?12;2$y"));
+        assert!(!da1_reply(b"\x1b[?c"));
+        assert!(!da1_reply(b"\x1b[?62;22"));
     }
 }

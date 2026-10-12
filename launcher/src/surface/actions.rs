@@ -106,9 +106,16 @@ impl Actions {
     pub(crate) fn poll(&mut self, inbox: &Inbox) -> Option<(Then, Reply)> {
         if self.flight.is_none() {
             let job = self.queue.pop_front()?;
-            let stage = match Command::new("ya")
+            let mut command = Command::new("ya");
+            command
                 .args(["emit-to", &self.cid, "plugin", "tern"])
-                .arg(quote(&job.body.to_string()))
+                .arg(quote(&job.body.to_string()));
+            // An async plugin run is itself a Yazi task, which would shift the task manager's
+            // cursor under `inspect` and `cancel`; these run on Yazi's main thread instead.
+            if job.body["op"] == "tasks" {
+                command.arg("--mode=sync");
+            }
+            let stage = match command
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
