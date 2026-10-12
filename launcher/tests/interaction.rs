@@ -356,6 +356,7 @@ impl Harness {
         for field in [
             "cwd",
             "files",
+            "search",
             "file_dirs",
             "file_icons",
             "file_count",
@@ -3880,5 +3881,170 @@ fn real_surface_interactions() {
     let mut harness = Harness::new()
         .unwrap_or_else(|error| panic!("Real interaction prerequisites/setup failed: {error}"));
     let result = surface_flow(&mut harness);
+    conclude(&mut harness, result);
+}
+
+/// Waits until Yazi has lent its terminal: the pane shows `marker` from the borrowing process.
+fn lent(h: &mut Harness, pane: u64, marker: &str) -> TestResult<()> {
+    h.wait(&format!("the pane shows {marker:?} from Yazi's lent terminal"), |h| {
+        Ok(h.capture(pane)?.contains(marker).then_some(()))
+    })
+}
+
+/// Yazi parity: recursive search, the lent terminal (`:`, fzf, zoxide, task logs), task manager.
+fn parity_flow(h: &mut Harness) -> TestResult<()> {
+    let other = h.path("other");
+    // Zoxide reads its database from the fixture's XDG_DATA_HOME, as Yazi's zoxide plugin does.
+    h.execute("zoxide", &["add".into(), text(&other)])?;
+    let client = h.launch(h.path("files"), true)?;
+    let files = client.cwd.clone();
+    let inside = text(&files.join("child/inside.txt"));
+
+    h.case = "s searches file names recursively via fd; Ctrl+S ends the search";
+    h.key("s")?;
+    h.expect_ui("[data-role=\"yazi.status-mode\"]", "the search line opens", |v| {
+        ui_text(v).contains("SEARCH")
+    })?;
+    h.paste(client.owner, "inside")?;
+    h.expect_ui("", "the search line shows the query", |v| {
+        let text = ui_text(v);
+        text.contains("Search [s]") && text.contains("inside")
+    })?;
+    h.key("Enter")?;
+    h.expect_state(&client, "fd lists the nested match below the searched directory", |s| {
+        s["search"] == "inside"
+            && s["cwd"] == text(&files)
+            && names(s, "files") == ["child/inside.txt"]
+    })?;
+    h.expect_ui(
+        "[data-role=\"yazi.path-search\"]",
+        "the path bar marks the search",
+        |v| ui_text(v).contains("search: inside"),
+    )?;
+    h.expect_state(&client, "the hovered result exports its real path", |s| {
+        hover(s) == inside
+    })?;
+    h.cli(&["send", &client.owner.to_string(), "keys", "ctrl+s"])?;
+    h.expect_state(&client, "Ctrl+S returns to the searched directory", |s| {
+        s["search"].is_null() && s["cwd"] == text(&files) && names(s, "files").contains(&"beta.txt".into())
+    })?;
+
+    h.case = "S searches file contents recursively via ripgrep";
+    h.key("S")?;
+    h.paste(client.owner, "CHILD_CONTENT")?;
+    h.expect_ui("", "the content search line shows the query", |v| {
+        let text = ui_text(v);
+        text.contains("Search [S]") && text.contains("CHILD_CONTENT")
+    })?;
+    h.key("Enter")?;
+    h.expect_state(&client, "ripgrep lists the file whose content matches", |s| {
+        s["search"] == "CHILD_CONTENT" && names(s, "files") == ["child/inside.txt"]
+    })?;
+    h.cli(&["send", &client.owner.to_string(), "keys", "ctrl+s"])?;
+    h.expect_state(&client, "Ctrl+S ends the content search", |s| {
+        s["search"].is_null() && s["cwd"] == text(&files)
+    })?;
+
+    h.case = "w opens Yazi's task manager; Enter shows the task log; x cancels the task";
+    let started = Instant::now();
+    h.shell(&client, "printf 'INSPECT_LOG\\n'; sleep 5", false)?;
+    h.key("w")?;
+    h.expect_ui(
+        "[data-role=\"yazi.task-manager\"]",
+        "the task manager lists the background task",
+        |v| ui_text(v).contains("sleep 5"),
+    )?;
+    h.expect_state(&client, "Yazi's task snapshots reach the surface", |s| {
+        s["task_manager"]["items"]
+            .as_array()
+            .is_some_and(|items| items.len() == 1 && items[0]["running"] == true)
+    })?;
+    h.key("Enter")?;
+    lent(h, client.owner, "INSPECT_LOG")?;
+    h.key("q")?;
+    h.expect_ui(
+        "[data-role=\"yazi.task-manager\"]",
+        "q leaves the log and the task manager returns",
+        |v| ui_text(v).contains("sleep 5"),
+    )?;
+    h.key("x")?;
+    h.expect_state(&client, "x cancels the task", |s| {
+        // Lua encodes the empty row list as `{}`.
+        s["task_manager"]["items"].as_array().is_none_or(Vec::is_empty)
+            && s["tasks"]["total"] == 0
+    })?;
+    if started.elapsed() >= Duration::from_secs(5) {
+        return Err("the task may have ended by itself before x; cancellation unproven".into());
+    }
+    h.key("Escape")?;
+    h.expect_ui(
+        "[data-role=\"yazi.task-manager\"]",
+        "Escape closes the task manager",
+        |v| nodes(v).is_empty(),
+    )?;
+
+    h.case = "z picks a file with fzf on the lent terminal and reveals it";
+    h.key("z")?;
+    lent(h, client.owner, "child/inside.txt")?;
+    h.paste(client.owner, "inside")?;
+    h.key("Enter")?;
+    h.expect_state(&client, "fzf's pick is revealed in Yazi", |s| {
+        s["cwd"] == text(&files.join("child")) && hover(s) == inside
+    })?;
+    h.expect_ui(SURFACE_BROWSER, "the surface returns after fzf", |v| {
+        !nodes(v).is_empty()
+    })?;
+
+    h.case = "Z jumps to a zoxide directory on the lent terminal";
+    h.key("Z")?;
+    lent(h, client.owner, &text(&other))?;
+    h.key("Enter")?;
+    h.expect_state(&client, "Yazi enters the zoxide pick", |s| {
+        s["cwd"] == text(&other)
+    })?;
+
+    h.case = ": lends the pane to the blocking command; input reaches it and the surface returns";
+    let marker = h.path("lent-input.txt");
+    let script = format!(
+        "printf 'LENT_PROMPT> '; read -r line; printf '%%s\\n' \"$line\" > {}",
+        quote(text(&marker))
+    );
+    h.shell(&client, &script, true)?;
+    lent(h, client.owner, "LENT_PROMPT>")?;
+    h.paste(client.owner, "typed through")?;
+    h.key("Enter")?;
+    h.wait("the command reads the pane's input", |_| {
+        Ok(fs::read_to_string(&marker)
+            .ok()
+            .filter(|s| s == "typed through\n")
+            .map(|_| ()))
+    })?;
+    h.expect_ui(SURFACE_BROWSER, "the surface returns when Yazi does", |v| {
+        !nodes(v).is_empty()
+    })?;
+    let root = text(&h.root);
+    h.key("h")?;
+    h.expect_state(&client, "keys reach Yazi again after the hand-back", |s| {
+        s["cwd"] == root
+    })?;
+
+    h.case = "q quits; the blocking command's output stays in the pane, as with Yazi";
+    let watched = descendants(client.supervisor);
+    h.owned.extend(watched.iter().copied());
+    h.key("q")?;
+    h.removed(&client, &watched)?;
+    h.prompt_returned(&client)?;
+    let output = h.capture(client.owner)?;
+    if !output.contains("LENT_PROMPT> typed through") {
+        return Err(format!("the lent command's output is gone: {output}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn real_parity_interactions() {
+    let mut harness = Harness::new()
+        .unwrap_or_else(|error| panic!("Real interaction prerequisites/setup failed: {error}"));
+    let result = parity_flow(&mut harness);
     conclude(&mut harness, result);
 }
