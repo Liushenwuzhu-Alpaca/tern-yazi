@@ -72,6 +72,18 @@ fn selected(value: &Value) -> BTreeSet<String> {
     names(value, "selected_urls").into_iter().collect()
 }
 
+/// `YYYY-MM-DD HH:MM`, the preview's local modification time.
+fn is_local_minute(text: &str) -> bool {
+    let text = text.trim();
+    text.len() == 16
+        && text.char_indices().all(|(at, c)| match at {
+            4 | 7 => c == '-',
+            10 => c == ' ',
+            13 => c == ':',
+            _ => c.is_ascii_digit(),
+        })
+}
+
 fn ui_text(value: &Value) -> String {
     fn visit(value: &Value, parts: &mut Vec<String>) {
         match value {
@@ -824,8 +836,13 @@ impl Harness {
         )?;
         self.expect_ui(
             "[data-role=\"yazi.preview-metadata\"] > *",
-            "fixed metadata contains only semantic language, size and permissions",
-            |v| nodes(v).len() == 3,
+            "fixed metadata contains only semantic language, size, mtime and permissions",
+            |v| nodes(v).len() == 4,
+        )?;
+        self.expect_ui(
+            "[data-role=\"yazi.preview-mtime\"]",
+            "file preview shows its local modification time",
+            |v| nodes(v).len() == 1 && is_local_minute(&ui_text(v)),
         )?;
         self.expect_ui(
             "[data-role=\"yazi.column.preview\"]",
@@ -3048,7 +3065,19 @@ fn metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
         )?;
         h.expect_metadata_selection(&format!("{ROWS}.sel"), &client.cwd.join("many"))?;
         h.expect_metadata_header_layout("yazi.column.preview", ".sf-list-scroll.max")?;
-        h.expect_ui("[data-role=\"yazi.preview-metadata\"], [data-role=\"yazi.preview-size\"], [data-role=\"yazi.preview-permissions\"]", "directory preview removes stale file-only metadata", |v| nodes(v).is_empty())?;
+        h.expect_ui(
+            "[data-role=\"yazi.preview-metadata\"]",
+            "directory preview shows its kind, mtime and permissions",
+            |v| {
+                let label = ui_text(v);
+                nodes(v).len() == 1 && label.contains("directory") && label.contains("drwx")
+            },
+        )?;
+        h.expect_ui(
+            "[data-role=\"yazi.preview-mtime\"]",
+            "directory preview shows its local modification time",
+            |v| nodes(v).len() == 1 && is_local_minute(&ui_text(v)),
+        )?;
         h.shot("10-folder-count-before-cap")?;
 
         h.case =
@@ -3232,9 +3261,15 @@ fn extended_preview_flow(h: &mut Harness) -> TestResult<()> {
     let preview_dir = h.path("previews");
     fs::create_dir_all(&preview_dir).map_err(|e| e.to_string())?;
 
-    let sample_pdf = fs::read("/usr/share/cups/data/default.pdf").unwrap_or_else(|_| {
+    let mut sample_pdf = fs::read("/usr/share/cups/data/default.pdf").unwrap_or_else(|_| {
         b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R/Resources<<>>>>endobj\nxref\n0 4\n0000000000 65535 f \n0000000010 00000 n \n0000000053 00000 n \n0000000102 00000 n \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n178\n%%EOF\n".to_vec()
     });
+    // Comment lines past %%EOF push the file over the old 1 MiB text-preview cap; poppler
+    // ignores them, so the cover must still render.
+    let padding = format!("%{}\n", "p".repeat(1022));
+    while sample_pdf.len() <= 1 << 20 {
+        sample_pdf.extend_from_slice(padding.as_bytes());
+    }
     fs::write(preview_dir.join("sample.pdf"), sample_pdf).map_err(|e| e.to_string())?;
     fs::write(
         preview_dir.join("scene.wrl"),

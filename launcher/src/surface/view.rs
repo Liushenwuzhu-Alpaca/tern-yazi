@@ -67,6 +67,31 @@ fn card(head: Vec<Span>, children: Vec<N>) -> ui::Card<Msg> {
     ui::card().head(head).children(children)
 }
 
+/// The preview's metadata line: kind, size, modification time and permissions.
+fn metadata(kind: String, hover: Option<&super::model::Hover>) -> N {
+    let size = hover.and_then(|hover| hover.size);
+    let mtime = hover.and_then(|hover| hover.mtime);
+    let permissions = format::permissions(hover.and_then(|hover| hover.permissions.as_deref()));
+    ui::row()
+        .key("metadata")
+        .role("yazi.preview-metadata")
+        .prop("gap", "xs")
+        .prop("wrap", true)
+        .children([
+            muted(kind),
+            ui::text(format::size(size)).role("yazi.preview-size").into(),
+            ui::text(format::mtime(mtime))
+                .role("yazi.preview-mtime")
+                .tone("muted")
+                .into(),
+            ui::text(permissions)
+                .role("yazi.preview-permissions")
+                .tone("muted")
+                .into(),
+        ])
+        .into()
+}
+
 fn button(key: &str, label: impl Into<N>, msg: Msg) -> N {
     ui::node("el")
         .prop("tag", "button")
@@ -554,32 +579,24 @@ impl Browser<'_> {
                         "muted",
                     ),
                 ];
-                match folder {
+                let meta = metadata("directory".to_owned(), focus.hovered);
+                let body = match folder {
                     Some(folder)
                         if count != Some(0) && !(count.is_none() && folder.files.is_empty()) =>
                     {
                         let first = folder.files.first().map(String::as_str);
-                        card(
-                            heading,
-                            vec![self.list(folder, lines, List::Child, first, selected)],
-                        )
+                        self.list(folder, lines, List::Child, first, selected)
                     }
-                    Some(_) if count == Some(0) => card(heading, vec![muted("(empty directory)")]),
-                    _ => card(
-                        heading,
-                        vec![muted("Waiting for Yazi directory preview...")],
-                    ),
-                }
+                    Some(_) if count == Some(0) => muted("(empty directory)"),
+                    _ => muted("Waiting for Yazi directory preview..."),
+                };
+                card(heading, vec![meta, body])
             }
             None => card(
                 vec![span(active, "strong")],
                 vec![muted("Waiting for Yazi file metadata...")],
             ),
             Some(false) => {
-                let size = focus.hovered.and_then(|hover| hover.size);
-                let permissions = format::permissions(
-                    focus.hovered.and_then(|hover| hover.permissions.as_deref()),
-                );
                 let (kind, content) = match self.frame.preview {
                     Some(Load::Ready(preview)) => {
                         (preview.kind(active), self.preview(preview, active, lines))
@@ -589,22 +606,7 @@ impl Browser<'_> {
                 card(
                     vec![span(active, "strong")],
                     vec![
-                        ui::row()
-                            .key("metadata")
-                            .role("yazi.preview-metadata")
-                            .prop("gap", "xs")
-                            .prop("wrap", true)
-                            .children([
-                                muted(kind),
-                                ui::text(format::size(size))
-                                    .role("yazi.preview-size")
-                                    .into(),
-                                ui::text(permissions)
-                                    .role("yazi.preview-permissions")
-                                    .tone("muted")
-                                    .into(),
-                            ])
-                            .into(),
+                        metadata(kind, focus.hovered),
                         ui::col()
                             .role("yazi.preview")
                             .prop("gap", "none")

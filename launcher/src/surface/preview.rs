@@ -19,6 +19,8 @@ pub(crate) const IMAGE_BYTES: u64 = 16 << 20;
 pub(crate) const MARKDOWN_BYTES: u64 = 1 << 20;
 pub(crate) const CODE_BYTES: u64 = 1 << 20;
 pub(crate) const MERMAID_BYTES: u64 = 256 << 10;
+/// PDF helpers stream the file and render only page 1, so the cap is far above text caps.
+pub(crate) const PDF_BYTES: u64 = 256 << 20;
 const ARCHIVE_LINES: usize = 50;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -80,9 +82,9 @@ impl Preview {
     }
 }
 
-/// Reads a whole regular, non-symlink file of at most `limit` bytes, without blocking on FIFOs
-/// or devices and without returning a truncated prefix when the file grows meanwhile.
-pub(crate) fn read_bounded(path: &str, limit: u64) -> io::Result<Vec<u8>> {
+/// Opens a regular, non-symlink file of at most `limit` bytes without blocking on FIFOs or
+/// devices; also returns its size.
+fn open_bounded(path: &str, limit: u64) -> io::Result<(File, u64)> {
     let name = cstr(OsStr::from_bytes(path.as_bytes()))?;
     let fd = unsafe {
         libc::open(
@@ -98,7 +100,14 @@ pub(crate) fn read_bounded(path: &str, limit: u64) -> io::Result<Vec<u8>> {
     if !meta.file_type().is_file() || meta.len() > limit {
         return Err(io::Error::other("not a regular file within the limit"));
     }
-    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    Ok((file, meta.len()))
+}
+
+/// Reads a whole regular, non-symlink file of at most `limit` bytes, without returning a
+/// truncated prefix when the file grows meanwhile.
+pub(crate) fn read_bounded(path: &str, limit: u64) -> io::Result<Vec<u8>> {
+    let (file, len) = open_bounded(path, limit)?;
+    let mut bytes = Vec::with_capacity(len as usize);
     file.take(limit + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {
         return Err(io::Error::other("file grew past the limit"));
@@ -154,9 +163,10 @@ fn archive(path: &str, ext: &str) -> Vec<String> {
 }
 
 fn pdf(path: &str) -> Preview {
-    // The same whole-file gate as text previews runs before any helper sees the file.
-    if read_bounded(path, CODE_BYTES).is_err() {
-        return Preview::Unavailable { limit: CODE_BYTES };
+    // Only regular files reach the helpers; they read the file themselves, so nothing is
+    // loaded here.
+    if open_bounded(path, PDF_BYTES).is_err() {
+        return Preview::Unavailable { limit: PDF_BYTES };
     }
     let meta = helper(&["pdfinfo", path], 1 << 20)
         .map(|bytes| {

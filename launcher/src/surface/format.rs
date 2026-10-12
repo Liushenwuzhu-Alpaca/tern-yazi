@@ -23,6 +23,26 @@ pub(crate) fn permissions(text: Option<&str>) -> &str {
     text.unwrap_or("-")
 }
 
+/// Modification time in local time as Yazi's status shows it, e.g. `2026-10-12 13:04`.
+pub(crate) fn mtime(seconds: Option<f64>) -> String {
+    let Some(seconds) = seconds.filter(|seconds| seconds.is_finite()) else {
+        return "-".to_owned();
+    };
+    let time = seconds.floor() as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&time, &mut tm) }.is_null() {
+        return "-".to_owned();
+    }
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min
+    )
+}
+
 /// Yazi's status coloring: type green, r yellow, w red, x/s/S/t/T cyan, -/? gray.
 pub(crate) fn permission_tone(c: char) -> &'static str {
     match c {
