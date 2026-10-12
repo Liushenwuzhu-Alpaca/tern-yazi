@@ -1524,10 +1524,12 @@ end })
             ui_text(v).contains(input)
         })?;
         self.key("Enter")?;
-        // Until Yazi acknowledges, the bar stays open and a following Escape would close it.
-        self.expect_ui("", "Yazi acknowledges the shell command", |v| {
-            ui_text(v).contains("Shell queued in Yazi")
-        })?;
+        // Submitting closes the line at once, as Yazi's input does.
+        self.expect_ui(
+            "[data-role=\"yazi.command-bubble.shell\"]",
+            "submitting closes the shell line",
+            |v| nodes(v).is_empty(),
+        )?;
         Ok(())
     }
 
