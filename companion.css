@@ -1,75 +1,85 @@
+/* The wrappers stand in for the region element and fill it. */
+[data-role^="yazi.theme."] {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    height: 100%;
+    min-height: 0;
+}
+
 /* The pane owns the height; only the directory lists and preview scroll. */
-.sf-main[data-surface="plugin.tern-yazi.companion"] {
+[data-role="yazi.main"] {
+    flex: 1 1 0;
     display: flex;
     flex-direction: column;
     min-height: 0;
     overflow: hidden;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.browser"] {
+[data-role="yazi.browser"] {
     flex: 1 1 0;
     min-height: 0;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.browser"] > * {
+[data-role="yazi.browser"] > * {
     flex-shrink: 0;
 }
 
 /* Each breadcrumb owns its hit target; the tail opens the directory editor. */
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-header"] {
+[data-role="yazi.path-header"] {
     align-self: stretch;
     min-width: 0;
     max-width: 100%;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-header"] > .sf-card-body {
+[data-role="yazi.path-header"] > .sf-card-body {
     padding: 6px 8px;
     min-width: 0;
     overflow: hidden;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-content"] {
+[data-role="yazi.path-content"] {
     min-width: 0;
     flex-wrap: nowrap;
     align-items: center;
     overflow: hidden;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-segment"] {
+[data-role="yazi.path-segment"] {
     min-width: 0;
     overflow: hidden;
     white-space: nowrap;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-segment"]:hover {
+[data-role="yazi.path-segment"]:hover {
     background: rgb(from var(--t1) r g b / 14%);
     color: var(--t1);
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-segment"] .sf-text {
+[data-role="yazi.path-segment"] .sf-text {
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-input"] {
+[data-role="yazi.path-input"] {
     flex: 1 1 0;
     min-width: 0;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-ancestors"] {
+[data-role="yazi.path-ancestors"] {
     max-height: 70vh;
     overflow-y: auto;
 }
 
-.sf-layer[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-ancestors"] {
+[data-role="yazi.layer"] [data-role="yazi.path-ancestors"] {
     pointer-events: auto;
     background: rgb(from var(--card) r g b / 100%);
     color: var(--t1);
 }
 
 /* Roles live on the native buttons, not on a non-interactive text wrapper. */
-[data-surface="plugin.tern-yazi.companion"] :is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]) {
+:is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]) {
     background: rgb(from var(--t1) r g b / 4%);
     border: 1px solid var(--l2);
     padding: 2px 8px;
@@ -77,30 +87,30 @@
     pointer-events: auto;
 }
 
-[data-surface="plugin.tern-yazi.companion"] :is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]) .sf-text {
+:is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]) .sf-text {
     color: inherit;
 }
 
-[data-surface="plugin.tern-yazi.companion"] :is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]):hover {
+:is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]):hover {
     background: rgb(from var(--t1) r g b / 20%);
     border-color: var(--t2);
     color: var(--t1);
 }
 
 /* Only active input parts receive chrome; the reserved row keeps its height. */
-.sf-main[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.input-row"] {
+[data-role="yazi.main"] [data-role="yazi.input-row"] {
     align-items: center;
     flex-wrap: nowrap;
     min-width: 0;
     gap: 6px;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"] :is([data-role="yazi.command-label"], [data-role="yazi.command-cancel"]) {
+[data-role="yazi.main"] :is([data-role="yazi.command-label"], [data-role="yazi.command-cancel"]) {
     flex: 0 0 auto;
     white-space: nowrap;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.command-bubble."] {
+[data-role="yazi.main"] [data-role^="yazi.command-bubble."] {
     display: flex;
     align-items: center;
     flex: 1 1 0;
@@ -117,7 +127,7 @@
     white-space: nowrap;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.command-bubble."] > .sf-t-strong {
+[data-role="yazi.main"] [data-role^="yazi.command-bubble."] > .sf-t-strong {
     flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
@@ -126,21 +136,21 @@
     font-weight: 400;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.command-bubble."] > :last-child {
+[data-role="yazi.main"] [data-role^="yazi.command-bubble."] > :last-child {
     flex: 0 0 auto;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.command-cancel"] {
+[data-role="yazi.main"] [data-role="yazi.command-cancel"] {
     pointer-events: auto;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.command-cancel"]:hover {
+[data-role="yazi.main"] [data-role="yazi.command-cancel"]:hover {
     background: rgb(from var(--t1) r g b / 20%);
     border-color: var(--t2);
     color: var(--t1);
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.columns"] {
+[data-role="yazi.columns"] {
     display: grid;
     grid-template-columns: minmax(0, 4fr) minmax(0, 9fr) minmax(0, 7fr);
     grid-template-rows: minmax(0, 1fr);
@@ -151,7 +161,7 @@
     min-width: 0;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.column."] {
+[data-role^="yazi.column."] {
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -159,8 +169,8 @@
     overflow: hidden;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.path-header"] > .sf-card-head,
-[data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.column."] > .sf-card-head {
+[data-role="yazi.path-header"] > .sf-card-head,
+[data-role^="yazi.column."] > .sf-card-head {
     display: block;
     flex-shrink: 0;
     min-width: 0;
@@ -169,7 +179,7 @@
     text-overflow: ellipsis;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.column."] > .sf-card-body {
+[data-role^="yazi.column."] > .sf-card-body {
     display: flex;
     flex-direction: column;
     flex: 1 1 0;
@@ -179,7 +189,7 @@
     overflow: hidden;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.column."] .sf-list {
+[data-role^="yazi.column."] .sf-list {
     display: flex;
     flex-direction: column;
     flex: 1 1 0;
@@ -188,7 +198,7 @@
 }
 
 /* Native list internals: retain selected-row reveal and contained wheel scrolling. */
-[data-surface="plugin.tern-yazi.companion"] [data-role^="yazi.column."] .sf-list-scroll.max {
+[data-role^="yazi.column."] .sf-list-scroll.max {
     flex: 1 1 0;
     min-height: 0;
     max-height: 100% !important;
@@ -196,7 +206,7 @@
     overflow-x: hidden;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.preview"] {
+[data-role="yazi.preview"] {
     flex: 1 1 0;
     min-height: 0;
     min-width: 0;
@@ -204,7 +214,7 @@
 }
 
 /* Metadata stays above the independent preview scroller. */
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.preview-metadata"] {
+[data-role="yazi.preview-metadata"] {
     flex: 0 0 auto;
     min-width: 0;
     column-gap: 10px;
@@ -212,16 +222,16 @@
 }
 
 /* The image node flexes from a zero basis, so its column must own the height. */
-[data-surface="plugin.tern-yazi.companion"] :is([data-role="yazi.image-preview"], [data-role="yazi.pdf-preview"]) {
+:is([data-role="yazi.image-preview"], [data-role="yazi.pdf-preview"]) {
     height: 100%;
     min-height: 0;
 }
 
-[data-surface="plugin.tern-yazi.companion"] :is([data-role="yazi.image-preview"], [data-role="yazi.pdf-preview"]) > .sf-text {
+:is([data-role="yazi.image-preview"], [data-role="yazi.pdf-preview"]) > .sf-text {
     flex-shrink: 0;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.image"] {
+[data-role="yazi.image"] {
     flex: 1 1 0;
     min-height: 0;
     min-width: 0;
@@ -230,8 +240,8 @@
 }
 
 /* Natural dimensions are inline; contain both raster and SVG in the allotted box. */
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.image"] > .sf-img-frame,
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.image"] > .sf-img-svg {
+[data-role="yazi.image"] > .sf-img-frame,
+[data-role="yazi.image"] > .sf-img-svg {
     width: 100% !important;
     height: 100% !important;
     max-width: 100%;
@@ -239,15 +249,15 @@
     object-fit: contain;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.status"] {
+[data-role="yazi.status"] {
     min-width: 0;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.status"] > * {
+[data-role="yazi.status"] > * {
     flex-shrink: 0;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.status-name"] {
+[data-role="yazi.status-name"] {
     flex: 1 1 0;
     min-width: 0;
     overflow: hidden;
@@ -255,19 +265,19 @@
     text-overflow: ellipsis;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.status-right"] {
+[data-role="yazi.status-right"] {
     flex: 0 0 auto;
     column-gap: 10px;
     white-space: nowrap;
     align-items: center;
 }
 
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.status-size"] {
+[data-role="yazi.status-size"] {
     white-space: nowrap;
 }
 
 /* Yazi-style capsules: [mode|size] on the left, [percent|position] on the right. */
-[data-surface="plugin.tern-yazi.companion"] :is([data-role^="yazi.status-left"], [data-role^="yazi.status-progress"]) {
+:is([data-role^="yazi.status-left"], [data-role^="yazi.status-progress"]) {
     --yazi-pill: var(--accent);
     flex: 0 0 auto;
     align-items: stretch;
@@ -278,36 +288,36 @@
     line-height: 18px;
 }
 
-[data-surface="plugin.tern-yazi.companion"] :is([data-role="yazi.status-left.warn"], [data-role="yazi.status-progress.warn"]) {
+:is([data-role="yazi.status-left.warn"], [data-role="yazi.status-progress.warn"]) {
     --yazi-pill: var(--warn);
 }
 
-[data-surface="plugin.tern-yazi.companion"] :is([data-role^="yazi.status-left"], [data-role^="yazi.status-progress"]) > .sf-text {
+:is([data-role^="yazi.status-left"], [data-role^="yazi.status-progress"]) > .sf-text {
     padding: 0 8px;
 }
 
 /* Main segments are filled with the mode color; alternate segments are tinted. */
-[data-surface="plugin.tern-yazi.companion"] :is([data-role="yazi.status-mode"], [data-role="yazi.status-position"]) {
+:is([data-role="yazi.status-mode"], [data-role="yazi.status-position"]) {
     background: var(--yazi-pill);
     color: var(--card);
     font-weight: 700;
 }
 
-[data-surface="plugin.tern-yazi.companion"] :is([data-role="yazi.status-size"], [data-role="yazi.status-percent"]) {
+:is([data-role="yazi.status-size"], [data-role="yazi.status-percent"]) {
     background: rgb(from var(--yazi-pill) r g b / 16%);
     color: var(--yazi-pill);
 }
 
 /* Tabs reuse the footer's capsule language: the active tab is filled, others tinted.
    Theme files restyle both roles; the badge tone only remains as a fallback. */
-.sf-main[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.tab-bar"] {
+[data-role="yazi.main"] [data-role="yazi.tab-bar"] {
     flex: 0 0 auto;
     align-items: center;
     flex-wrap: nowrap;
     overflow: hidden;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"] :is([data-role="yazi.tab"], [data-role="yazi.tab-active"]) {
+[data-role="yazi.main"] :is([data-role="yazi.tab"], [data-role="yazi.tab-active"]) {
     flex: 0 1 auto;
     min-width: 0;
     max-width: 180px;
@@ -327,20 +337,33 @@
     text-overflow: ellipsis;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.tab-active"] {
+[data-role="yazi.main"] [data-role="yazi.tab-active"] {
     background: var(--accent);
     color: var(--card);
     font-weight: 700;
 }
 
 /* Ordinary rwx stays lowercase without corrupting special-bit S/T semantics. */
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.status-permissions"],
-[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.preview-permissions"] {
+[data-role="yazi.status-permissions"],
+[data-role="yazi.preview-permissions"] {
     text-transform: none;
 }
 
+/* The picker floats over the browser it previews, so it stays opaque. */
+[data-role="yazi.layer"] [data-role="yazi.theme-picker"] {
+    background: rgb(from var(--card) r g b / 100%);
+    color: var(--t1);
+    border: 1px solid var(--l3);
+    border-radius: var(--r-card);
+    padding: 12px;
+    pointer-events: auto;
+    width: min(640px, 100%);
+    box-sizing: border-box;
+    margin: 48px auto 0;
+}
+
 /* Confirmation must obscure the underlying file rows without restyling them. */
-.sf-layer[data-surface="plugin.tern-yazi.companion"] [data-role="yazi.trash-confirm"] {
+[data-role="yazi.layer"] [data-role="yazi.trash-confirm"] {
     background: rgb(from var(--card) r g b / 100%);
     color: var(--t1);
     border: 1px solid var(--l3);
@@ -349,7 +372,7 @@
     pointer-events: auto;
 }
 
-.sf-layer[data-surface="plugin.tern-yazi.companion"] [data-id="layer.trash.controls"] {
+[data-role="yazi.layer"] [data-id="layer.trash.controls"] {
     gap: 12px;
     margin-top: 12px;
     padding-top: 8px;

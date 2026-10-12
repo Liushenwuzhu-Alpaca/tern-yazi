@@ -21,12 +21,13 @@ const ROWS: &str = "[data-role=\"yazi.column.current\"] .sf-item:is([data-item],
 const PARENT_ROWS: &str = "[data-role=\"yazi.column.parent\"] .sf-item:is([data-item],[data-id])";
 const CHILD_ROWS: &str = "[data-role=\"yazi.column.preview\"] .sf-item:is([data-item],[data-id])";
 const PREVIEW: &str = "[data-role=\"yazi.preview\"]";
+const SURFACE_BROWSER: &str = "[data-role=\"yazi.browser\"]";
 
 fn row_selector(scope: &str, name: &str) -> String {
     let list = match scope {
-        ROWS => "main.browser.columns.current.files_list",
-        PARENT_ROWS => "main.browser.columns.parent.parent_list",
-        CHILD_ROWS => "main.browser.columns.preview.child_list",
+        ROWS => "main.theme.region.browser.columns.current.files_list",
+        PARENT_ROWS => "main.theme.region.browser.columns.parent.parent_list",
+        CHILD_ROWS => "main.theme.region.browser.columns.preview.child_list",
         _ => unreachable!("Unknown authoritative list scope"),
     };
     let id = serde_json::to_string(&format!("{list}.{name}")).unwrap();
@@ -221,36 +222,19 @@ fn tty_size(program: Process) -> TestResult<(u16, u16)> {
     Ok((size.ws_row, size.ws_col))
 }
 
-fn replace_layout_pane(value: &Value, from: u64, to: u64) -> Value {
-    match value {
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .map(|v| replace_layout_pane(v, from, to))
-                .collect(),
-        ),
-        Value::Object(fields) => Value::Object(
-            fields
-                .iter()
-                .map(|(key, value)| {
-                    let value = if (key == "pane" || key == "over") && value.as_u64() == Some(from) {
-                        json!(to)
-                    } else {
-                        replace_layout_pane(value, from, to)
-                    };
-                    (key.clone(), value)
-                })
-                .collect(),
-        ),
-        _ => value.clone(),
-    }
-}
-
 fn pane_info(state: &Value, pane: u64) -> Option<&Value> {
     state["panes"]
         .as_array()?
         .iter()
         .find(|info| info["pane"].as_u64() == Some(pane))
+}
+
+fn parked_panes(state: &Value) -> impl Iterator<Item = &Value> {
+    state["panes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|info| info["parked"] == true)
 }
 
 fn pane_ids(state: &Value) -> BTreeSet<u64> {
@@ -345,9 +329,6 @@ impl Harness {
     }
     fn inbox(&self) -> PathBuf {
         self.path("runtime/tern-yazi")
-    }
-    fn state_path(&self, client: &Client) -> PathBuf {
-        self.inbox().join(format!("state-{}.json", client.cid))
     }
     fn snapshot(&self, client: &Client) -> Value {
         self.snapshot_id(&client.cid)
@@ -1214,6 +1195,36 @@ end })
             .collect()
     }
 
+    /// Opens a new tab running the private shell in `cwd`; waits for its focused prompt.
+    fn shell_tab(&mut self, cwd: &Path) -> TestResult<u64> {
+        let created = self.cli(&[
+            "new",
+            "tab",
+            "--json",
+            "--cwd",
+            &text(cwd),
+            "--",
+            &text(&self.path("bin/shell")),
+        ])?;
+        let created: Value = serde_json::from_str(&created).map_err(|e| e.to_string())?;
+        let owner = created["block"]
+            .as_u64()
+            .ok_or("New tab returned no shell block")?;
+        self.focus(owner)?;
+        self.wait("returned shell block is the focused real pane at its prompt", |h| {
+            let state = h.ctl("state", &[])?;
+            let layout = h.layout_state()?;
+            Ok((state["focused"]["id"].as_u64() == Some(owner)
+                && state["focused"]["cwd"] == text(cwd)
+                && layout["focused"].as_u64() == Some(owner)
+                && pane_info(&layout, owner).is_some_and(|info| {
+                    info["at_prompt"] == true && info["parked"] != true
+                }))
+            .then_some(()))
+        })?;
+        Ok(owner)
+    }
+
     fn launch(&mut self, cwd: PathBuf, new_tab: bool) -> TestResult<Client> {
         self.launch_with_config(cwd, new_tab, self.path("yazi"))
     }
@@ -1225,32 +1236,7 @@ end })
         config: PathBuf,
     ) -> TestResult<Client> {
         let owner = if new_tab {
-            let created = self.cli(&[
-                "new",
-                "tab",
-                "--json",
-                "--cwd",
-                &text(&cwd),
-                "--",
-                &text(&self.path("bin/shell")),
-            ])?;
-            let created: Value = serde_json::from_str(&created).map_err(|e| e.to_string())?;
-            let owner = created["block"]
-                .as_u64()
-                .ok_or("New tab returned no shell block")?;
-            self.focus(owner)?;
-            self.wait("returned shell block is the focused real pane at its prompt", |h| {
-                let state = h.ctl("state", &[])?;
-                let layout = h.layout_state()?;
-                Ok((state["focused"]["id"].as_u64() == Some(owner)
-                    && state["focused"]["cwd"] == text(&cwd)
-                    && layout["focused"].as_u64() == Some(owner)
-                    && pane_info(&layout, owner).is_some_and(|info| {
-                        info["at_prompt"] == true && info["parked"] != true
-                    }))
-                .then_some(()))
-            })?;
-            owner
+            self.shell_tab(&cwd)?
         } else {
             self.ctl("state", &[])?["focused"]["id"]
                 .as_u64()
@@ -1279,6 +1265,12 @@ end })
         })?;
         self.shell_prompt(owner)?;
         let before = self.pid_markers();
+        let known: BTreeSet<_> = fs::read_dir(self.inbox())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
         let line = format!(
             "cd {} && YAZI_CONFIG_HOME={} yazi {}",
             quote(text(&cwd)),
@@ -1297,109 +1289,141 @@ end })
             Ok(pid.and_then(process).map(|(p, _, _)| p))
         })?;
         self.owned.insert(supervisor);
-        let client = self.wait(
-            "cold native block with real snapshot and live lease (read-only startup observations)",
-            |h| {
-                h.startup_panes(&original_panes, None)?;
-                let entries = fs::read_dir(h.inbox()).map_err(|e| e.to_string())?;
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if !supervisor.alive() {
-                        return Err(format!(
-                            "Managed supervisor exited before attachment; owner output: {}",
-                            h.capture(owner)?
-                        ));
-                    }
-                    let Some(cid) = name
-                        .strip_prefix("managed-")
-                        .and_then(|s| s.strip_suffix(".json"))
-                    else {
-                        continue;
-                    };
-                    let Some(health) = read_json(&entry.path()) else {
-                        continue;
-                    };
-                    if health["owner_pane"].as_u64() != Some(owner) {
-                        continue;
-                    }
-                    let token = health["token"]
-                        .as_str()
-                        .ok_or("Missing health identity")?
-                        .to_owned();
-                    let lease = fs::read_to_string(h.inbox().join(format!("managed-{cid}.lease")))
-                        .map_err(|e| e.to_string())?;
-                    let parts: Vec<_> = lease.split_whitespace().collect();
-                    if parts.len() < 5 || parts[0] != token {
-                        continue;
-                    }
-                    let pane = parts[1].parse::<u64>().map_err(|e| e.to_string())?;
-                    let snapshot = h.snapshot_id(cid);
-                    if snapshot["cwd"] != text(&cwd) {
-                        continue;
-                    }
-                    let backend = descendants(supervisor)
-                        .into_iter()
-                        .find(|p| {
-                            fs::read_link(format!("/proc/{}/exe", p.pid))
-                                .is_ok_and(|path| path == Path::new("/usr/bin/yazi"))
-                        })
-                        .ok_or("Real Yazi child not yet observable")?;
-                    return Ok(Some(Client {
-                        cid: cid.to_owned(),
-                        token,
-                        owner,
-                        pane,
-                        supervisor,
-                        backend,
-                        cwd: cwd.clone(),
-                        nonce: parts[4].to_owned(),
-                        owner_shell: Some(owner_shell),
-                        original_tab: Some(original_tab),
-                        original_layout: original_layout.clone(),
-                        original_panes: original_panes.clone(),
-                    }));
+        let client = self.wait("real Yazi publishes its first snapshot to the surface supervisor", |h| {
+            if !supervisor.alive() {
+                return Err(format!(
+                    "Managed supervisor exited before its first snapshot; owner output: {}",
+                    h.capture(owner)?
+                ));
+            }
+            let entries = fs::read_dir(h.inbox()).map_err(|e| e.to_string())?;
+            for entry in entries.flatten() {
+                if known.contains(&entry.file_name()) {
+                    continue;
                 }
-                Ok(None)
-            },
-        )?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let Some(cid) = name.strip_prefix("state-").and_then(|s| s.strip_suffix(".json"))
+                else {
+                    continue;
+                };
+                if h.snapshot_id(cid)["cwd"] != text(&cwd) {
+                    continue;
+                }
+                let Some(backend) = descendants(supervisor).into_iter().find(|p| {
+                    fs::read_link(format!("/proc/{}/exe", p.pid))
+                        .is_ok_and(|path| path == Path::new("/usr/bin/yazi"))
+                }) else {
+                    continue;
+                };
+                return Ok(Some(Client {
+                    cid: cid.to_owned(),
+                    token: String::new(),
+                    owner,
+                    pane: owner,
+                    supervisor,
+                    backend,
+                    cwd: cwd.clone(),
+                    nonce: String::new(),
+                    owner_shell: Some(owner_shell),
+                    original_tab: Some(original_tab),
+                    original_layout: original_layout.clone(),
+                    original_panes: original_panes.clone(),
+                }));
+            }
+            Ok(None)
+        })?;
         self.owned.extend(descendants(supervisor));
         self.clients.push(client.clone());
-        self.wait("focused native Companion rather than ANSI Yazi", |h| {
-            let state = h.ctl("state", &[])?;
-            Ok((state["focused"]["id"].as_u64() == Some(client.pane)
-                && state["focused"]["label"]
-                    .as_str()
-                    .is_some_and(|s| s.starts_with("Companion")))
-            .then_some(()))
+        self.expect_ui(ROWS, "the shell pane draws the browser on its program surface", |value| {
+            !nodes(value).is_empty()
         })?;
-        self.wait("parked original owner and native block occupy exactly the original visual slot", |h| {
+        self.wait("the surface replaces nothing: same panes, layout and focus, nothing parked", |h| {
             let state = h.layout_state()?;
             let owner = pane_info(&state, client.owner).ok_or("Managed launch destroyed its owner")?;
-            let native = pane_info(&state, client.pane).ok_or("Native pane is not observable")?;
             let layout = tab_layout(&state, original_tab).ok_or("Managed launch lost original tab")?;
-            let mut expected_panes = client.original_panes.clone();
-            expected_panes.insert(client.pane);
-            let failing = if client.pane == client.owner { "owner equals native pane" }
-                else if owner["parked"] != true { "owner not parked" }
-                else if !owner["tab"].is_null() { "owner still owns a tab" }
-                else if native["parked"] == true { "native pane parked" }
-                else if native["tab"].as_u64() != Some(original_tab) { "native pane in wrong tab" }
-                else if pane_ids(&state) != expected_panes { "pane set changed" }
-                else if state["tabs"].as_array().map_or(0, Vec::len) != original["tabs"].as_array().map_or(0, Vec::len) { "tab count changed" }
-                else if layout["root"] != replace_layout_pane(&original_layout["root"], client.owner, client.pane) { "root tree changed" }
-                else if layout["floats"] != replace_layout_pane(&original_layout["floats"], client.owner, client.pane) { "float presentation changed" }
-                else if native["floating"] != pane_info(&original, client.owner).ok_or("Original owner has no pane metadata")?["floating"] { "native floating flag differs from original owner" }
-                else if layout["zoomed"] != original_layout["zoomed"] { "zoom changed" }
+            let failing = if owner["parked"] == true { "owner parked" }
+                else if owner["tab"].as_u64() != Some(original_tab) { "owner left its tab" }
+                else if pane_ids(&state) != client.original_panes { "pane set changed" }
+                else if layout["root"] != client.original_layout["root"] { "root tree changed" }
+                else if layout["floats"] != client.original_layout["floats"] { "floats changed" }
+                else if state["focused"].as_u64() != Some(client.owner) { "focus left the owner" }
+                else if parked_panes(&state).next().is_some() { "a pane is parked" }
+                else if !nodes(&h.tree(".pk-pile")?).is_empty() { "parked pile drawn" }
                 else { "" };
             if !failing.is_empty() {
-                return Err(format!("Managed launch slot violation ({failing}): {state}; original {original}"));
+                return Err(format!("Surface launch changed the layout ({failing}): {state}; original {original}"));
             }
             Ok(Some(()))
         })?;
-        self.expect_ui(ROWS, "actual native file rows", |value| {
-            !nodes(value).is_empty()
-        })?;
         Ok(client)
+    }
+
+    /// After the surface closes: the same Bash is back at its prompt in the untouched layout.
+    fn prompt_returned(&mut self, client: &Client) -> TestResult<()> {
+        self.wait("owner shell is back at its prompt with no surface and nothing parked", |h| {
+            let state = h.layout_state()?;
+            let owner = pane_info(&state, client.owner).ok_or("Original shell pane vanished")?;
+            if owner["parked"] == true || owner["at_prompt"] != true {
+                return Err(format!("owner not at its prompt: {owner}"));
+            }
+            let tab = client.original_tab.ok_or("Managed owner had no original tab")?;
+            let layout = tab_layout(&state, tab).ok_or("Original tab disappeared")?;
+            if owner["tab"].as_u64() != Some(tab) || layout["root"] != client.original_layout["root"] {
+                return Err(format!("layout changed: {layout}; original {}", client.original_layout));
+            }
+            if parked_panes(&state).next().is_some() || !nodes(&h.tree(".pk-pile")?).is_empty() {
+                return Err(format!("parked panes remain: {state}"));
+            }
+            if !nodes(&h.tree(SURFACE_BROWSER)?).is_empty() {
+                return Err("program surface still drawn".into());
+            }
+            Ok(Some(()))
+        })?;
+        let marker = self.path(&format!("shell-return-{}.txt", client.cid));
+        self.cli(&[
+            "run",
+            &client.owner.to_string(),
+            &format!("printf '%s\\n' \"$$\" > {}", quote(text(&marker))),
+        ])?;
+        self.wait("the original Bash executes another real command", |_| {
+            Ok(fs::read_to_string(&marker)
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+                .filter(|pid| client.owner_shell.is_some_and(|shell| shell.pid == *pid))
+                .map(|_| ()))
+        })
+    }
+
+    /// The Yazi PTY follows the pane's tty size; both processes stay alive meanwhile.
+    fn settled(&mut self, client: &Client, duration: Duration) -> TestResult<(u16, u16)> {
+        let mut stable = None;
+        let size = self.wait("Yazi's PTY settles at the surface pane's size", |_| {
+            let pane = tty_size(client.supervisor)?;
+            if tty_size(client.backend)? != pane {
+                stable = None;
+                return Ok(None);
+            }
+            match stable {
+                Some((previous, since)) if previous == pane => {
+                    Ok((Instant::now().duration_since(since) >= Duration::from_millis(600)).then_some(pane))
+                }
+                _ => {
+                    stable = Some((pane, Instant::now()));
+                    Ok(None)
+                }
+            }
+        })?;
+        let begin = Instant::now();
+        while begin.elapsed() < duration {
+            if !client.supervisor.alive() || !client.backend.alive() {
+                return Err("A real surface process exited while idle".into());
+            }
+            if tty_size(client.backend)? != size {
+                return Err(format!("Idle PTY size changed from {size:?}"));
+            }
+            thread::sleep(POLL);
+        }
+        Ok(size)
     }
 
     fn standalone(
@@ -1734,6 +1758,16 @@ end })
         self.ctl("shot", &[name]).map(|_| ())
     }
 
+    /// Takes a screenshot and copies the PNG out of the artifact root into `dir`.
+    fn keep_shot(&self, name: &str, dir: &Path) -> TestResult<PathBuf> {
+        let shot = self.ctl("shot", &[name])?;
+        let png = shot["png"].as_str().ok_or_else(|| format!("Screenshot has no PNG: {shot}"))?;
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        let kept = dir.join(format!("{name}.png"));
+        fs::copy(self.root.join(png), &kept).map_err(|e| e.to_string())?;
+        Ok(kept)
+    }
+
 
     fn opened(&mut self, path: &Path) -> TestResult<u64> {
         self.wait(
@@ -1952,10 +1986,10 @@ impl Drop for Harness {
 }
 
 fn interaction_flow(h: &mut Harness) -> TestResult<()> {
-    h.case = "cold startup and idle lease";
+    h.case = "cold startup and idle PTY size";
     let first = h.launch(h.path("files"), false)?;
-    h.idle(&first, Duration::from_secs(7))?;
-    h.expect_ui(ROWS, "native block stays interactive after idle", |v| {
+    h.settled(&first, Duration::from_secs(7))?;
+    h.expect_ui(ROWS, "the surface stays interactive after idle", |v| {
         !nodes(v).is_empty()
     })?;
     h.shot("01-cold-native")?;
@@ -1979,7 +2013,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         .first()
         .and_then(|n| n["rect"][1].as_f64())
         .ok_or("No visible current-column geometry")?;
-    h.key(":")?;
+    h.key(";")?;
     h.expect_ui(
         "[data-role=\"yazi.command-bubble.shell\"]",
         "shell editor occupies the reserved command row",
@@ -2408,7 +2442,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         !names(s, "files").contains(&".hidden.txt".into())
     })?;
 
-    h.case = "Tern owns real text, Markdown and image previews and file opens";
+    h.case = "Tern owns real text, Markdown and image previews";
     h.key("Escape")?;
     h.expect_state(
         &first,
@@ -2453,6 +2487,157 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         },
     )?;
     h.shot("02-native-image-preview")?;
+    h.case = "semicolon background has real delayed effects without terminal";
+    let marker = h.path("background.txt");
+    let script = format!(
+        "sleep 0.3; printf 'BACKGROUND_REAL_EFFECT\\n' > {}",
+        quote(text(&marker))
+    );
+    let terminal_count = h.ctl("state", &[])?["panes"].as_array().map_or(0, Vec::len);
+    h.shell(&first, &script, true)?;
+    h.wait("real background command writes its delayed marker", |h| {
+        let state = h.ctl("state", &[])?;
+        if state["focused"]["id"].as_u64() != Some(first.pane) {
+            return Err("Background command stole focus into a terminal".into());
+        }
+        if state["panes"].as_array().map_or(0, Vec::len) != terminal_count {
+            return Err("Background command created an unexpected terminal pane".into());
+        }
+        Ok(fs::read_to_string(&marker)
+            .ok()
+            .filter(|s| s == "BACKGROUND_REAL_EFFECT\n")
+            .map(|_| ()))
+    })?;
+
+    shortcut_flow(h, &first)?;
+
+    h.case = "Trash exact native selection, Escape cancellation, confirmed disposable paths";
+    h.click_file(&first, "trash-a.txt")?;
+    h.key("Space")?;
+    h.expect_state(&first, "first disposable file selected", |s| {
+        selected(s).contains(&text(&first.cwd.join("trash-a.txt")))
+    })?;
+    h.click_file(&first, "trash-b.txt")?;
+    h.key("Space")?;
+    let paths = BTreeSet::from([
+        text(&first.cwd.join("trash-a.txt")),
+        text(&first.cwd.join("trash-b.txt")),
+    ]);
+    h.expect_state(&first, "two exact disposable paths selected", |s| {
+        selected(s) == paths
+    })?;
+    h.key("d")?;
+    h.expect_ui(
+        "[data-role=\"yazi.trash-confirm\"]",
+        "confirmation shows both exact selected paths",
+        |v| paths.iter().all(|path| ui_text(v).contains(path)),
+    )?;
+    h.shot("07-exact-trash-confirmation")?;
+    h.key("Escape")?;
+    h.expect_ui(
+        "[data-role=\"yazi.trash-confirm\"]",
+        "Escape dismisses destructive confirmation",
+        |v| nodes(v).is_empty(),
+    )?;
+    h.expect_state(&first, "cancel leaves native selection unchanged", |s| {
+        selected(s) == paths
+    })?;
+    for path in &paths {
+        if !Path::new(path).is_file() {
+            return Err(format!("Trash cancellation removed fixture {path}"));
+        }
+    }
+    h.key("d")?;
+    h.expect_ui(
+        "[data-role=\"yazi.trash-confirm\"]",
+        "confirmed paths remain exact",
+        |v| paths.iter().all(|path| ui_text(v).contains(path)),
+    )?;
+    h.key("Enter")?;
+    h.wait(
+        "only confirmed disposable paths move to isolated XDG Trash",
+        |h| {
+            let infos = h.path("data/Trash/info");
+            let mut originals = BTreeSet::new();
+            if let Ok(entries) = fs::read_dir(infos) {
+                for entry in entries.flatten() {
+                    if let Ok(contents) = fs::read_to_string(entry.path()) {
+                        for line in contents.lines() {
+                            if let Some(path) = line.strip_prefix("Path=") {
+                                originals.insert(path.to_owned());
+                            }
+                        }
+                    }
+                }
+            }
+            if paths
+                .iter()
+                .all(|p| !Path::new(p).exists() && originals.contains(p))
+                && first.cwd.join("alpha.txt").is_file()
+                && first.cwd.join("beta.txt").is_file()
+            {
+                Ok(Some(()))
+            } else {
+                Err(format!(
+                    "trash original paths {originals:?}, expected {paths:?}"
+                ))
+            }
+        },
+    )?;
+
+    h.case = "two clients preserve independent cwd and hover";
+    let second = h.launch(h.path("other"), true)?;
+    if first.cid == second.cid || first.pane == second.pane {
+        return Err("Two actual managed launches reused a pinned identity".into());
+    }
+    h.click_file(&second, "other.txt")?;
+    let second_before = h.snapshot(&second);
+    h.focus(first.pane)?;
+    h.click_file(&first, "beta.txt")?;
+    h.expect_state(&second, "other client cwd and hover do not change", |s| {
+        s["cwd"] == second_before["cwd"] && hover(s) == hover(&second_before)
+    })?;
+    h.focus(second.pane)?;
+    h.expect_ui(
+        ROWS,
+        "second client does not render first client files",
+        |v| ui_text(v).contains("other.txt") && !ui_text(v).contains("beta.txt"),
+    )?;
+
+    h.case = "q cleans only the owning real backend process group";
+    h.focus(first.pane)?;
+    let watched = descendants(first.supervisor);
+    h.owned.extend(watched.iter().copied());
+    h.key("q")?;
+    h.removed(&first, &watched)?;
+    h.prompt_returned(&first)?;
+    if !second.supervisor.alive() || !second.backend.alive() {
+        return Err("Closing first client killed the unrelated second client".into());
+    }
+    h.focus(second.pane)?;
+    h.expect_ui(ROWS, "second client survives first client q", |v| {
+        ui_text(v).contains("other.txt")
+    })?;
+
+    h.case = "closing the surface pane cleans its own backend";
+    let watched = descendants(second.supervisor);
+    h.owned.extend(watched.iter().copied());
+    h.cli(&["close", &second.pane.to_string()])?;
+    h.removed(&second, &watched)?;
+
+    h.case = "backend crash closes the surface and returns the shell prompt";
+    let fourth = h.launch(h.path("other"), true)?;
+    let watched = descendants(fourth.supervisor);
+    h.owned.extend(watched.iter().copied());
+    fourth.backend.signal(libc::SIGKILL);
+    h.removed(&fourth, &watched)?;
+    h.prompt_returned(&fourth)
+}
+
+/// Phase 2: window-level features of the plugin block (Tern file opens, native shell
+/// terminals, plugin reload) that the program surface does not provide yet.
+fn window_flow(h: &mut Harness) -> TestResult<()> {
+    let first = h.launch(h.path("files"), true)?;
     h.click_file(&first, "alpha.txt")?;
     h.key("o")?;
     let file = h.opened(&first.cwd.join("alpha.txt"))?;
@@ -2622,104 +2807,6 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         selected(s).is_empty()
     })?;
 
-    h.case = "semicolon background has real delayed effects without terminal";
-    let marker = h.path("background.txt");
-    let script = format!(
-        "sleep 0.3; printf 'BACKGROUND_REAL_EFFECT\\n' > {}",
-        quote(text(&marker))
-    );
-    let terminal_count = h.ctl("state", &[])?["panes"].as_array().map_or(0, Vec::len);
-    h.shell(&first, &script, true)?;
-    h.wait("real background command writes its delayed marker", |h| {
-        let state = h.ctl("state", &[])?;
-        if state["focused"]["id"].as_u64() != Some(first.pane) {
-            return Err("Background command stole focus into a terminal".into());
-        }
-        if state["panes"].as_array().map_or(0, Vec::len) != terminal_count {
-            return Err("Background command created an unexpected terminal pane".into());
-        }
-        Ok(fs::read_to_string(&marker)
-            .ok()
-            .filter(|s| s == "BACKGROUND_REAL_EFFECT\n")
-            .map(|_| ()))
-    })?;
-
-    shortcut_flow(h, &first)?;
-
-    h.case = "Trash exact native selection, Escape cancellation, confirmed disposable paths";
-    h.click_file(&first, "trash-a.txt")?;
-    h.key("Space")?;
-    h.expect_state(&first, "first disposable file selected", |s| {
-        selected(s).contains(&text(&first.cwd.join("trash-a.txt")))
-    })?;
-    h.click_file(&first, "trash-b.txt")?;
-    h.key("Space")?;
-    let paths = BTreeSet::from([
-        text(&first.cwd.join("trash-a.txt")),
-        text(&first.cwd.join("trash-b.txt")),
-    ]);
-    h.expect_state(&first, "two exact disposable paths selected", |s| {
-        selected(s) == paths
-    })?;
-    h.key("d")?;
-    h.expect_ui(
-        "[data-role=\"yazi.trash-confirm\"]",
-        "confirmation shows both exact selected paths",
-        |v| paths.iter().all(|path| ui_text(v).contains(path)),
-    )?;
-    h.shot("07-exact-trash-confirmation")?;
-    h.key("Escape")?;
-    h.expect_ui(
-        "[data-role=\"yazi.trash-confirm\"]",
-        "Escape dismisses destructive confirmation",
-        |v| nodes(v).is_empty(),
-    )?;
-    h.expect_state(&first, "cancel leaves native selection unchanged", |s| {
-        selected(s) == paths
-    })?;
-    for path in &paths {
-        if !Path::new(path).is_file() {
-            return Err(format!("Trash cancellation removed fixture {path}"));
-        }
-    }
-    h.key("d")?;
-    h.expect_ui(
-        "[data-role=\"yazi.trash-confirm\"]",
-        "confirmed paths remain exact",
-        |v| paths.iter().all(|path| ui_text(v).contains(path)),
-    )?;
-    h.key("Enter")?;
-    h.wait(
-        "only confirmed disposable paths move to isolated XDG Trash",
-        |h| {
-            let infos = h.path("data/Trash/info");
-            let mut originals = BTreeSet::new();
-            if let Ok(entries) = fs::read_dir(infos) {
-                for entry in entries.flatten() {
-                    if let Ok(contents) = fs::read_to_string(entry.path()) {
-                        for line in contents.lines() {
-                            if let Some(path) = line.strip_prefix("Path=") {
-                                originals.insert(path.to_owned());
-                            }
-                        }
-                    }
-                }
-            }
-            if paths
-                .iter()
-                .all(|p| !Path::new(p).exists() && originals.contains(p))
-                && first.cwd.join("alpha.txt").is_file()
-                && first.cwd.join("beta.txt").is_file()
-            {
-                Ok(Some(()))
-            } else {
-                Err(format!(
-                    "trash original paths {originals:?}, expected {paths:?}"
-                ))
-            }
-        },
-    )?;
-
     h.case =
         "plugin reload preserves pinned client token pane and never duplicates native terminal";
     h.click_file(&first, "alpha.txt")?;
@@ -2753,47 +2840,6 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     h.dismiss_shell(&first, terminal)?;
     h.idle(&first, Duration::from_secs(4))?;
 
-    h.case = "two clients preserve independent cwd and hover";
-    let second = h.launch(h.path("other"), true)?;
-    if first.cid == second.cid || first.token == second.token || first.pane == second.pane {
-        return Err("Two actual managed launches reused a pinned identity".into());
-    }
-    h.click_file(&second, "other.txt")?;
-    let second_before = h.snapshot(&second);
-    h.focus(first.pane)?;
-    h.click_file(&first, "beta.txt")?;
-    h.expect_state(&second, "other client cwd and hover do not change", |s| {
-        s["cwd"] == second_before["cwd"] && hover(s) == hover(&second_before)
-    })?;
-    h.focus(second.pane)?;
-    h.expect_ui(
-        ROWS,
-        "second client does not render first client files",
-        |v| ui_text(v).contains("other.txt") && !ui_text(v).contains("beta.txt"),
-    )?;
-
-    h.case = "q cleans only the owning real backend process group";
-    h.focus(first.pane)?;
-    let watched = descendants(first.supervisor);
-    h.owned.extend(watched.iter().copied());
-    h.key("q")?;
-    h.removed(&first, &watched)?;
-    h.restored(&first, true, Some(first.owner))?;
-    if !second.supervisor.alive() || !second.backend.alive() {
-        return Err("Closing first client killed the unrelated second client".into());
-    }
-    h.focus(second.pane)?;
-    h.expect_ui(ROWS, "second client survives first client q", |v| {
-        ui_text(v).contains("other.txt")
-    })?;
-
-    h.case = "native pane close cleans its own backend";
-    let watched = descendants(second.supervisor);
-    h.owned.extend(watched.iter().copied());
-    h.cli(&["close", &second.pane.to_string()])?;
-    h.removed(&second, &watched)?;
-    h.restored(&second, false, None)?;
-
     h.case = "owner close terminates live native command children and Yazi group";
     let third = h.launch(h.path("files"), true)?;
     let child_marker = h.path("native-child.pid");
@@ -2821,48 +2867,6 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         .then_some(()))
     })?;
 
-    h.case = "backend crash creates offline surface; q and reload never recreate controls";
-    let fourth = h.launch(h.path("other"), true)?;
-    let watched = descendants(fourth.supervisor);
-    h.owned.extend(watched.iter().copied());
-    fourth.backend.signal(libc::SIGKILL);
-    h.expect_ui(
-        ROWS,
-        "crashed backend withdraws interactive file rows",
-        |v| nodes(v).is_empty(),
-    )?;
-    for key in ["j", "Enter", "o"] {
-        h.key(key)?;
-    }
-    h.wait(
-        "offline actions neither open files nor leave the dead companion",
-        |h| {
-            let state = h.ctl("state", &[])?;
-            Ok((state["focused"]["id"].as_u64() == Some(fourth.pane)
-                && state["file_blocks"].as_array().is_some_and(Vec::is_empty))
-            .then_some(()))
-        },
-    )?;
-    h.shot("08-real-backend-offline")?;
-    h.key("q")?;
-    h.removed(&fourth, &watched)?;
-    h.restored(&fourth, true, Some(fourth.owner))?;
-    h.cli(&["plugin", "reload"])?;
-    let deadline = Instant::now() + Duration::from_secs(4);
-    while Instant::now() < deadline {
-        for suffix in ["json", "lease", "stop", "lock"] {
-            if h.inbox()
-                .join(format!("managed-{}.{}", fourth.cid, suffix))
-                .exists()
-            {
-                return Err("Offline q/reload recreated a private managed control file".into());
-            }
-        }
-        if h.state_path(&fourth).exists() {
-            return Err("Offline q/reload recreated the dead backend snapshot".into());
-        }
-        thread::sleep(POLL);
-    }
     Ok(())
 }
 
@@ -3360,7 +3364,7 @@ prepend_conds = [
     h.expect_row_icon(&client, None, ROWS, "override.rs", json!(""))?;
     h.expect_row_icon(&client, None, ROWS, "exec-fixture", json!(""))?;
     h.expect_row_icon(&client, None, ROWS, "link-fixture", json!(""))?;
-    h.idle(&client, Duration::from_secs(1))?;
+    h.settled(&client, Duration::from_secs(1))?;
     for (mode, glyph) in [(0o600, ""), (0o700, "")] {
         let before = h.snapshot(&client);
         fs::set_permissions(
@@ -3853,7 +3857,30 @@ fn extended_preview_flow(h: &mut Harness) -> TestResult<()> {
     )
     .map_err(|e| e.to_string())?;
 
+    // An 8x8 red RGB PNG.
+    let pixel: [u8; 75] = [
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 8, 0, 0, 0, 8, 8, 2,
+        0, 0, 0, 75, 109, 41, 220, 0, 0, 0, 18, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 128,
+        21, 97, 23, 29, 180, 18, 0, 40, 255, 63, 193, 110, 236, 223, 97, 0, 0, 0, 0, 73, 69, 78,
+        68, 174, 66, 96, 130,
+    ];
+    fs::write(preview_dir.join("pixel.png"), pixel).map_err(|e| e.to_string())?;
+    fs::write(preview_dir.join("main.rs"), "fn main() {\n    let marker = \"CODE_PREVIEW_MARKER\";\n}\n")
+        .map_err(|e| e.to_string())?;
+
     let client = h.launch(preview_dir, true)?;
+
+    h.case = "raster image and source code previews";
+    h.click_file(&client, "pixel.png")?;
+    h.expect_ui(
+        &format!("{PREVIEW} [data-role=\"yazi.image\"] img"),
+        "PNG preview draws the uploaded image",
+        |v| nodes(v).len() == 1 && theme_visible(nodes(v)[0]),
+    )?;
+    h.click_file(&client, "main.rs")?;
+    h.expect_ui(PREVIEW, "Rust source preview shows the file text", |v| {
+        ui_text(v).contains("CODE_PREVIEW_MARKER")
+    })?;
 
     h.case = "real PDF preview renders metadata card and cover image node";
     h.click_file(&client, "sample.pdf")?;
@@ -4225,9 +4252,156 @@ fn real_native_interactions() {
 }
 
 #[test]
+#[ignore = "Phase 2: Tern file opens, native shell terminals and plugin reload"]
+fn real_window_interactions() {
+    let mut harness = Harness::new()
+        .unwrap_or_else(|error| panic!("Real interaction prerequisites/setup failed: {error}"));
+    let result = window_flow(&mut harness);
+    conclude(&mut harness, result);
+}
+
+#[test]
+#[ignore = "Phase 2: parked slot restoration belongs to the plugin block"]
 fn real_native_slot_interactions() {
     let mut harness = Harness::new()
         .unwrap_or_else(|error| panic!("Real interaction prerequisites/setup failed: {error}"));
     let result = native_slot_flow(&mut harness);
+    conclude(&mut harness, result);
+}
+
+/// Layout theme ids in picker order.
+const LAYOUT_THEMES: [&str; 8] =
+    ["current", "aurora", "editorial", "amber", "blueprint", "brutalist", "zen", "swiss"];
+const THEME_SHOTS: &str = "/tmp/tyi-inline-p1";
+const PICKER: &str = "[data-role=\"yazi.theme-picker\"]";
+
+fn theme_scope(id: &str) -> String {
+    format!("[data-role^=\"yazi.theme.{id}\"]")
+}
+
+fn first_rect(value: &Value) -> [f64; 4] {
+    let rect = nodes(value).first().map(|node| node["rect"].clone()).unwrap_or(Value::Null);
+    [0, 1, 2, 3].map(|at| rect[at].as_f64().unwrap_or(0.0))
+}
+
+/// Surface-only behavior: the layout theme picker and re-layout on pane size changes.
+fn surface_flow(h: &mut Harness) -> TestResult<()> {
+    h.case = "T opens the layout theme picker; Escape restores the previewed theme";
+    let client = h.launch(h.path("files"), true)?;
+    let settings = h.path("config/tern-yazi/settings.json");
+    h.key("T")?;
+    h.expect_ui(&format!("{PICKER} .sf-item"), "the picker lists every layout theme", |v| {
+        let rows: Vec<_> = nodes(v).iter().map(|node| ui_text(node)).collect();
+        ["Current", "Aurora Glass", "Editorial Paper", "Amber Ledger", "Blueprint Draft"]
+            .iter()
+            .chain(&["Brutalist Block", "Zen Minimal", "Swiss Grid"])
+            .all(|title| rows.iter().any(|row| row.starts_with(title)))
+    })?;
+    h.key("j")?;
+    h.expect_ui(&theme_scope("aurora"), "j previews the next theme live", |v| {
+        !nodes(v).is_empty()
+    })?;
+    h.key("Escape")?;
+    h.expect_ui(PICKER, "Escape closes the picker", |v| nodes(v).is_empty())?;
+    h.expect_ui(&theme_scope("current"), "Escape restores the original theme", |v| {
+        !nodes(v).is_empty()
+    })?;
+    if settings.exists() {
+        return Err("Escape persisted a theme choice".into());
+    }
+
+    h.case = "the picker switches all 8 themes in light and dark appearances";
+    for (appearance, tern_theme) in [("light", "light-catppuccin"), ("dark", "dark-catppuccin")] {
+        // The isolated window follows the system appearance; pin it through the light slot.
+        h.ctl("theme", &["light", tern_theme])?;
+        h.wait(&format!("Tern shows the {appearance} appearance"), |h| {
+            Ok((h.ctl("state", &[])?["theme"] == appearance).then_some(()))
+        })?;
+        for (index, id) in LAYOUT_THEMES.iter().enumerate() {
+            if index > 0 {
+                for key in ["T", "j", "Enter"] {
+                    h.key(key)?;
+                }
+                h.wait(&format!("Enter persists {id}"), |_| {
+                    Ok(read_json(&settings).filter(|s| s["theme"] == *id).map(|_| ()))
+                })?;
+            }
+            h.expect_ui(PICKER, "the picker is closed", |v| nodes(v).is_empty())?;
+            h.expect_ui(
+                &format!("{} {ROWS}", theme_scope(id)),
+                &format!("{id} draws the file rows"),
+                |v| nodes(v).iter().any(|node| theme_visible(node)),
+            )?;
+            h.keep_shot(&format!("{id}-{appearance}"), Path::new(THEME_SHOTS))?;
+        }
+        h.key("T")?;
+        for _ in 1..LAYOUT_THEMES.len() {
+            h.key("k")?;
+        }
+        h.key("Enter")?;
+        h.wait("the picker returns to the first theme", |_| {
+            Ok(read_json(&settings).filter(|s| s["theme"] == "current").map(|_| ()))
+        })?;
+    }
+    h.ctl("theme", &["light", "light-catppuccin"])?;
+
+    h.case = "the surface re-lays out when its pane is split and restored";
+    // Tern keeps the pane's tty size while a surface is open; only the surface's region
+    // geometry (and its Resize columns) follow the pane, so assert on the drawn layout.
+    let pane_size = h.settled(&client, Duration::ZERO)?;
+    let full = first_rect(&h.tree(SURFACE_BROWSER)?);
+    for (side, narrower) in [("down", false), ("right", true)] {
+        let created = h.cli(&[
+            "split",
+            &client.owner.to_string(),
+            side,
+            "--json",
+            "--keep-open",
+            "--",
+            "sleep",
+            "600",
+        ])?;
+        let created: Value = serde_json::from_str(&created).map_err(|e| e.to_string())?;
+        let other = created["block"].as_u64().ok_or("Split returned no block")?;
+        h.expect_ui(SURFACE_BROWSER, &format!("split {side} re-lays out the browser"), |v| {
+            let rect = first_rect(v);
+            if narrower {
+                rect[2] > 0.0 && rect[2] < full[2] * 0.75 && (rect[3] - full[3]).abs() < 2.0
+            } else {
+                rect[3] > 0.0 && rect[3] < full[3] * 0.75 && (rect[2] - full[2]).abs() < 2.0
+            }
+        })?;
+        h.expect_ui(ROWS, "file rows stay visible in the smaller pane", |v| {
+            nodes(v).iter().any(|node| theme_visible(node))
+        })?;
+        h.keep_shot(&format!("resize-split-{side}"), Path::new(THEME_SHOTS))?;
+        h.cli(&["close", &other.to_string()])?;
+        h.focus(client.owner)?;
+        h.expect_ui(SURFACE_BROWSER, "the browser grows back to the full pane", |v| {
+            let rect = first_rect(v);
+            (rect[2] - full[2]).abs() < 2.0 && (rect[3] - full[3]).abs() < 2.0
+        })?;
+        if h.settled(&client, Duration::ZERO)? != pane_size {
+            return Err("Yazi's PTY no longer matches the pane after the split closed".into());
+        }
+    }
+    h.key("j")?;
+    h.expect_state(&client, "keys still reach Yazi after the re-layouts", |s| {
+        hover(s) == text(&client.cwd.join("copydest"))
+    })?;
+
+    h.case = "q closes the surface and returns the shell prompt";
+    let watched = descendants(client.supervisor);
+    h.owned.extend(watched.iter().copied());
+    h.key("q")?;
+    h.removed(&client, &watched)?;
+    h.prompt_returned(&client)
+}
+
+#[test]
+fn real_surface_interactions() {
+    let mut harness = Harness::new()
+        .unwrap_or_else(|error| panic!("Real interaction prerequisites/setup failed: {error}"));
+    let result = surface_flow(&mut harness);
     conclude(&mut harness, result);
 }

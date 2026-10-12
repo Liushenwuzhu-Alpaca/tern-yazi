@@ -530,7 +530,8 @@ The preview column is focused strictly on content display: bottom action buttons
 | `{` / `}` (or shifted `[` / `]`) | Native `tab_swap -1` / `1` |
 | Esc | Sends native Yazi `escape` when online (visual mode and find clear before a retained filter; selection follows upstream handling); cancels local input/trash and clears the corresponding native find/filter while editing; closes companion only when offline |
 | `q` | Close outside local editing/confirmation; restore owner shell in its prior zoom state, or leave ordinary attached Yazi running |
-Shifted letters have explicit actions for `G`, `H`, `L`, `N` and `V`; other shifted letters are not silently treated as their unshifted actions. Normal-mode Alt/Meta chords are not claimed by the handler.
+| `T` (Shift+`t`) | Program surface only: open the in-surface layout theme picker; `j`/`k` preview, Enter keeps the theme in `$XDG_CONFIG_HOME/tern-yazi/settings.json` (`YAZI_THEME` still overrides at launch), Esc restores. Yazi's default keymap leaves `T` unbound |
+Shifted letters have explicit actions for `G`, `H`, `L`, `N`, `T` and `V`; other shifted letters are not silently treated as their unshifted actions. Normal-mode Alt/Meta chords are not claimed by the handler.
 
 ### Input editing
 

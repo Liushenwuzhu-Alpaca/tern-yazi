@@ -1,4 +1,4 @@
 /* Current's compact footer gap would otherwise press the name against the capsule. */
-.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role="yazi.theme.current"] [data-role="yazi.status-name"] {
+[data-role="yazi.theme.current"] [data-role="yazi.dock"] [data-role="yazi.status-name"] {
     padding-left: 6px;
 }

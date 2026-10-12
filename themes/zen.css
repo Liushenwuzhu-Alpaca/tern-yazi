@@ -1,9 +1,9 @@
 /* Zen Minimal drops every card, fill and box: whitespace and faint hairlines carry the layout. */
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.input-row"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.input-row"] {
     gap: 14px;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role^="yazi.command-bubble."] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role^="yazi.command-bubble."] {
     padding: 2px 0;
     border: 0;
     border-bottom: 1px solid rgb(from var(--l3) r g b / 60%);
@@ -12,7 +12,7 @@
     font-size: 12.5px;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] :is([data-role="yazi.command-label"], [data-role="yazi.command-cancel"]) {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] :is([data-role="yazi.command-label"], [data-role="yazi.command-cancel"]) {
     padding: 2px 6px;
     border: 0;
     border-radius: 4px;
@@ -23,24 +23,24 @@
     font-weight: 400;
 }
 
-[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] :is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]) {
+[data-role^="yazi.theme.zen"] :is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]) {
     border-color: transparent;
     border-radius: 4px;
     background: transparent;
     font-family: var(--sans);
 }
 
-[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] :is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]):hover,
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.command-cancel"]:hover {
+[data-role^="yazi.theme.zen"] :is([data-role="yazi.path-go"], [data-role="yazi.path-cancel"]):hover,
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.command-cancel"]:hover {
     background: rgb(from var(--t1) r g b / 5%);
     border-color: transparent;
     color: var(--t1);
 }
 
 /* Demo profiles decorate the existing native regions; Current has no overrides. */
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"],
-.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"],
-.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"],
+[data-role^="yazi.theme.zen"] [data-role="yazi.dock"],
+[data-role^="yazi.theme.zen"] [data-role="yazi.layer"] {
     --yazi-parent-width: 168px;
     --yazi-current-width: 260px;
     --yazi-column-gap: 0px;
@@ -72,25 +72,25 @@
 }
 
 /* Explicit pane markers, not viewport media queries, determine the layout. */
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.columns"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.columns"] {
     grid-template-columns: var(--yazi-parent-width) var(--yazi-current-width) minmax(0, 1fr);
     gap: var(--yazi-column-gap);
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role="yazi.theme.zen.narrow"] [data-role="yazi.columns"] {
+[data-role="yazi.theme.zen.narrow"] [data-role="yazi.main"] [data-role="yazi.columns"] {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role="yazi.theme.zen.narrow"] [data-role="yazi.column.parent"] {
+[data-role="yazi.theme.zen.narrow"] [data-role="yazi.main"] [data-role="yazi.column.parent"] {
     display: none;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.browser"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.browser"] {
     min-width: 0;
     gap: 0;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.path-header"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.path-header"] {
     margin: 0;
     border: var(--yazi-panel-border);
     border-radius: var(--yazi-path-radius);
@@ -98,23 +98,23 @@
     box-shadow: none;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.path-header"] > .sf-card-body {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.path-header"] > .sf-card-body {
     padding: var(--yazi-path-padding);
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.path-content"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.path-content"] {
     gap: var(--yazi-path-gap);
     font-size: 12px;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.path-segment"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.path-segment"] {
     padding: var(--yazi-crumb-padding);
     border-radius: var(--yazi-crumb-radius);
     font-variant-numeric: normal;
     text-transform: none;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role^="yazi.column."] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role^="yazi.column."] {
     margin: 0;
     border: var(--yazi-panel-border);
     border-radius: var(--yazi-panel-radius);
@@ -122,7 +122,7 @@
     box-shadow: none;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role^="yazi.column."] > .sf-card-head {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role^="yazi.column."] > .sf-card-head {
     height: var(--yazi-heading-height);
     box-sizing: border-box;
     display: flex;
@@ -135,13 +135,13 @@
     text-transform: none;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role^="yazi.column."] > .sf-card-body {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role^="yazi.column."] > .sf-card-body {
     padding: var(--yazi-body-padding);
     gap: 0;
 }
 
 /* File title and real metadata stay fixed above the existing preview scroller. */
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.column.preview"] > .sf-card-head {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.column.preview"] > .sf-card-head {
     height: auto;
     min-height: var(--yazi-heading-height);
     padding: var(--yazi-preview-title-padding);
@@ -149,11 +149,11 @@
     font-weight: var(--yazi-preview-title-weight);
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.column.preview"] > .sf-card-body {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.column.preview"] > .sf-card-body {
     padding: 0;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.preview-metadata"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.preview-metadata"] {
     padding: var(--yazi-metadata-padding);
     gap: 14px;
     border-bottom: 0;
@@ -163,13 +163,13 @@
     text-transform: none;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.preview"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.preview"] {
     padding: var(--yazi-preview-padding);
     box-sizing: border-box;
 }
 
 /* Region roots are stripped by Tern, so dock ordering lives on the region. */
-.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.dock"] {
     display: flex;
     flex-direction: column;
     min-width: 0;
@@ -179,7 +179,7 @@
     border-top: var(--yazi-column-rule);
 }
 
-.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.status"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.dock"] [data-role="yazi.status"] {
     flex: 0 0 auto;
     align-items: center;
     height: var(--yazi-status-height);
@@ -195,17 +195,17 @@
 }
 
 /* Never apply the reference's small caps to real paths, names or permissions. */
-.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.status-name"],
-.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.status-permissions"],
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.preview-permissions"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.dock"] [data-role="yazi.status-name"],
+[data-role^="yazi.theme.zen"] [data-role="yazi.dock"] [data-role="yazi.status-permissions"],
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.preview-permissions"] {
     font-variant-numeric: normal;
     text-transform: none;
     letter-spacing: normal;
 }
 
 /* Opaque native popovers retain hit testing and their existing scroll limits. */
-.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.path-ancestors"],
-.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.trash-confirm"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.layer"] [data-role="yazi.path-ancestors"],
+[data-role^="yazi.theme.zen"] [data-role="yazi.layer"] [data-role="yazi.trash-confirm"] {
     min-width: 0;
     padding: 0;
     background: rgb(from var(--card) r g b / 100%);
@@ -216,12 +216,12 @@
     pointer-events: auto;
 }
 
-.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.path-ancestors"] > .sf-card-body,
-.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.trash-confirm"] > .sf-card-body {
+[data-role^="yazi.theme.zen"] [data-role="yazi.layer"] [data-role="yazi.path-ancestors"] > .sf-card-body,
+[data-role^="yazi.theme.zen"] [data-role="yazi.layer"] [data-role="yazi.trash-confirm"] > .sf-card-body {
     padding: var(--yazi-path-padding);
 }
 
-.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.path-segment"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.layer"] [data-role="yazi.path-segment"] {
     padding: var(--yazi-crumb-padding);
     border-radius: var(--yazi-crumb-radius);
     font-variant-numeric: normal;
@@ -229,7 +229,7 @@
 }
 
 /* Native rows keep their keys, cursor reveal and authoritative mark spans. */
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role^="yazi.column."] .sf-item {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role^="yazi.column."] .sf-item {
     flex: 0 0 auto;
     display: flex;
     align-items: center;
@@ -249,54 +249,54 @@
     overflow: hidden;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.column.preview"] > .sf-card-body > .sf-list {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.column.preview"] > .sf-card-body > .sf-list {
     padding: var(--yazi-body-padding);
 }
 
 /* Zen: one open plane; only a faint vertical hairline separates the columns. */
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.path-segment"],
-.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.path-segment"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.path-segment"],
+[data-role^="yazi.theme.zen"] [data-role="yazi.layer"] [data-role="yazi.path-segment"] {
     border: 0;
     background: transparent;
     box-shadow: none;
     color: var(--t2);
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.column.current"],
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.column.preview"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.column.current"],
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.column.preview"] {
     border-left: var(--yazi-column-rule);
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role="yazi.theme.zen.narrow"] [data-role="yazi.column.current"] {
+[data-role="yazi.theme.zen.narrow"] [data-role="yazi.main"] [data-role="yazi.column.current"] {
     border-left: 0;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role^="yazi.column."] > .sf-card-head {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role^="yazi.column."] > .sf-card-head {
     background: transparent;
     color: var(--t2);
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.column.preview"] > .sf-card-head {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.column.preview"] > .sf-card-head {
     color: var(--t1);
 }
 
 /* The cursor row stays unfilled: bold text plus a thin accent bar at the left edge. */
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role^="yazi.column."] .sf-item:hover {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role^="yazi.column."] .sf-item:hover {
     background: rgb(from var(--t1) r g b / 3%);
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role^="yazi.column."] .sf-item.sel {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role^="yazi.column."] .sf-item.sel {
     border-color: transparent;
     background: transparent;
     box-shadow: inset 2px 0 0 var(--accent);
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role^="yazi.column."] .sf-item.sel:hover {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role^="yazi.column."] .sf-item.sel:hover {
     background: rgb(from var(--t1) r g b / 3%);
 }
 
 /* These inner parts and semantic span classes are documented native hooks. */
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role^="yazi.column."] .sf-item-label {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role^="yazi.column."] .sf-item-label {
     min-width: 0;
     overflow: hidden;
     white-space: nowrap;
@@ -307,12 +307,12 @@
     color: var(--t2);
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role^="yazi.column."] .sf-item.sel .sf-item-label {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role^="yazi.column."] .sf-item.sel .sf-item-label {
     color: var(--t1);
     font-weight: 600;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role^="yazi.column."] > .sf-card-head > .sf-head {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role^="yazi.column."] > .sf-card-head > .sf-head {
     flex: 1 1 0;
     min-width: 0;
     overflow: hidden;
@@ -325,34 +325,34 @@
     text-transform: none;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role^="yazi.column."] > .sf-card-head > .sf-head > .sf-t-strong {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role^="yazi.column."] > .sf-card-head > .sf-head > .sf-t-strong {
     font-weight: inherit;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.column.preview"] > .sf-card-head > .sf-head {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.column.preview"] > .sf-card-head > .sf-head {
     letter-spacing: normal;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.column.preview"] > .sf-card-head > .sf-head > .sf-t-muted {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.column.preview"] > .sf-card-head > .sf-head > .sf-t-muted {
     font-family: var(--sans);
     font-size: 11.5px;
     font-weight: 400;
 }
 
 /* Typography changes stop at navigation and lists, never at code or images. */
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.path-content"],
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role^="yazi.column."] > .sf-card-head > .sf-head,
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role^="yazi.column."] .sf-item-label {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.path-content"],
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role^="yazi.column."] > .sf-card-head > .sf-head,
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role^="yazi.column."] .sf-item-label {
     font-family: var(--sans);
 }
 
 /* Native label spans retain terminal glyph fallback, independent of their tone. */
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role^="yazi.column."] .sf-item-label > span:not(.sf-t-strong) {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role^="yazi.column."] .sf-item-label > span:not(.sf-t-strong) {
     font-family: var(--tv-font, var(--mono));
 }
 
 /* Fold/edit affordances remain distinct hit targets, without toolbar chrome. */
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] :is([data-role="yazi.path-more"], [data-role="yazi.path-edit"]) {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] :is([data-role="yazi.path-more"], [data-role="yazi.path-edit"]) {
     padding: var(--yazi-crumb-padding);
     border: 0;
     border-radius: var(--yazi-crumb-radius);
@@ -361,13 +361,13 @@
     color: var(--t2);
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.path-segment"]:hover,
-.sf-layer[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.path-segment"]:hover {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.path-segment"]:hover,
+[data-role^="yazi.theme.zen"] [data-role="yazi.layer"] [data-role="yazi.path-segment"]:hover {
     background: rgb(from var(--t1) r g b / 4%);
     color: var(--t1);
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] :is([data-role="yazi.path-more"], [data-role="yazi.path-edit"]):hover {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] :is([data-role="yazi.path-more"], [data-role="yazi.path-edit"]):hover {
     background: rgb(from var(--t1) r g b / 4%);
     color: var(--t1);
 }
@@ -375,41 +375,41 @@
 /* Footer groups adapt to each theme; Current keeps Yazi's solid capsules.
    Segment spacing is padding only, so the two fields of a group stay adjacent. */
 /* Zen: one line of quiet text; only the mode word carries the mode color. */
-.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] :is([data-role^="yazi.status-left"], [data-role^="yazi.status-progress"]) {
+[data-role^="yazi.theme.zen"] [data-role="yazi.dock"] :is([data-role^="yazi.status-left"], [data-role^="yazi.status-progress"]) {
     border: 0;
     border-radius: 0;
     background: transparent;
     font-size: 11px;
 }
 
-.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] :is([data-role^="yazi.status-left"], [data-role^="yazi.status-progress"]) > .sf-text {
+[data-role^="yazi.theme.zen"] [data-role="yazi.dock"] :is([data-role^="yazi.status-left"], [data-role^="yazi.status-progress"]) > .sf-text {
     padding: 0 6px;
     background: transparent;
 }
 
-.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role^="yazi.status-left"] > .sf-text:first-child {
+[data-role^="yazi.theme.zen"] [data-role="yazi.dock"] [data-role^="yazi.status-left"] > .sf-text:first-child {
     padding-left: 0;
 }
 
-.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] :is([data-role="yazi.status-mode"], [data-role="yazi.status-position"]) {
+[data-role^="yazi.theme.zen"] [data-role="yazi.dock"] :is([data-role="yazi.status-mode"], [data-role="yazi.status-position"]) {
     background: transparent;
     color: var(--yazi-pill);
     font-weight: 600;
 }
 
-.sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] :is([data-role="yazi.status-size"], [data-role="yazi.status-percent"]) {
+[data-role^="yazi.theme.zen"] [data-role="yazi.dock"] :is([data-role="yazi.status-size"], [data-role="yazi.status-percent"]) {
     background: transparent;
     color: var(--t2);
     font-weight: 400;
 }
 
 /* Zen tabs: plain words; the active tab is bold with a short accent bar at its left edge. */
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.tab-bar"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.tab-bar"] {
     gap: 18px;
     padding: 0 22px;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] :is([data-role="yazi.tab"], [data-role="yazi.tab-active"]) {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] :is([data-role="yazi.tab"], [data-role="yazi.tab-active"]) {
     padding: 0 0 0 7px;
     border: 0;
     border-left: 2px solid transparent;
@@ -421,7 +421,7 @@
     line-height: 16px;
 }
 
-.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.zen"] [data-role="yazi.tab-active"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.tab-active"] {
     border-left-color: var(--accent);
     color: var(--t1);
     font-weight: 600;
