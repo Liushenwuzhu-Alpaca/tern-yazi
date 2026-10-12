@@ -4,6 +4,7 @@
 
 mod actions;
 mod format;
+mod handover;
 mod input;
 mod model;
 mod panesize;
@@ -434,6 +435,15 @@ pub(crate) fn run(launch: &Launch, real: &OsStr, args: &[OsString]) -> io::Resul
             Ok(Step::Ready) => ready = true,
             Ok(Step::Exited(code)) => break Ok(code),
             Err(error) => break Err(error),
+        }
+        if backend.lent.active {
+            if let Err(error) =
+                handover::lend(&mut app.session, app.sf, &mut backend, &mut app.pane)
+            {
+                break Err(error);
+            }
+            app.dirty = true;
+            continue;
         }
         app.tick(&inbox, &mut backend, ready);
         if app.dirty {

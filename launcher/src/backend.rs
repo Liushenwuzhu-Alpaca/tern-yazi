@@ -103,6 +103,65 @@ impl StartupDiagnostic {
     }
 }
 
+const ALT_SCREEN: &[u8] = b"\x1b[?1049";
+
+/// Yazi leaves its alternate screen to lend its terminal to a subprocess (`shell --block`,
+/// `ui.hide()` plugins such as fzf and zoxide, task inspection) and enters it again to resume.
+/// While it is away its output belongs on the pane; otherwise it is the hidden TUI.
+#[derive(Debug, Default)]
+pub(crate) struct Lent {
+    pub(crate) active: bool,
+    matched: usize,
+    relay: Vec<u8>,
+}
+
+impl Lent {
+    /// Feeds one output byte; `true` when it belongs to the hidden TUI.
+    fn feed(&mut self, byte: u8) -> bool {
+        let switch = if self.matched == ALT_SCREEN.len() {
+            self.matched = 0;
+            match byte {
+                b'h' => Some(true),
+                b'l' => Some(false),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if switch.is_none() {
+            self.matched = if byte == ALT_SCREEN[self.matched] {
+                self.matched + 1
+            } else {
+                usize::from(byte == ALT_SCREEN[0])
+            };
+        }
+        match (self.active, switch) {
+            // `take` holds a partial switch back, so the prefix is still buffered here.
+            (true, Some(true)) => {
+                self.relay.truncate(self.relay.len() - ALT_SCREEN.len());
+                self.active = false;
+                true
+            }
+            (true, _) => {
+                self.relay.push(byte);
+                false
+            }
+            (false, Some(false)) => {
+                self.active = true;
+                true
+            }
+            (false, _) => true,
+        }
+    }
+
+    /// Output ready for the pane; a possible alternate-screen switch stays held.
+    pub(crate) fn take(&mut self) -> Vec<u8> {
+        let keep = if self.active { self.matched.min(self.relay.len()) } else { 0 };
+        let tail = self.relay.split_off(self.relay.len() - keep);
+        std::mem::replace(&mut self.relay, tail)
+    }
+}
+
 pub(crate) struct Backend {
     pub(crate) pid: libc::pid_t,
     pub(crate) master: OwnedFd,
@@ -111,6 +170,7 @@ pub(crate) struct Backend {
     pub(crate) stopped: bool,
     pub(crate) diagnostic: StartupDiagnostic,
     pub(crate) capture_startup: bool,
+    pub(crate) lent: Lent,
 }
 
 impl Backend {
@@ -186,6 +246,7 @@ impl Backend {
             stopped: false,
             diagnostic: StartupDiagnostic::new(),
             capture_startup: true,
+            lent: Lent::default(),
         };
         if unsafe { libc::fcntl(backend.master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
             return Err(last_error());
@@ -230,6 +291,32 @@ impl Backend {
         }
     }
 
+    /// Types `bytes` into Yazi's terminal, waiting out a full PTY input queue.
+    pub(crate) fn type_in(&self, mut bytes: &[u8]) -> io::Result<()> {
+        let fd = self.master.as_raw_fd();
+        while !bytes.is_empty() {
+            let count = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+            if count >= 0 {
+                bytes = &bytes[count as usize..];
+                continue;
+            }
+            let error = last_error();
+            match error.kind() {
+                io::ErrorKind::Interrupted => {}
+                io::ErrorKind::WouldBlock => {
+                    let mut poll = libc::pollfd {
+                        fd,
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
+                    unsafe { libc::poll(&mut poll, 1, 50) };
+                }
+                _ => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn drain(&mut self) -> io::Result<()> {
         let mut bytes = [0u8; 8192];
         // Bound each poll's work, including a pathological output flood.
@@ -259,6 +346,11 @@ impl Backend {
             for byte in &bytes[..count as usize] {
                 if self.capture_startup {
                     self.diagnostic.feed(*byte);
+                }
+                // The pane's terminal answers queries while Yazi has lent its terminal.
+                if !self.lent.feed(*byte) {
+                    self.queries.clear();
+                    continue;
                 }
                 if *byte == 0x1b {
                     self.queries.clear();
@@ -338,5 +430,42 @@ pub(crate) fn child_code(status: i32) -> i32 {
         128 + libc::WTERMSIG(status)
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Lent;
+
+    fn feed(lent: &mut Lent, bytes: &[u8]) {
+        for byte in bytes {
+            lent.feed(*byte);
+        }
+    }
+
+    #[test]
+    fn relays_only_what_yazi_writes_outside_its_alternate_screen() {
+        let mut lent = Lent::default();
+        feed(&mut lent, b"\x1b[?1049hTUI frame\x1b[?1049l");
+        assert!(lent.active);
+        assert_eq!(lent.take(), b"");
+        feed(&mut lent, b"$ ls\r\nfile\r\n");
+        assert_eq!(lent.take(), b"$ ls\r\nfile\r\n");
+        feed(&mut lent, b"done\x1b[?1049h\x1b[0cTUI again");
+        assert!(!lent.active);
+        assert_eq!(lent.take(), b"done");
+    }
+
+    #[test]
+    fn holds_a_split_switch_until_it_completes() {
+        let mut lent = Lent::default();
+        feed(&mut lent, b"\x1b[?1049lout\x1b[?10");
+        assert_eq!(lent.take(), b"out");
+        feed(&mut lent, b"49h");
+        assert!(!lent.active);
+        assert_eq!(lent.take(), b"");
+        // A near miss is ordinary output.
+        feed(&mut lent, b"\x1b[?1049l\x1b[?1048h");
+        assert_eq!(lent.take(), b"\x1b[?1048h");
     }
 }

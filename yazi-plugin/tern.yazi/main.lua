@@ -469,9 +469,11 @@ local commit = ya.sync(function(self, req, files)
 end)
 
 local request_actors = {}
-for name in ("cd arrow leave enter back forward reveal yank toggle toggle_all visual_mode escape hidden find_arrow paste unyank link hardlink seek tab_create tab_switch tab_swap tab_close close"):gmatch("%S+") do
+for name in ("cd arrow leave enter back forward reveal yank toggle toggle_all visual_mode escape hidden find_arrow paste unyank link hardlink seek tab_create tab_switch tab_swap tab_close close plugin"):gmatch("%S+") do
 	request_actors[name] = true
 end
+-- Plugins the browser's keys run, as Yazi's default keymap does (`z` fzf, `Z` zoxide).
+local request_plugins = { fzf = true, zoxide = true }
 
 function M:entry(job)
 	local stage = job.args[1]
@@ -515,8 +517,8 @@ function M:entry(job)
 			assert(not req.args.cwd, "Shell runs in Yazi's current directory; use cd first")
 			assert(req.args.block == nil or type(req.args.block) == "boolean", "--block is a boolean flag")
 			assert(req.args.orphan == nil or type(req.args.orphan) == "boolean", "--orphan is a boolean flag")
-			-- Acknowledgement is acceptance, not completion: Yazi runs the shell (blocking or as a
-			-- task) on its own terminal, which the launcher never shows.
+			-- Acknowledgement is acceptance, not completion. A blocking shell leaves Yazi's
+			-- alternate screen; the launcher then lends the pane to Yazi's terminal.
 			reply(req, { ok = true, queued = true, orphan = req.args.orphan == true })
 			ya.exec("shell", req.args)
 			return
@@ -605,6 +607,13 @@ function M:entry(job)
 			reply(req, { ok = true, target = tostring(target) })
 		elseif req.op == "action" then
 			assert(request_actors[req.action], "Unsupported action")
+			if req.action == "plugin" then
+				assert(request_plugins[req.args[1]], "Unsupported plugin")
+				-- fzf and zoxide borrow Yazi's terminal until the user picks; acknowledge first.
+				reply(req, { ok = true, queued = true })
+				ya.exec(req.action, req.args)
+				return
+			end
 			ya.exec(req.action, req.args or {})
 			snapshot()
 			reply(req, { ok = true, queued = true })

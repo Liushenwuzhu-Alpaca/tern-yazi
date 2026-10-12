@@ -177,8 +177,8 @@ fn typed(key: &Key) -> Option<String> {
 pub(crate) enum Mode {
     Normal,
     Path(Editor),
-    /// The `:` (Yazi `shell --block`) or `;` (Yazi background task) shell line. Yazi runs both
-    /// on its own invisible terminal; their output is not shown, as in Yazi.
+    /// The `:` (Yazi `shell --block`) or `;` (Yazi background task) shell line. Yazi runs a
+    /// blocking shell on the terminal it lends to the pane; a background one is a Yazi task.
     Command {
         query: String,
         block: bool,
@@ -242,7 +242,6 @@ pub(crate) enum Then {
     Jump(Jump),
     TrashPrepared,
     TrashQueued,
-    ShellQueued { query: String, block: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -440,16 +439,7 @@ impl Ui {
                 Level::Info,
                 "Trash queued in Yazi; completion is reported by Yazi tasks".to_owned(),
             )),
-            Then::ShellQueued { query, block } if reply.ok => {
-                effects.push(Effect::Notice(
-                    Level::Info,
-                    "Shell queued in Yazi; completion is reported by Yazi tasks".to_owned(),
-                ));
-                if self.mode == (Mode::Command { query, block }) {
-                    self.mode = Mode::Normal;
-                }
-            }
-            Then::TrashPrepared | Then::TrashQueued | Then::ShellQueued { .. } => {}
+            Then::TrashPrepared | Then::TrashQueued => {}
         }
         effects
     }
@@ -556,16 +546,13 @@ impl Ui {
                 if escape {
                     self.mode = Mode::Normal;
                 } else if enter {
-                    let (query, block) = (query.clone(), *block);
+                    let (query, block) = (std::mem::take(query), *block);
+                    self.mode = Mode::Normal;
                     if query.is_empty() {
-                        self.mode = Mode::Normal;
                         return Vec::new();
                     }
-                    return vec![Effect::Request(
-                        json!({"op": "command", "action": "shell",
-                            "args": {"positional": [query], "options": {"block": block}}}),
-                        Then::ShellQueued { query, block },
-                    )];
+                    return vec![request(json!({"op": "command", "action": "shell",
+                        "args": {"positional": [query], "options": {"block": block}}}))];
                 } else if name == "backspace" {
                     erase_last(query);
                 } else if let Some(text) = typed(key) {
@@ -732,6 +719,7 @@ impl Ui {
                 "y" | "x" => vec![action("unyank", &[], json!({}))],
                 "j" => vec![action("seek", &["5"], json!({}))],
                 "k" => vec![action("seek", &["-5"], json!({}))],
+                "z" => vec![action("plugin", &["zoxide"], json!({}))],
                 // Yazi's default keymap leaves `W` unbound; it opens a terminal below.
                 "w" => vec![Effect::Terminal(self.cwd(yz).to_owned())],
                 // Yazi's default keymap leaves `T` unbound; it opens the theme picker.
@@ -763,6 +751,7 @@ impl Ui {
             "y" => action("yank", &[], json!({})),
             "x" => action("yank", &[], json!({"cut": true})),
             "p" => action("paste", &[], json!({})),
+            "z" => action("plugin", &["fzf"], json!({})),
             _ if minus && !upper => action("link", &[], json!({})),
             "_" | "underscore" => action("link", &[], json!({"relative": true})),
             _ if minus => action("link", &[], json!({"relative": true})),
@@ -1191,18 +1180,6 @@ mod tests {
                 &json!({"op": "command", "action": "shell",
                     "args": {"positional": ["ls"], "options": {"block": block}}})
             );
-            let then = Then::ShellQueued {
-                query: "ls".to_owned(),
-                block,
-            };
-            let notices = ui.reply(
-                then,
-                &Reply {
-                    ok: true,
-                    ..Reply::default()
-                },
-            );
-            assert_eq!(notices.len(), 1);
             assert_eq!(ui.mode, Mode::Normal);
         }
     }
