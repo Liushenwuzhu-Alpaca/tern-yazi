@@ -16,6 +16,8 @@ pub(crate) struct Folder {
     pub(crate) icons: Icons,
     pub(crate) overrides: Icons,
     pub(crate) count: Option<u64>,
+    /// The subject of the Yazi search this folder lists, if it is a search.
+    pub(crate) search: Option<String>,
 }
 
 impl Folder {
@@ -126,6 +128,7 @@ fn folder(map: &Map<String, Value>) -> Option<Folder> {
         icons: icons(map.get("file_icons")),
         overrides: Icons::new(),
         count: map.get("file_count").and_then(Value::as_u64),
+        search: map.get("search").and_then(Value::as_str).map(str::to_owned),
     })
 }
 
@@ -271,6 +274,14 @@ pub(crate) fn basename(path: &str) -> &str {
         Some(at) => &trimmed[at + 1..],
         None => trimmed,
     }
+}
+
+/// `path` as named in the folder `cwd`: a search lists nested paths, a directory bare names.
+pub(crate) fn relative<'a>(cwd: &str, path: &'a str) -> &'a str {
+    path.strip_prefix(cwd)
+        .and_then(|rest| if cwd.ends_with('/') { Some(rest) } else { rest.strip_prefix('/') })
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or_else(|| basename(path))
 }
 
 pub(crate) fn parent_dir(cwd: &str) -> Option<&str> {

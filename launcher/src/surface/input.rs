@@ -4,7 +4,7 @@
 use serde_json::{json, Map, Value};
 use tern_sdk::keys::Key;
 
-use super::model::{basename, join_path, parent_dir, Snapshot};
+use super::model::{basename, join_path, parent_dir, relative, Snapshot};
 use super::theme::{self, THEMES};
 
 /// A text field edited by keys, with UTF-16 caret offsets as Tern's input node expects.
@@ -186,6 +186,11 @@ pub(crate) enum Mode {
     Find {
         query: String,
         previous: bool,
+    },
+    /// Yazi's recursive search line: `s` by name via fd, `S` by content via ripgrep.
+    Search {
+        query: String,
+        content: bool,
     },
     Filter,
     Create(String),
@@ -560,6 +565,23 @@ impl Ui {
                 }
                 return Vec::new();
             }
+            Mode::Search { query, content } => {
+                if escape {
+                    self.mode = Mode::Normal;
+                } else if enter {
+                    let (query, via) = (std::mem::take(query), if *content { "rg" } else { "fd" });
+                    self.mode = Mode::Normal;
+                    if query.is_empty() {
+                        return Vec::new();
+                    }
+                    return vec![request(json!({"op": "search", "query": query, "via": via}))];
+                } else if name == "backspace" {
+                    erase_last(query);
+                } else if let Some(text) = typed(key) {
+                    query.push_str(&text);
+                }
+                return Vec::new();
+            }
             Mode::Find { query, previous } => {
                 let previous = *previous;
                 if escape {
@@ -659,6 +681,7 @@ impl Ui {
                 "a" => return vec![action("toggle_all", &[], json!({"state": "on"}))],
                 "r" => return vec![action("toggle_all", &[], json!({}))],
                 "c" => return vec![action("close", &[], json!({}))],
+                "s" => return vec![action("escape", &[], json!({"search": true}))],
                 _ if minus && !key.shift => return vec![action("hardlink", &[], json!({}))],
                 "d" | "u" | "f" | "b" => {}
                 _ => return Vec::new(),
@@ -720,6 +743,13 @@ impl Ui {
                 "j" => vec![action("seek", &["5"], json!({}))],
                 "k" => vec![action("seek", &["-5"], json!({}))],
                 "z" => vec![action("plugin", &["zoxide"], json!({}))],
+                "s" => {
+                    self.mode = Mode::Search {
+                        query: String::new(),
+                        content: true,
+                    };
+                    Vec::new()
+                }
                 // Yazi's default keymap leaves `W` unbound; it opens a terminal below.
                 "w" => vec![Effect::Terminal(self.cwd(yz).to_owned())],
                 // Yazi's default keymap leaves `T` unbound; it opens the theme picker.
@@ -764,6 +794,13 @@ impl Ui {
                 self.mode = Mode::Find {
                     query: String::new(),
                     previous: name == "?" || key.shift,
+                };
+                return Vec::new();
+            }
+            "s" => {
+                self.mode = Mode::Search {
+                    query: String::new(),
+                    content: false,
                 };
                 return Vec::new();
             }
@@ -884,9 +921,10 @@ impl Ui {
             Msg::ClearInput => match &self.mode {
                 Mode::Find { .. } => return vec![self.clear_find()],
                 Mode::Filter => return vec![self.clear_filter()],
-                Mode::Command { .. } | Mode::Create(_) | Mode::Rename { .. } => {
-                    self.mode = Mode::Normal
-                }
+                Mode::Command { .. }
+                | Mode::Search { .. }
+                | Mode::Create(_)
+                | Mode::Rename { .. } => self.mode = Mode::Normal,
                 _ => {}
             },
             Msg::TabSwitch(index) => {
@@ -924,7 +962,7 @@ impl Ui {
                 .or_else(|| {
                     yz.hovered
                         .as_ref()
-                        .map(|hover| basename(&hover.url).to_owned())
+                        .map(|hover| relative(&cwd, &hover.url).to_owned())
                 })
                 .map(|active| join_path(&cwd, &active)),
             List::Themes => None,

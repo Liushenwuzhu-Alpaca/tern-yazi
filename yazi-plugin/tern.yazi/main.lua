@@ -14,10 +14,26 @@ local function selected_count()
 	return #cx.active.selected
 end
 
+-- Search results live under `search://` URLs; the launcher reads, opens and previews the real
+-- paths, so every exported URL is the local one.
+local function real(url)
+	return url.is_search and tostring(url.path) or tostring(url)
+end
+
+-- A listed entry's name: its path below a search folder, as Yazi shows it, else its name.
+local function entry_name(file, cwd)
+	if cwd and cwd.is_search then
+		local path, base = tostring(file.url.path), tostring(cwd.path):gsub("/+$", "") .. "/"
+		if path:sub(1, #base) == base then return path:sub(#base + 1) end
+		return path
+	end
+	return file.url.name or tostring(file.url):match("([^/]+)$") or tostring(file.url)
+end
+
 local function selected_urls()
 	local urls = {}
 	for _, file in pairs(cx.active.selected) do
-		urls[#urls + 1] = tostring(file.url)
+		urls[#urls + 1] = real(file.url)
 	end
 	table.sort(urls)
 	return urls
@@ -45,7 +61,7 @@ local function read_hovered()
 		else size = cha.len end
 	end
 	return {
-		url = tostring(h.url),
+		url = real(h.url),
 		dir = cha and cha.is_dir or false,
 		size = size,
 		mtime = mtime and math.floor(mtime) or nil,
@@ -66,7 +82,7 @@ local function read_entries(folder, limit, base)
 	local names, dirs, icons = {}, {}, {}
 	for i = 1, math.min(limit or #folder.files, #folder.files) do
 		local file = folder.files[i]
-		local name = file.url.name or tostring(file.url):match("([^/]+)$") or tostring(file.url)
+		local name = entry_name(file, folder.cwd)
 		names[i] = name
 		dirs[name] = file.cha.is_dir
 		local ok_icon, icon = pcall(read_icon_text, file, base)
@@ -91,21 +107,25 @@ end
 local function read_folder(base)
 	local cur = cx.active.current
 	local names, dirs, icons = read_entries(cur, nil, base)
-	return { url = tostring(cur.cwd), files = names, file_dirs = dirs, file_icons = icons, file_count = read_entry_count(cur), selected = selected_count() }
+	return {
+		url = real(cur.cwd),
+		search = cur.cwd.is_search and tostring(cur.cwd.domain) or nil,
+		files = names, file_dirs = dirs, file_icons = icons, file_count = read_entry_count(cur), selected = selected_count(),
+	}
 end
 
 local function read_parent(base)
 	local p = cx.active.parent
 	if not p or not p.cwd then return nil end
 	local names, dirs, icons = read_entries(p, 30, base)
-	return { cwd = tostring(p.cwd), files = names, file_dirs = dirs, file_icons = icons, file_count = read_entry_count(p) }
+	return { cwd = real(p.cwd), files = names, file_dirs = dirs, file_icons = icons, file_count = read_entry_count(p) }
 end
 
 local function read_preview(hovered, base)
 	local p = cx.active.preview.folder
-	if not p or not hovered.dir or tostring(p.cwd) ~= hovered.url then return nil end
+	if not p or not hovered.dir or real(p.cwd) ~= hovered.url then return nil end
 	local names, dirs, icons = read_entries(p, 30, base)
-	return { cwd = tostring(p.cwd), files = names, file_dirs = dirs, file_icons = icons, file_count = read_entry_count(p) }
+	return { cwd = real(p.cwd), files = names, file_dirs = dirs, file_icons = icons, file_count = read_entry_count(p) }
 end
 
 local function read_icon_overrides(folder)
@@ -113,8 +133,7 @@ local function read_icon_overrides(folder)
 	if not file then return {} end
 	local ok_icon, icon = pcall(read_icon_text, file)
 	if not ok_icon then return {} end
-	local name = file.url.name or tostring(file.url):match("([^/]+)$") or tostring(file.url)
-	return { [name] = icon }
+	return { [entry_name(file, folder.cwd)] = icon }
 end
 
 
@@ -200,7 +219,7 @@ local function dump_state()
 	if not active.mode.is_normal then
 		for i = 1, #active.current.files do
 			local file = active.current.files[i]
-			if file:is_marked() ~= 0 then marked[#marked + 1] = tostring(file.url) end
+			if file:is_marked() ~= 0 then marked[#marked + 1] = real(file.url) end
 		end
 	end
 	local mode = active.mode.is_normal and "normal" or (active.mode.is_select and "select" or "unset")
@@ -217,6 +236,7 @@ local function dump_state()
 
 	local listing = {
 		cwd = folder.url,
+		search = folder.search,
 		files = folder.files,
 		file_dirs = folder.file_dirs,
 		file_icons = folder.file_icons,
@@ -298,7 +318,7 @@ local function owns_directory_usage(url, token)
 	if directory_usage.url ~= url or directory_usage.token ~= token then return false end
 	local h = cx.active.current.hovered
 	local cha = h and h.cha
-	return h ~= nil and tostring(h.url) == url and cha ~= nil and cha.is_dir
+	return h ~= nil and real(h.url) == url and cha ~= nil and cha.is_dir
 		and not cha.is_dummy and not cha.is_link
 		and cha.mtime == directory_usage.mtime and cha.btime == directory_usage.btime
 		and cha.len == directory_usage.len
@@ -325,7 +345,7 @@ directory_size = function(h)
 		if directory_usage.url then reset_directory_usage() end
 		return nil
 	end
-	local url = tostring(h.url)
+	local url = real(h.url)
 	if directory_usage.url ~= url or directory_usage.mtime ~= cha.mtime
 		or directory_usage.btime ~= cha.btime or directory_usage.len ~= cha.len then
 		reset_directory_usage()
@@ -387,7 +407,7 @@ local snapshot = ya.sync(function()
 end)
 
 local current_cwd = ya.sync(function()
-	local ok, cwd = pcall(function() return tostring(cx.active.current.cwd) end)
+	local ok, cwd = pcall(function() return real(cx.active.current.cwd) end)
 	assert(ok, "Current directory unavailable")
 	return cwd
 end)
@@ -413,45 +433,49 @@ local function rename_helper()
 	return (os.getenv("HOME") or "") .. "/.local/libexec/tern-yazi-launch"
 end
 
-local listed = ya.sync(function(_, url)
+-- The listed entry for a real path: under a search folder it is a `search://` URL, which
+-- `reveal` needs to stay in the search.
+local entry_url = ya.sync(function(_, path)
 	local ok, found = pcall(function()
 		local files = cx.active.current.files
 		for i = 1, #files do
-			if tostring(files[i].url) == url then return true end
+			if real(files[i].url) == path then return tostring(files[i].url) end
 		end
-		return false
 	end)
-	return ok and found or false
+	return ok and found or nil
 end)
+
+-- Reveals a real path, as the listed entry when there is one.
+local function reveal(path)
+	ya.exec("reveal", { Url(entry_url(path) or path), no_dummy = true })
+end
 
 -- The watcher updates Yazi's listing asynchronously; revealing before the new
 -- entry exists leaves the cursor on an unrelated row.
 local function reveal_listed(target)
 	local url = tostring(target)
 	for _ = 1, 40 do
-		if listed(url) then break end
+		if entry_url(url) then break end
 		ya.sleep(0.05)
 	end
-	-- `ya.exec` takes ownership of a Url argument; reveal a copy so callers can still read
-	-- `target` (its userdata would otherwise be destructed).
-	ya.exec("reveal", { Url(url), no_dummy = true })
+	reveal(url)
 	snapshot()
 end
 
 local targets = ya.sync(function(_, target)
 	local paths = {}
-	for _, file in pairs(cx.active.selected) do paths[tostring(file.url)] = true end
+	for _, file in pairs(cx.active.selected) do paths[real(file.url)] = true end
 	for i = 1, #cx.active.current.files do
 		local f = cx.active.current.files[i]
 		local marked = f:is_marked()
-		if marked == 1 then paths[tostring(f.url)] = true
-		elseif marked == 2 then paths[tostring(f.url)] = nil end
+		if marked == 1 then paths[real(f.url)] = true
+		elseif marked == 2 then paths[real(f.url)] = nil end
 	end
 	local result = {}
 	for path in pairs(paths) do result[#result + 1] = path end
 	if #result == 0 then
 		local hovered = cx.active.current.hovered
-		local path = target or (hovered and tostring(hovered.url))
+		local path = target or (hovered and real(hovered.url))
 		if path then result[1] = path end
 	end
 	table.sort(result)
@@ -555,7 +579,7 @@ function M:entry(job)
 			reply(req, { ok = true })
 		elseif req.op == "activate" then
 			assert(req.action == "enter", "Unsupported activation action")
-			ya.exec("reveal", { Url(assert(req.target)), no_dummy = true })
+			reveal(assert(req.target))
 			ya.exec(req.action, {})
 			snapshot()
 			reply(req, { ok = true, queued = true })
@@ -567,6 +591,13 @@ function M:entry(job)
 			assert(type(req.query) == "string", "Find requires a query")
 			assert(req.previous == nil or type(req.previous) == "boolean", "--previous is a boolean flag")
 			ya.exec("find_do", { req.query, smart = true, previous = req.previous == true })
+			snapshot()
+			reply(req, { ok = true })
+		elseif req.op == "search" then
+			assert(type(req.query) == "string" and req.query ~= "", "Search requires a query")
+			assert(req.via == "fd" or req.via == "rg", "Search runs via fd or rg")
+			-- Yazi runs the search and streams the results into a `search://` folder.
+			ya.exec("search_do", { req.query, via = req.via })
 			snapshot()
 			reply(req, { ok = true })
 		elseif req.op == "create" then
@@ -613,6 +644,9 @@ function M:entry(job)
 				reply(req, { ok = true, queued = true })
 				ya.exec(req.action, req.args)
 				return
+			end
+			if req.action == "reveal" and type(req.args[1]) == "string" then
+				req.args[1] = Url(entry_url(req.args[1]) or req.args[1])
 			end
 			ya.exec(req.action, req.args or {})
 			snapshot()

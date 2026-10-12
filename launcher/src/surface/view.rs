@@ -8,7 +8,7 @@ use tern_sdk::ui::{self, Node, Span, View};
 
 use super::format::{self, path_segments};
 use super::input::{Editor, Field, FieldEdit, Level, List, Mode, Msg, Ui};
-use super::model::{basename, join_path, parent_dir, Folder, Snapshot};
+use super::model::{basename, join_path, parent_dir, relative, Folder, Snapshot};
 use super::preview::{Blob, Load, Preview, Stamp};
 use super::theme::{self, Theme, THEMES};
 
@@ -253,7 +253,7 @@ fn focus<'a>(yz: &'a Snapshot, ui: &'a Ui) -> Focus<'a> {
         .hovered
         .as_ref()
         .filter(|_| yz.current.cwd == cwd)
-        .map(|hover| basename(&hover.url));
+        .map(|hover| relative(cwd, &hover.url));
     let active = ui
         .active_file
         .as_deref()
@@ -380,6 +380,18 @@ impl Browser<'_> {
                 );
                 children.push(crumb(index));
             }
+            // A Yazi search lists its results under the directory it searched, as Yazi's
+            // `(search: subject)` header suffix says.
+            if let Some(subject) = self.yz.current.search.as_deref() {
+                if cwd == self.yz.current.cwd {
+                    children.push(
+                        Node::from(ui::badge(format!("search: {subject}")).tone("accent"))
+                            .key("search")
+                            .role("yazi.path-search")
+                            .shrink(0.0),
+                    );
+                }
+            }
             // The tail remains a distinct target even when every segment is truncated.
             children.push(
                 button("edit", ui::text(" "), Msg::PathEdit)
@@ -436,6 +448,14 @@ impl Browser<'_> {
             Mode::Find { query, previous } => Some((
                 "find",
                 ui::badge(if *previous { "Find [?]" } else { "Find [/]" })
+                    .tone("accent")
+                    .into(),
+                bubble(format!(" {query}"), "accent"),
+                "Cancel [Esc]",
+            )),
+            Mode::Search { query, content } => Some((
+                "search",
+                ui::badge(if *content { "Search [S]" } else { "Search [s]" })
                     .tone("accent")
                     .into(),
                 bubble(format!(" {query}"), "accent"),
@@ -852,6 +872,7 @@ impl Browser<'_> {
         let label = match mode {
             Mode::Command { .. } => "CMD",
             Mode::Find { .. } => "FIND",
+            Mode::Search { .. } => "SEARCH",
             Mode::Filter => "FILTER",
             Mode::Create(_) => "CREATE",
             Mode::Rename { .. } => "RENAME",
