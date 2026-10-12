@@ -1,4 +1,4 @@
-//! The view: a pure function from the snapshot, UI state and preview slot to the surface tree.
+//! The view: a pure function from the snapshot, UI state and preview load state to the surface tree.
 //! Roles and keys follow the plugin view so the stylesheets and tests select the same nodes.
 
 use std::collections::HashSet;
@@ -9,7 +9,7 @@ use tern_sdk::ui::{self, Node, Span, View};
 use super::format::{self, path_segments};
 use super::input::{Editor, Field, FieldEdit, Level, List, Mode, Msg, Ui};
 use super::model::{basename, join_path, parent_dir, Folder, Snapshot};
-use super::preview::{Blob, Preview, Slot, Stamp};
+use super::preview::{Blob, Load, Preview, Stamp};
 use super::theme::{self, Theme, THEMES};
 
 type N = Node<Msg>;
@@ -37,7 +37,7 @@ pub(crate) struct Frame<'a> {
     pub(crate) yz: Option<&'a Snapshot>,
     pub(crate) waiting: Waiting<'a>,
     pub(crate) ui: &'a Ui,
-    pub(crate) preview: Option<&'a Slot>,
+    pub(crate) preview: Option<&'a Load>,
     pub(crate) notice: Option<(Level, &'a str)>,
     pub(crate) cols: u32,
     pub(crate) rows: u32,
@@ -81,10 +81,12 @@ fn button(key: &str, label: impl Into<N>, msg: Msg) -> N {
 fn region(theme_role: &str, name: &str, children: Vec<N>) -> N {
     ui::col()
         .child(
-            ui::col()
-                .key("theme")
-                .role(theme_role)
-                .child(ui::col().key("region").role(format!("yazi.{name}")).children(children)),
+            ui::col().key("theme").role(theme_role).child(
+                ui::col()
+                    .key("region")
+                    .role(format!("yazi.{name}"))
+                    .children(children),
+            ),
         )
         .into()
 }
@@ -113,12 +115,18 @@ pub(crate) fn view(frame: &Frame) -> View<Msg> {
 
 fn startup(waiting: &Waiting) -> N {
     let (title, detail) = match waiting {
-        Waiting::Starting => ("Starting Yazi", "Waiting for Yazi to publish its first snapshot."),
+        Waiting::Starting => (
+            "Starting Yazi",
+            "Waiting for Yazi to publish its first snapshot.",
+        ),
         Waiting::Failed(error) => ("Yazi snapshot unavailable", *error),
     };
     card(
         vec![span(title, "warn")],
-        vec![ui::text(detail).into(), ui::text("Press q to close.").into()],
+        vec![
+            ui::text(detail).into(),
+            ui::text("Press q to close.").into(),
+        ],
     )
     .into()
 }
@@ -127,11 +135,16 @@ fn trash_layer(paths: &[String], rows: u32) -> N {
     let items = paths.iter().enumerate().map(|(index, path)| {
         ui::item(serde_json::to_string(path).unwrap_or_default()).key((index + 1).to_string())
     });
-    let list = ui::list().key("paths").max_lines(rows.saturating_sub(8).max(4)).children(items);
+    let list = ui::list()
+        .key("paths")
+        .max_lines(rows.saturating_sub(8).max(4))
+        .children(items);
     ui::node("card")
         .key("trash")
         .role("yazi.trash-confirm")
-        .child(ui::text("Move these exact paths to Trash? Cancel changes nothing."))
+        .child(ui::text(
+            "Move these exact paths to Trash? Cancel changes nothing.",
+        ))
         .child(list)
         .child(
             ui::row()
@@ -151,19 +164,25 @@ fn trash_layer(paths: &[String], rows: u32) -> N {
 fn theme_layer(at: usize) -> N {
     let prefix = format!("{}.", list_id(List::Themes));
     let (select, activate) = (prefix.clone(), prefix);
-    let items = THEMES.iter().map(|theme| {
-        ui::item(theme.title)
-            .key(theme.id)
-            .detail(theme.detail)
-    });
+    let items = THEMES
+        .iter()
+        .map(|theme| ui::item(theme.title).key(theme.id).detail(theme.detail));
     let list = ui::list()
         .key("list")
         .selected(format!("{}.{}", list_id(List::Themes), THEMES[at].id))
         .max_lines(THEMES.len() as u32)
         .children(items)
-        .on_select(move |item| Msg::Select(List::Themes, item.strip_prefix(&select).unwrap_or(item).to_owned()))
+        .on_select(move |item| {
+            Msg::Select(
+                List::Themes,
+                item.strip_prefix(&select).unwrap_or(item).to_owned(),
+            )
+        })
         .on_activate(move |item| {
-            Msg::Activate(List::Themes, item.strip_prefix(&activate).unwrap_or(item).to_owned())
+            Msg::Activate(
+                List::Themes,
+                item.strip_prefix(&activate).unwrap_or(item).to_owned(),
+            )
         });
     ui::node("card")
         .key("themes")
@@ -201,32 +220,34 @@ pub(crate) fn preview_target(yz: &Snapshot, ui: &Ui) -> Option<Stamp> {
 }
 
 fn focus<'a>(yz: &'a Snapshot, ui: &'a Ui) -> Focus<'a> {
-        let cwd = ui.cwd(yz);
-        let files = yz.directory(cwd).map_or(&[][..], |folder| &folder.files[..]);
-        let hovered_name = yz
-            .hovered
-            .as_ref()
-            .filter(|_| yz.current.cwd == cwd)
-            .map(|hover| basename(&hover.url));
-        let active = ui
-            .active_file
-            .as_deref()
-            .or(hovered_name)
-            .or(files.first().map(String::as_str));
-        let index = active
-            .and_then(|name| files.iter().position(|file| file == name))
-            .map_or(1, |at| at + 1);
-        let url = active.map_or_else(|| cwd.to_owned(), |name| join_path(cwd, name));
-        let hovered = yz.hovered.as_ref().filter(|hover| hover.url == url);
-        Focus {
-            cwd,
-            files,
-            active,
-            index,
-            url,
-            hovered,
-            is_dir: active.and_then(|name| yz.is_dir(cwd, name)),
-        }
+    let cwd = ui.cwd(yz);
+    let files = yz
+        .directory(cwd)
+        .map_or(&[][..], |folder| &folder.files[..]);
+    let hovered_name = yz
+        .hovered
+        .as_ref()
+        .filter(|_| yz.current.cwd == cwd)
+        .map(|hover| basename(&hover.url));
+    let active = ui
+        .active_file
+        .as_deref()
+        .or(hovered_name)
+        .or(files.first().map(String::as_str));
+    let index = active
+        .and_then(|name| files.iter().position(|file| file == name))
+        .map_or(1, |at| at + 1);
+    let url = active.map_or_else(|| cwd.to_owned(), |name| join_path(cwd, name));
+    let hovered = yz.hovered.as_ref().filter(|hover| hover.url == url);
+    Focus {
+        cwd,
+        files,
+        active,
+        index,
+        url,
+        hovered,
+        is_dir: active.and_then(|name| yz.is_dir(cwd, name)),
+    }
 }
 
 impl Browser<'_> {
@@ -240,7 +261,11 @@ impl Browser<'_> {
         rows.push(header);
         rows.push(self.input_row());
         rows.push(self.columns(&focus));
-        let browser = ui::col().role("yazi.browser").key("browser").prop("gap", "sm").children(rows);
+        let browser = ui::col()
+            .role("yazi.browser")
+            .key("browser")
+            .prop("gap", "sm")
+            .children(rows);
         (browser.into(), path_layer)
     }
 
@@ -254,20 +279,37 @@ impl Browser<'_> {
             ui::badge(label)
                 .tone(if tab.active { "accent" } else { "muted" })
                 .key(format!("tab{}", index + 1))
-                .role(if tab.active { "yazi.tab-active" } else { "yazi.tab" })
+                .role(if tab.active {
+                    "yazi.tab-active"
+                } else {
+                    "yazi.tab"
+                })
                 .prop("active", tab.active)
                 .on_click(Msg::TabSwitch(index))
         });
-        ui::row().role("yazi.tab-bar").key("tabs").prop("gap", "xs").children(tabs).into()
+        ui::row()
+            .role("yazi.tab-bar")
+            .key("tabs")
+            .prop("gap", "xs")
+            .children(tabs)
+            .into()
     }
 
     fn path_header(&self, cwd: &str) -> (N, Option<N>) {
         let mut children: Vec<N> = Vec::new();
         let mut layer = None;
         if let Mode::Path(editor) = &self.frame.ui.mode {
-            children.push(field("field", Field::Path, Some("yazi.path-input"), editor, Some("Directory path")));
+            children.push(field(
+                "field",
+                Field::Path,
+                Some("yazi.path-input"),
+                editor,
+                Some("Directory path"),
+            ));
             children.push(button("go", ui::text("Go"), Msg::PathSubmit).role("yazi.path-go"));
-            children.push(button("cancel", ui::text("Cancel"), Msg::PathCancel).role("yazi.path-cancel"));
+            children.push(
+                button("cancel", ui::text("Cancel"), Msg::PathCancel).role("yazi.path-cancel"),
+            );
         } else {
             let segments = path_segments(cwd, self.frame.home);
             let budget = self.frame.cols.saturating_sub(12).max(8) as usize;
@@ -324,7 +366,10 @@ impl Browser<'_> {
             );
             if self.frame.ui.path_menu {
                 let mut ancestors: Vec<N> = (2..first).map(crumb).collect();
-                ancestors.push(button("cancel", ui::text("Cancel [Esc]"), Msg::PathCancel).role("yazi.path-cancel"));
+                ancestors.push(
+                    button("cancel", ui::text("Cancel [Esc]"), Msg::PathCancel)
+                        .role("yazi.path-cancel"),
+                );
                 layer = Some(
                     ui::node("card")
                         .key("ancestors")
@@ -354,15 +399,20 @@ impl Browser<'_> {
         let caret = |tone: &str| span(" ▎", tone);
         let bubble = |text: String, tone: &str| spans(vec![span(text, "strong"), caret(tone)]);
         let parts: Option<(&str, N, N, &str)> = match &ui.mode {
-            Mode::Command(query) => Some((
-                "shell",
-                ui::badge("Shell [;]").tone("warn").into(),
-                bubble(format!(" ;{query}"), "warn"),
-                "Cancel [Esc]",
-            )),
+            Mode::Command { query, block } => {
+                let sigil = if *block { ':' } else { ';' };
+                Some((
+                    "shell",
+                    ui::badge(format!("Shell [{sigil}]")).tone("warn").into(),
+                    bubble(format!(" {sigil}{query}"), "warn"),
+                    "Cancel [Esc]",
+                ))
+            }
             Mode::Find { query, previous } => Some((
                 "find",
-                ui::badge(if *previous { "Find [?]" } else { "Find [/]" }).tone("accent").into(),
+                ui::badge(if *previous { "Find [?]" } else { "Find [/]" })
+                    .tone("accent")
+                    .into(),
                 bubble(format!(" {query}"), "accent"),
                 "Cancel [Esc]",
             )),
@@ -397,7 +447,11 @@ impl Browser<'_> {
             None => ui::row().child(match self.frame.notice {
                 Some((level, text)) => spans(vec![span(
                     text,
-                    if level == Level::Error { "error" } else { "muted" },
+                    if level == Level::Error {
+                        "error"
+                    } else {
+                        "muted"
+                    },
                 )])
                 .role("yazi.notice"),
                 None => ui::text(" ").into(),
@@ -415,7 +469,12 @@ impl Browser<'_> {
         let yz = self.yz;
         let selected: HashSet<&str> = yz.selected_urls.iter().map(String::as_str).collect();
         let parent = self.parent_column(focus.cwd, lines, &selected);
-        let middle_title = format!("{} ({}/{})", basename(focus.cwd), focus.index, focus.files.len());
+        let middle_title = format!(
+            "{} ({}/{})",
+            basename(focus.cwd),
+            focus.index,
+            focus.files.len()
+        );
         let middle = match yz.directory(focus.cwd).filter(|_| !focus.files.is_empty()) {
             Some(folder) => self.list(folder, lines, List::Files, focus.active, &selected),
             None => muted(if focus.cwd == yz.current.cwd {
@@ -432,7 +491,11 @@ impl Browser<'_> {
             .preview_column(focus, lines, &selected)
             .role("yazi.column.preview")
             .key("preview")
-            .title(if focus.active.is_some() { focus.url.clone() } else { "Preview".to_owned() });
+            .title(if focus.active.is_some() {
+                focus.url.clone()
+            } else {
+                "Preview".to_owned()
+            });
         ui::row()
             .role("yazi.columns")
             .key("columns")
@@ -444,7 +507,11 @@ impl Browser<'_> {
         let parent = parent_dir(cwd);
         let folder = parent.and_then(|parent| self.yz.directory(parent));
         let (Some(parent), Some(folder)) = (parent, folder) else {
-            let note = if cwd == "/" { "(root)" } else { "Waiting for Yazi directory metadata..." };
+            let note = if cwd == "/" {
+                "(root)"
+            } else {
+                "Waiting for Yazi directory metadata..."
+            };
             return card(vec![span("Parent", "muted")], vec![muted(note)])
                 .role("yazi.column.parent")
                 .key("parent");
@@ -488,12 +555,20 @@ impl Browser<'_> {
                     ),
                 ];
                 match folder {
-                    Some(folder) if count != Some(0) && !(count.is_none() && folder.files.is_empty()) => {
+                    Some(folder)
+                        if count != Some(0) && !(count.is_none() && folder.files.is_empty()) =>
+                    {
                         let first = folder.files.first().map(String::as_str);
-                        card(heading, vec![self.list(folder, lines, List::Child, first, selected)])
+                        card(
+                            heading,
+                            vec![self.list(folder, lines, List::Child, first, selected)],
+                        )
                     }
                     Some(_) if count == Some(0) => card(heading, vec![muted("(empty directory)")]),
-                    _ => card(heading, vec![muted("Waiting for Yazi directory preview...")]),
+                    _ => card(
+                        heading,
+                        vec![muted("Waiting for Yazi directory preview...")],
+                    ),
                 }
             }
             None => card(
@@ -502,9 +577,13 @@ impl Browser<'_> {
             ),
             Some(false) => {
                 let size = focus.hovered.and_then(|hover| hover.size);
-                let permissions = format::permissions(focus.hovered.and_then(|hover| hover.permissions.as_deref()));
+                let permissions = format::permissions(
+                    focus.hovered.and_then(|hover| hover.permissions.as_deref()),
+                );
                 let (kind, content) = match self.frame.preview {
-                    Some(Slot::Ready(preview)) => (preview.kind(active), self.preview(preview, active, lines)),
+                    Some(Load::Ready(preview)) => {
+                        (preview.kind(active), self.preview(preview, active, lines))
+                    }
                     _ => (String::new(), ui::col().into()),
                 };
                 card(
@@ -517,7 +596,9 @@ impl Browser<'_> {
                             .prop("wrap", true)
                             .children([
                                 muted(kind),
-                                ui::text(format::size(size)).role("yazi.preview-size").into(),
+                                ui::text(format::size(size))
+                                    .role("yazi.preview-size")
+                                    .into(),
                                 ui::text(permissions)
                                     .role("yazi.preview-permissions")
                                     .tone("muted")
@@ -541,7 +622,10 @@ impl Browser<'_> {
                 .blob(blob)
                 .alt(active)
                 .role("yazi.image")
-                .prop("max", json!({"w": 1, "h": format!("{}lines", lines.saturating_sub(reserve).max(1))}))
+                .prop(
+                    "max",
+                    json!({"w": 1, "h": format!("{}lines", lines.saturating_sub(reserve).max(1))}),
+                )
                 .into()
         };
         let skip = |text: &str| -> String {
@@ -578,16 +662,24 @@ impl Browser<'_> {
                     })
                     .collect();
                 if items.len() > 18 {
-                    entries.push(muted(format!("… and {} more files inside", items.len() - 18)));
+                    entries.push(muted(format!(
+                        "… and {} more files inside",
+                        items.len() - 18
+                    )));
                 }
                 ui::col()
-                    .child(spans(vec![span(format!("Archive Contents ({} items)", items.len()), "warn")]))
+                    .child(spans(vec![span(
+                        format!("Archive Contents ({} items)", items.len()),
+                        "warn",
+                    )]))
                     .child(ui::rule().label(""))
                     .child(ui::col().children(entries))
                     .into()
             }
             Preview::Image { size: 0, .. } => muted("Image file is empty"),
-            Preview::Image { ext, size, blob, .. } => match blob {
+            Preview::Image {
+                ext, size, blob, ..
+            } => match blob {
                 Some(Blob::Id(id)) => ui::col()
                     .role("yazi.image-preview")
                     .prop("gap", "sm")
@@ -601,9 +693,10 @@ impl Browser<'_> {
                 _ => spans(vec![span("Image preview unavailable", "warn")]),
             },
             Preview::Pdf { meta, cover } => {
-                let pages = meta
-                    .get("Pages")
-                    .map_or_else(|| "PDF Document".to_owned(), |pages| format!("{pages} pages"));
+                let pages = meta.get("Pages").map_or_else(
+                    || "PDF Document".to_owned(),
+                    |pages| format!("{pages} pages"),
+                );
                 let mut head = vec![span("PDF", "badge"), span(format!(" {pages}"), "strong")];
                 if let Some(version) = meta.get("PDF version") {
                     head.push(span(format!(" (v{version})"), "muted"));
@@ -630,13 +723,13 @@ impl Browser<'_> {
             Preview::Markdown(text) => ui::md(skip(text)).into(),
             Preview::Model { fence, text } => {
                 // The fence must outlast any backtick run inside the file.
-                let longest = text
-                    .split(|c| c != '`')
-                    .map(str::len)
-                    .max()
-                    .unwrap_or(0);
+                let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
                 let ticks = "`".repeat(longest.max(2) + 1);
-                let body = if text.ends_with('\n') { text.clone() } else { format!("{text}\n") };
+                let body = if text.ends_with('\n') {
+                    text.clone()
+                } else {
+                    format!("{text}\n")
+                };
                 ui::col()
                     .role("yazi.model-preview")
                     .prop("gap", "none")
@@ -665,8 +758,8 @@ impl Browser<'_> {
         let yz = self.yz;
         let files = &folder.files;
         let id = list_id(list);
-        let selected_index = selected_name
-            .and_then(|name| files.iter().position(|file| file == name));
+        let selected_index =
+            selected_name.and_then(|name| files.iter().position(|file| file == name));
         // Large listings send a window around the cursor; native lists scroll within it.
         let range = if files.len() <= 150 {
             0..files.len()
@@ -680,11 +773,11 @@ impl Browser<'_> {
         let items = range.map(|index| {
             let name = &files[index];
             let url = join_path(&folder.cwd, name);
-            let is_dir = folder
-                .dirs
-                .get(name)
-                .copied()
-                .or_else(|| hovered.filter(|hover| hover.url == url).and_then(|hover| hover.dir));
+            let is_dir = folder.dirs.get(name).copied().or_else(|| {
+                hovered
+                    .filter(|hover| hover.url == url)
+                    .and_then(|hover| hover.dir)
+            });
             let (glyph, tone) = format::file_icon(folder.icon(name), name, is_dir);
             let is_selected = selected.contains(url.as_str());
             let mut label = Vec::with_capacity(5);
@@ -720,9 +813,17 @@ impl Browser<'_> {
             })
             .max_lines(lines)
             .children(items)
-            .on_select(move |item| Msg::Select(list, item.strip_prefix(&on_select).unwrap_or(item).to_owned()))
+            .on_select(move |item| {
+                Msg::Select(
+                    list,
+                    item.strip_prefix(&on_select).unwrap_or(item).to_owned(),
+                )
+            })
             .on_activate(move |item| {
-                Msg::Activate(list, item.strip_prefix(&on_activate).unwrap_or(item).to_owned())
+                Msg::Activate(
+                    list,
+                    item.strip_prefix(&on_activate).unwrap_or(item).to_owned(),
+                )
             });
         if let (Some(name), false) = (selected_name, self.frame.reveal_withheld) {
             if selected_index.is_some() {
@@ -747,7 +848,7 @@ impl Browser<'_> {
         let yz = self.yz;
         let mode = &self.frame.ui.mode;
         let label = match mode {
-            Mode::Command(_) => "CMD",
+            Mode::Command { .. } => "CMD",
             Mode::Find { .. } => "FIND",
             Mode::Filter => "FILTER",
             Mode::Create(_) => "CREATE",
@@ -758,13 +859,16 @@ impl Browser<'_> {
                 _ => "NOR",
             },
         };
-        let warn = matches!(mode, Mode::Command(_) | Mode::Create(_) | Mode::Rename { .. })
-            || yz.mode != "normal";
+        let warn = matches!(
+            mode,
+            Mode::Command { .. } | Mode::Create(_) | Mode::Rename { .. }
+        ) || yz.mode != "normal";
         let pill = if warn { ".warn" } else { "" };
         let total = focus.files.len();
         let percent = (focus.index * 100).checked_div(total).unwrap_or(0);
         let size = focus.hovered.and_then(|hover| hover.size);
-        let permissions = format::permissions(focus.hovered.and_then(|hover| hover.permissions.as_deref()));
+        let permissions =
+            format::permissions(focus.hovered.and_then(|hover| hover.permissions.as_deref()));
         let permission_spans = permissions
             .chars()
             .map(|c| span(c.to_string(), format::permission_tone(c)))
@@ -804,7 +908,13 @@ impl Browser<'_> {
 }
 
 /// An editable field showing the caret and selection of `editor`.
-fn field(key: &str, field: Field, role: Option<&str>, editor: &Editor, placeholder: Option<&str>) -> N {
+fn field(
+    key: &str,
+    field: Field,
+    role: Option<&str>,
+    editor: &Editor,
+    placeholder: Option<&str>,
+) -> N {
     let mut node = ui::node("input")
         .key(key)
         .prop("text", &editor.text)

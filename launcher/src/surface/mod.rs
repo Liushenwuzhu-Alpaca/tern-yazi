@@ -1,7 +1,6 @@
-//! The browser as a program surface in the shell pane that launched Yazi. This process owns
-//! the pane's tty (through the Tern session) and supervises Yazi on a private PTY; the two
-//! talk through the runtime inbox and `ya emit-to`. Nothing is parked: closing the surface
-//! returns the shell its prompt.
+//! The browser as a program surface in the pane that launched Yazi. This process owns the
+//! pane's tty (through the Tern session) and supervises Yazi on a private PTY; the two talk
+//! through the runtime inbox and `ya emit-to`. Closing the surface returns the shell its prompt.
 
 mod actions;
 mod format;
@@ -10,6 +9,7 @@ mod model;
 mod preview;
 mod theme;
 mod view;
+mod window;
 
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -26,8 +26,9 @@ use crate::sys::{install_signals, pending_signal};
 use actions::Actions;
 use input::{Effect, Level, Msg, Ui};
 use model::{Listing, Snapshot, StateRecord};
-use preview::{Blob, Preview, Previews, Slot};
+use preview::{Blob, Load, Preview, Previews};
 use view::{Frame, Waiting};
+use window::Window;
 
 const FRAME: Duration = Duration::from_millis(33);
 const TICK: Duration = Duration::from_millis(25);
@@ -89,7 +90,10 @@ impl Snapshots {
 
     /// Reads a newly published generation; true when the snapshot or its failure changed.
     fn refresh(&mut self, inbox: &Inbox) -> bool {
-        let stamps = (inbox.stamp(&self.state_name), inbox.stamp(&self.listing_name));
+        let stamps = (
+            inbox.stamp(&self.state_name),
+            inbox.stamp(&self.listing_name),
+        );
         if stamps == self.stamps {
             return false;
         }
@@ -110,19 +114,26 @@ impl Snapshots {
     fn load(&mut self, inbox: &Inbox) -> Result<Option<Snapshot>, String> {
         let (bytes, _) = inbox
             .read(&self.state_name, NATIVE_CAP, false)
-            .map_err(|error| format!("Cannot read complete Yazi state (256 KiB maximum): {error}"))?;
-        let record = StateRecord::parse(&bytes, &inbox.cid)?;
-        let stale = self
-            .listing
-            .as_ref()
-            .is_none_or(|listing| listing.epoch != record.epoch || listing.revision != record.revision);
-        if stale {
-            let (bytes, _) = inbox.read(&self.listing_name, LISTING_CAP, false).map_err(|error| {
-                format!("Cannot read complete Yazi listing (16 MiB maximum): {error}")
+            .map_err(|error| {
+                format!("Cannot read complete Yazi state (256 KiB maximum): {error}")
             })?;
+        let record = StateRecord::parse(&bytes, &inbox.cid)?;
+        let stale = self.listing.as_ref().is_none_or(|listing| {
+            listing.epoch != record.epoch || listing.revision != record.revision
+        });
+        if stale {
+            let (bytes, _) =
+                inbox
+                    .read(&self.listing_name, LISTING_CAP, false)
+                    .map_err(|error| {
+                        format!("Cannot read complete Yazi listing (16 MiB maximum): {error}")
+                    })?;
             self.listing = Some(Listing::parse(&bytes)?);
         }
-        Ok(self.listing.as_ref().and_then(|listing| record.join(listing)))
+        Ok(self
+            .listing
+            .as_ref()
+            .and_then(|listing| record.join(listing)))
     }
 }
 
@@ -134,6 +145,7 @@ struct App {
     actions: Actions,
     snapshots: Snapshots,
     previews: Previews,
+    window: Window,
     notice: Option<(Level, String, Instant)>,
     home: String,
     cols: u32,
@@ -158,9 +170,23 @@ impl App {
                 Effect::Notice(level, text) => self.notify(level, text),
                 Effect::SaveTheme(at) => {
                     if let Err(error) = theme::save(at) {
-                        self.notify(Level::Error, format!("Cannot save the layout theme: {error}"));
+                        self.notify(
+                            Level::Error,
+                            format!("Cannot save the layout theme: {error}"),
+                        );
                     }
                 }
+                Effect::Open(paths) => {
+                    self.log.line(format!("open {paths:?}"));
+                    self.window.open(paths)
+                }
+                Effect::Terminal(cwd) => self.window.terminal(cwd),
+                Effect::Copy(text) => match window::copy(&text) {
+                    Ok(()) => {
+                        self.notify(Level::Info, format!("Copied {}", text.replace('\n', ", ")))
+                    }
+                    Err(error) => self.notify(Level::Error, format!("Cannot copy: {error}")),
+                },
                 Effect::Quit => return Some(0),
             }
         }
@@ -184,7 +210,10 @@ impl App {
                 self.apply(effects)
             }
             Input::Event(Event::Resize(resize)) => {
-                self.log.line(format!("resize cols={} visible={:?}", resize.cols, resize.visible));
+                self.log.line(format!(
+                    "resize cols={} visible={:?}",
+                    resize.cols, resize.visible
+                ));
                 if resize.cols > 0 && resize.cols != self.cols {
                     self.cols = resize.cols;
                     self.dirty = true;
@@ -192,7 +221,10 @@ impl App {
                 None
             }
             Input::Event(Event::Error(error)) => {
-                self.log.line(format!("surface error: {} (sheet {:?}, id {:?})", error.msg, error.sheet, error.id));
+                self.log.line(format!(
+                    "surface error: {} (sheet {:?}, id {:?})",
+                    error.msg, error.sheet, error.id
+                ));
                 None
             }
             Input::Event(_) => None,
@@ -205,7 +237,10 @@ impl App {
                 self.actions.clear();
                 self.ui.reset();
             }
-            let detail = reply.error.clone().unwrap_or_else(|| "No acknowledgement".to_owned());
+            let detail = reply
+                .error
+                .clone()
+                .unwrap_or_else(|| "No acknowledgement".to_owned());
             self.notify(Level::Error, format!("Yazi request failed: {detail}"));
         }
         let effects = self.ui.reply(then, &reply);
@@ -217,17 +252,17 @@ impl App {
         let Some(preview) = self.previews.ready_mut() else {
             return;
         };
-        let slot = match preview {
+        let blob = match preview {
             Preview::Image { blob, .. } => blob,
             Preview::Pdf { cover, .. } => cover,
             _ => return,
         };
-        if let Some(Blob::Bytes(..)) = slot {
-            let Some(Blob::Bytes(bytes, mime)) = slot.take() else {
+        if let Some(Blob::Bytes(..)) = blob {
+            let Some(Blob::Bytes(bytes, mime)) = blob.take() else {
                 return;
             };
             match self.session.blob(bytes, Some(mime)) {
-                Ok(id) => *slot = Some(Blob::Id(id)),
+                Ok(id) => *blob = Some(Blob::Id(id)),
                 Err(error) => self.log.line(format!("blob failed: {error}")),
             }
         }
@@ -236,8 +271,8 @@ impl App {
     fn render(&mut self) -> io::Result<()> {
         let yz = self.snapshots.current.as_ref();
         let target = yz.and_then(|yz| view::preview_target(yz, &self.ui));
-        let slot = target.as_ref().and_then(|target| self.previews.get(target));
-        if let Some(Slot::Loading(started)) = slot {
+        let state = target.as_ref().and_then(|target| self.previews.get(target));
+        if let Some(Load::Loading(started)) = state {
             if started.elapsed() < PREVIEW_GRACE {
                 return Ok(());
             }
@@ -254,8 +289,11 @@ impl App {
             yz: if failure.is_some() { None } else { yz },
             waiting: failure.map_or(Waiting::Starting, Waiting::Failed),
             ui: &self.ui,
-            preview: slot,
-            notice: self.notice.as_ref().map(|(level, text, _)| (*level, text.as_str())),
+            preview: state,
+            notice: self
+                .notice
+                .as_ref()
+                .map(|(level, text, _)| (*level, text.as_str())),
             cols: self.cols,
             rows: u32::from(self.rows),
             home: &self.home,
@@ -270,7 +308,10 @@ impl App {
     }
 
     /// One pass over everything that is not terminal input.
-    fn tick(&mut self, inbox: &Inbox, backend: &Backend, ready: bool) {
+    fn tick(&mut self, inbox: &Inbox, backend: &mut Backend, ready: bool) {
+        while let Some(failure) = self.window.failure() {
+            self.notify(Level::Error, failure);
+        }
         if ready && self.snapshots.refresh(inbox) {
             if let Some(yz) = &self.snapshots.current {
                 self.ui.sync(yz, self.actions.pending_filter());
@@ -300,7 +341,11 @@ impl App {
             self.upload();
             self.dirty = true;
         }
-        if self.notice.as_ref().is_some_and(|(_, _, at)| at.elapsed() >= NOTICE) {
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|(_, _, at)| at.elapsed() >= NOTICE)
+        {
             self.notice = None;
             self.dirty = true;
         }
@@ -312,13 +357,20 @@ pub(crate) fn run(launch: &Launch, real: &OsStr, args: &[OsString]) -> io::Resul
     // The session saves these and restores them on close, so a hangup that arrives while the
     // pane goes away still ends in the bounded shutdown rather than the default action.
     install_signals();
-    let Some(mut session) = Session::<Msg>::connect(Options::new().app("tern-yazi")).map_err(sdk)? else {
+    let Some(mut session) =
+        Session::<Msg>::connect(Options::new().app("tern-yazi")).map_err(sdk)?
+    else {
         return supervisor::passthrough(real, args);
     };
     // Ours replace the session's restore-and-die handlers, so a signal ends the loop and the
     // session still restores the tty on close.
     let caller_umask = supervisor::prepare();
-    let opened = session.open(SurfaceOptions::screen().title("Yazi").role("tern_yazi.browser").keep(false));
+    let opened = session.open(
+        SurfaceOptions::screen()
+            .title("Yazi")
+            .role("tern_yazi.browser")
+            .keep(false),
+    );
     let sf = match opened {
         Ok(sf) => sf,
         Err(error) => {
@@ -339,8 +391,7 @@ pub(crate) fn run(launch: &Launch, real: &OsStr, args: &[OsString]) -> io::Resul
             return Err(error);
         }
     };
-    let pane = env::var("TERN_PANE").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-    let mut backend = match supervisor::spawn(&inbox, launch, pane, caller_umask) {
+    let mut backend = match supervisor::spawn(&inbox, launch, caller_umask) {
         Ok(backend) => backend,
         Err(error) => {
             let _ = session.close();
@@ -356,6 +407,7 @@ pub(crate) fn run(launch: &Launch, real: &OsStr, args: &[OsString]) -> io::Resul
         actions: Actions::new(&inbox.cid, &inbox.token),
         snapshots: Snapshots::new(&inbox.cid),
         previews: Previews::new(),
+        window: Window::new(env::var("TERN_PANE").unwrap_or_default()),
         notice: None,
         home: env::var("HOME").unwrap_or_default(),
         cols,
@@ -374,18 +426,20 @@ pub(crate) fn run(launch: &Launch, real: &OsStr, args: &[OsString]) -> io::Resul
         }
         match startup.poll(&inbox, &mut backend) {
             Ok(Step::Starting) => {}
-            Ok(Step::Ready(_)) => ready = true,
+            Ok(Step::Ready) => ready = true,
             Ok(Step::Exited(code)) => break Ok(code),
             Err(error) => break Err(error),
         }
-        app.tick(&inbox, &backend, ready);
+        app.tick(&inbox, &mut backend, ready);
         if app.dirty {
             if let Err(error) = app.render() {
                 break Err(error);
             }
         }
         let wait = match app.last_frame {
-            Some(at) if app.dirty => FRAME.saturating_sub(at.elapsed()).clamp(Duration::from_millis(1), TICK),
+            Some(at) if app.dirty => FRAME
+                .saturating_sub(at.elapsed())
+                .clamp(Duration::from_millis(1), TICK),
             _ => TICK,
         };
         match app.session.next(Some(wait)) {
@@ -401,7 +455,12 @@ pub(crate) fn run(launch: &Launch, real: &OsStr, args: &[OsString]) -> io::Resul
             break Ok(0);
         }
     };
-    let App { mut session, sf, mut log, .. } = app;
+    let App {
+        mut session,
+        sf,
+        mut log,
+        ..
+    } = app;
     if session.is_open(sf) {
         let _ = session.close_surface(sf, false);
     }

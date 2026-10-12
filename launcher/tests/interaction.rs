@@ -1,12 +1,12 @@
 //! Real GUI interaction tests. No state or backend response is synthesized.
-//! Run through tests/smoke_luau.sh on Wayland/X11; prerequisites fail rather than skip.
-//! Tern 0.7 serve is standalone, so these tests explicitly use a daemon-backed window.
+//! Run through tests/interaction.sh on Wayland/X11; prerequisites fail rather than skip.
+//! Tern 0.7 `serve` runs without a daemon, so these tests explicitly use a daemon-backed window.
 
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::{self, DirBuilder, File};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{symlink, DirBuilderExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
@@ -229,14 +229,6 @@ fn pane_info(state: &Value, pane: u64) -> Option<&Value> {
         .find(|info| info["pane"].as_u64() == Some(pane))
 }
 
-fn parked_panes(state: &Value) -> impl Iterator<Item = &Value> {
-    state["panes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|info| info["parked"] == true)
-}
-
 fn pane_ids(state: &Value) -> BTreeSet<u64> {
     state["panes"]
         .as_array()
@@ -256,13 +248,10 @@ fn tab_layout(state: &Value, tab: u64) -> Option<&Value> {
 #[derive(Clone)]
 struct Client {
     cid: String,
-    token: String,
     owner: u64,
-    pane: u64,
     supervisor: Process,
     backend: Process,
     cwd: PathBuf,
-    nonce: String,
     owner_shell: Option<Process>,
     original_tab: Option<u64>,
     original_layout: Value,
@@ -528,38 +517,24 @@ impl Harness {
             .map(|_| ())
     }
 
-    fn fixture(&self, request: Value) -> TestResult<Value> {
-        fs::write(
-            self.path("fixture/request.json"),
-            serde_json::to_vec(&request).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        self.ctl("plugins", &["run", "plugin.slot-fixture.inspect"])?;
+    /// The window's panes, tabs and layout trees, as the fixture plugin observes them.
+    fn layout_state(&self) -> TestResult<Value> {
+        self.ctl("plugins", &["run", "plugin.layout-fixture.inspect"])?;
         read_json(&self.path("fixture/observed.json"))
             .ok_or("Real window fixture returned no observation".into())
     }
 
-    fn layout_state(&self) -> TestResult<Value> {
-        self.fixture(json!({"op": "inspect"}))
-    }
-
-    fn startup_panes(&self, original: &BTreeSet<u64>, native: Option<u64>) -> TestResult<()> {
-        // Read app state only: never send an event or command to wake native startup.
+    /// The surface draws in the launching pane: startup never adds a pane.
+    fn startup_panes(&self, original: &BTreeSet<u64>) -> TestResult<()> {
+        // Read app state only: never send an event or command to wake startup.
         let state = self.ctl("state", &[])?;
         let panes = state["panes"]
             .as_array()
             .ok_or("Startup observation has no real panes")?;
-        let mut added = 0;
         for pane in panes {
             let id = pane["id"].as_u64().ok_or("Startup pane has no actual ID")?;
-            if original.contains(&id) {
-                continue;
-            }
-            added += 1;
-            if added > 1 || native.is_some_and(|native| native != id) {
-                return Err(format!(
-                    "Native startup created an extra Task/terminal pane: {state}"
-                ));
+            if !original.contains(&id) {
+                return Err(format!("Startup created an extra pane: {state}"));
             }
         }
         Ok(())
@@ -569,50 +544,9 @@ impl Harness {
         self.wait("original real shell reaches its foreground prompt", |h| {
             let state = h.layout_state()?;
             Ok(pane_info(&state, owner)
-                .filter(|info| info["at_prompt"] == true && info["parked"] != true)
+                .filter(|info| info["at_prompt"] == true)
                 .map(|_| ()))
         })
-    }
-
-    fn restored(&mut self, client: &Client, exact: bool, focus: Option<u64>) -> TestResult<()> {
-        self.wait("same owner ID and original Bash survive native closure", |h| {
-            let state = h.layout_state()?;
-            let owner = pane_info(&state, client.owner).ok_or("Original shell pane vanished")?;
-            if owner["parked"] == true || owner["tab"].as_u64().is_none() || owner["at_prompt"] != true {
-                return Err(format!("owner not yet unparked/at prompt: {owner}"));
-            }
-            if !client.owner_shell.is_some_and(Process::alive) {
-                return Err("Closing native block destroyed or replaced its original Bash process".into());
-            }
-            if pane_info(&state, client.pane).is_some() || focus.is_some_and(|pane| state["focused"].as_u64() != Some(pane)) {
-                return Err(format!("native pane {} still present or focus {:?} not {:?}; owner {:?} pane {:?}; state {state}", client.pane, state["focused"].as_u64(), focus, client.owner, client.pane));
-            }
-            if exact {
-                let tab = client.original_tab.ok_or("Managed owner had no original tab")?;
-                let layout = tab_layout(&state, tab).ok_or("Original tab disappeared on preclose")?;
-                if layout["root"] != client.original_layout["root"] || layout["floats"] != client.original_layout["floats"]
-                    || layout["zoomed"] != client.original_layout["zoomed"] || owner["tab"].as_u64() != Some(tab) {
-                    return Err(format!("Preclose failed to restore exact original slot/ratios/tab: {layout}; original {}", client.original_layout));
-                }
-            }
-            Ok(Some(()))
-        })?;
-        let marker = self.path(&format!("shell-return-{}.txt", client.cid));
-        self.cli(&[
-            "run",
-            &client.owner.to_string(),
-            &format!("printf '%s\\n' \"$$\" > {}", quote(text(&marker))),
-        ])?;
-        self.wait(
-            "restored original Bash executes another real command",
-            |_| {
-                Ok(fs::read_to_string(&marker)
-                    .ok()
-                    .and_then(|s| s.trim().parse::<i32>().ok())
-                    .filter(|pid| client.owner_shell.is_some_and(|shell| shell.pid == *pid))
-                    .map(|_| ()))
-            },
-        )
     }
 
     fn wait<T>(
@@ -951,7 +885,6 @@ impl Harness {
             "files/cutdest",
             "other",
             "fixture",
-            "slot",
         ] {
             fs::create_dir_all(self.path(dir)).map_err(|e| e.to_string())?;
         }
@@ -977,6 +910,8 @@ impl Harness {
                 ),
             ),
             ("YAZI_CONFIG_HOME", text(&self.path("yazi"))),
+            // Surface diagnostics; the tty belongs to the surface.
+            ("TERN_YAZI_LOG", text(&self.path("surface.log"))),
             ("TERN_CONFIG_DIR", text(&self.path("config"))),
             ("TERN_DAEMON_SOCK", text(&self.path("daemon.sock"))),
             ("XDG_CONFIG_HOME", text(&self.path("config"))),
@@ -1029,44 +964,20 @@ impl Harness {
         self.execute("/usr/bin/yazi", &["--version".into()])?;
         self.execute("ya", &["--version".into()])?;
         self.cli(&["plugin", "link", &text(&self.repo)])?;
-        self.write_fixture("fixture/plugin.toml", "schema = 1\nid = \"slot-fixture\"\nname = \"Native Slot Interaction Fixture\"\nversion = \"1\"\nwindow = \"window.luau\"\n")?;
+        self.write_fixture("fixture/plugin.toml", "schema = 1\nid = \"layout-fixture\"\nname = \"Layout Inspection Fixture\"\nversion = \"1\"\nwindow = \"window.luau\"\n")?;
         let fixture_root =
             serde_json::to_string(&text(&self.path("fixture"))).map_err(|e| e.to_string())?;
-        self.write_fixture("fixture/window.luau", format!("local ROOT = {fixture_root}\n") + r#"
--- Observe and drive the real window through public APIs; never synthesize pane state.
+        self.write_fixture(
+            "fixture/window.luau",
+            format!("local ROOT = {fixture_root}\n")
+                + r#"
+-- Observe the real window through public APIs; never synthesize pane state.
 local function observed_tree(node)
     if not node then return tern.json.null end
     return { pane = node.pane, split = node.split, ratio = node.ratio,
         first = observed_tree(node[1]), second = observed_tree(node[2]) }
 end
-tern.command({ id = "inspect", title = "Inspect native slot fixture", run = function(cx)
-    local request = tern.json.decode(tern.fs.read(ROOT .. "/request.json", 65536))
-    local result = nil
-    if request.op == "shell-tab" then
-        result = cx.layout:new_tab({ cwd = request.cwd }, { focus = true })
-        assert(result, "No real shell tab was created")
-    elseif request.op == "split" then
-        result = cx.layout:split(request.pane, request.dir, { cwd = request.cwd }, { focus = true })
-    elseif request.op == "resize" then
-        local ok, err = cx.layout:resize(request.pane, request.dir, request.cells)
-        assert(ok, err)
-    elseif request.op == "float" then
-        local ok, err = cx.layout:float(request.pane, request.over, request.corner, { focus = true })
-        assert(ok, err)
-    elseif request.op == "new" then
-        local focused = cx.session:focused()
-        local info = focused and cx.session:pane(focused)
-        local cwd = info and not info.block and info.cwd or nil
-        local args = (type(cwd) == "string" and cwd ~= "") and { "cwd:" .. cwd } or nil
-        result = cx:new_block("tern-yazi.companion", args, request.how, { focus = true })
-        assert(result, "No real native Yazi block was created")
-    elseif request.op == "move-tab" then
-        local tab, err = cx.layout:move_to_new_tab(request.pane, nil, { focus = true })
-        assert(tab, err)
-        result = tab
-    elseif request.op ~= "inspect" then
-        error("Unknown native slot fixture operation")
-    end
+tern.command({ id = "inspect", title = "Inspect the window layout", run = function(cx)
     local layouts = {}
     for _, tab in ipairs(cx.session:tabs()) do
         local layout = cx.session:layout(tab.id)
@@ -1074,9 +985,10 @@ tern.command({ id = "inspect", title = "Inspect native slot fixture", run = func
             floats = layout.floats, zoomed = layout.zoomed, focus = layout.focus })
     end
     tern.fs.write(ROOT .. "/observed.json", tern.json.encode({ panes = cx.session:panes(),
-        tabs = cx.session:tabs(), layouts = layouts, focused = cx.session:focused(), result = result }))
+        tabs = cx.session:tabs(), layouts = layouts, focused = cx.session:focused() }))
 end })
-"#)?;
+"#,
+        )?;
         self.cli(&["plugin", "link", &text(&self.path("fixture"))])?;
         let renderer_log = File::create(self.path("renderer.log")).map_err(|e| e.to_string())?;
         let hook = env::var_os("TERN_YAZI_TEST_WINDOW_HOOK");
@@ -1211,17 +1123,18 @@ end })
             .as_u64()
             .ok_or("New tab returned no shell block")?;
         self.focus(owner)?;
-        self.wait("returned shell block is the focused real pane at its prompt", |h| {
-            let state = h.ctl("state", &[])?;
-            let layout = h.layout_state()?;
-            Ok((state["focused"]["id"].as_u64() == Some(owner)
-                && state["focused"]["cwd"] == text(cwd)
-                && layout["focused"].as_u64() == Some(owner)
-                && pane_info(&layout, owner).is_some_and(|info| {
-                    info["at_prompt"] == true && info["parked"] != true
-                }))
-            .then_some(()))
-        })?;
+        self.wait(
+            "returned shell block is the focused real pane at its prompt",
+            |h| {
+                let state = h.ctl("state", &[])?;
+                let layout = h.layout_state()?;
+                Ok((state["focused"]["id"].as_u64() == Some(owner)
+                    && state["focused"]["cwd"] == text(cwd)
+                    && layout["focused"].as_u64() == Some(owner)
+                    && pane_info(&layout, owner).is_some_and(|info| info["at_prompt"] == true))
+                .then_some(()))
+            },
+        )?;
         Ok(owner)
     }
 
@@ -1280,7 +1193,7 @@ end })
         self.paste(owner, &line)?;
         self.key("Enter")?;
         let supervisor = self.wait("actual managed supervisor process", |h| {
-            h.startup_panes(&original_panes, None)?;
+            h.startup_panes(&original_panes)?;
             let pid = h
                 .pid_markers()
                 .difference(&before)
@@ -1289,66 +1202,67 @@ end })
             Ok(pid.and_then(process).map(|(p, _, _)| p))
         })?;
         self.owned.insert(supervisor);
-        let client = self.wait("real Yazi publishes its first snapshot to the surface supervisor", |h| {
-            if !supervisor.alive() {
-                return Err(format!(
-                    "Managed supervisor exited before its first snapshot; owner output: {}",
-                    h.capture(owner)?
-                ));
-            }
-            let entries = fs::read_dir(h.inbox()).map_err(|e| e.to_string())?;
-            for entry in entries.flatten() {
-                if known.contains(&entry.file_name()) {
-                    continue;
+        let client = self.wait(
+            "real Yazi publishes its first snapshot to the surface supervisor",
+            |h| {
+                if !supervisor.alive() {
+                    return Err(format!(
+                        "Managed supervisor exited before its first snapshot; owner output: {}",
+                        h.capture(owner)?
+                    ));
                 }
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let Some(cid) = name.strip_prefix("state-").and_then(|s| s.strip_suffix(".json"))
-                else {
-                    continue;
-                };
-                if h.snapshot_id(cid)["cwd"] != text(&cwd) {
-                    continue;
+                let entries = fs::read_dir(h.inbox()).map_err(|e| e.to_string())?;
+                for entry in entries.flatten() {
+                    if known.contains(&entry.file_name()) {
+                        continue;
+                    }
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let Some(cid) = name
+                        .strip_prefix("state-")
+                        .and_then(|s| s.strip_suffix(".json"))
+                    else {
+                        continue;
+                    };
+                    if h.snapshot_id(cid)["cwd"] != text(&cwd) {
+                        continue;
+                    }
+                    let Some(backend) = descendants(supervisor).into_iter().find(|p| {
+                        fs::read_link(format!("/proc/{}/exe", p.pid))
+                            .is_ok_and(|path| path == Path::new("/usr/bin/yazi"))
+                    }) else {
+                        continue;
+                    };
+                    return Ok(Some(Client {
+                        cid: cid.to_owned(),
+                        owner,
+                        supervisor,
+                        backend,
+                        cwd: cwd.clone(),
+                        owner_shell: Some(owner_shell),
+                        original_tab: Some(original_tab),
+                        original_layout: original_layout.clone(),
+                        original_panes: original_panes.clone(),
+                    }));
                 }
-                let Some(backend) = descendants(supervisor).into_iter().find(|p| {
-                    fs::read_link(format!("/proc/{}/exe", p.pid))
-                        .is_ok_and(|path| path == Path::new("/usr/bin/yazi"))
-                }) else {
-                    continue;
-                };
-                return Ok(Some(Client {
-                    cid: cid.to_owned(),
-                    token: String::new(),
-                    owner,
-                    pane: owner,
-                    supervisor,
-                    backend,
-                    cwd: cwd.clone(),
-                    nonce: String::new(),
-                    owner_shell: Some(owner_shell),
-                    original_tab: Some(original_tab),
-                    original_layout: original_layout.clone(),
-                    original_panes: original_panes.clone(),
-                }));
-            }
-            Ok(None)
-        })?;
+                Ok(None)
+            },
+        )?;
         self.owned.extend(descendants(supervisor));
         self.clients.push(client.clone());
-        self.expect_ui(ROWS, "the shell pane draws the browser on its program surface", |value| {
-            !nodes(value).is_empty()
-        })?;
-        self.wait("the surface replaces nothing: same panes, layout and focus, nothing parked", |h| {
+        self.expect_ui(
+            ROWS,
+            "the shell pane draws the browser on its program surface",
+            |value| !nodes(value).is_empty(),
+        )?;
+        self.wait("the surface replaces nothing: same panes, layout and focus", |h| {
             let state = h.layout_state()?;
             let owner = pane_info(&state, client.owner).ok_or("Managed launch destroyed its owner")?;
             let layout = tab_layout(&state, original_tab).ok_or("Managed launch lost original tab")?;
-            let failing = if owner["parked"] == true { "owner parked" }
-                else if owner["tab"].as_u64() != Some(original_tab) { "owner left its tab" }
+            let failing = if owner["tab"].as_u64() != Some(original_tab) { "owner left its tab" }
                 else if pane_ids(&state) != client.original_panes { "pane set changed" }
                 else if layout["root"] != client.original_layout["root"] { "root tree changed" }
                 else if layout["floats"] != client.original_layout["floats"] { "floats changed" }
                 else if state["focused"].as_u64() != Some(client.owner) { "focus left the owner" }
-                else if parked_panes(&state).next().is_some() { "a pane is parked" }
-                else if !nodes(&h.tree(".pk-pile")?).is_empty() { "parked pile drawn" }
                 else { "" };
             if !failing.is_empty() {
                 return Err(format!("Surface launch changed the layout ({failing}): {state}; original {original}"));
@@ -1360,19 +1274,23 @@ end })
 
     /// After the surface closes: the same Bash is back at its prompt in the untouched layout.
     fn prompt_returned(&mut self, client: &Client) -> TestResult<()> {
-        self.wait("owner shell is back at its prompt with no surface and nothing parked", |h| {
+        self.wait("owner shell is back at its prompt with no surface", |h| {
             let state = h.layout_state()?;
             let owner = pane_info(&state, client.owner).ok_or("Original shell pane vanished")?;
-            if owner["parked"] == true || owner["at_prompt"] != true {
+            if owner["at_prompt"] != true {
                 return Err(format!("owner not at its prompt: {owner}"));
             }
-            let tab = client.original_tab.ok_or("Managed owner had no original tab")?;
+            let tab = client
+                .original_tab
+                .ok_or("Managed owner had no original tab")?;
             let layout = tab_layout(&state, tab).ok_or("Original tab disappeared")?;
-            if owner["tab"].as_u64() != Some(tab) || layout["root"] != client.original_layout["root"] {
-                return Err(format!("layout changed: {layout}; original {}", client.original_layout));
-            }
-            if parked_panes(&state).next().is_some() || !nodes(&h.tree(".pk-pile")?).is_empty() {
-                return Err(format!("parked panes remain: {state}"));
+            if owner["tab"].as_u64() != Some(tab)
+                || layout["root"] != client.original_layout["root"]
+            {
+                return Err(format!(
+                    "layout changed: {layout}; original {}",
+                    client.original_layout
+                ));
             }
             if !nodes(&h.tree(SURFACE_BROWSER)?).is_empty() {
                 return Err("program surface still drawn".into());
@@ -1404,9 +1322,10 @@ end })
                 return Ok(None);
             }
             match stable {
-                Some((previous, since)) if previous == pane => {
-                    Ok((Instant::now().duration_since(since) >= Duration::from_millis(600)).then_some(pane))
-                }
+                Some((previous, since)) if previous == pane => Ok((Instant::now()
+                    .duration_since(since)
+                    >= Duration::from_millis(600))
+                .then_some(pane)),
                 _ => {
                     stable = Some((pane, Instant::now()));
                     Ok(None)
@@ -1424,145 +1343,6 @@ end })
             thread::sleep(POLL);
         }
         Ok(size)
-    }
-
-    fn standalone(
-        &mut self,
-        pane: u64,
-        cwd: PathBuf,
-        original_panes: BTreeSet<u64>,
-    ) -> TestResult<Client> {
-        let client = self.wait("no-argument native block starts its own real Yazi without a terminal", |h| {
-            h.startup_panes(&original_panes, Some(pane))?;
-            let binding = read_json(&h.inbox().join(format!("native-{pane}.json"))).unwrap_or(Value::Null);
-            let Some(cid) = binding["client_id"].as_str() else { return Ok(None) };
-            let Some(token) = binding["token"].as_str() else { return Ok(None) };
-            let health = read_json(&h.inbox().join(format!("managed-{cid}.json"))).unwrap_or(Value::Null);
-            let snapshot = h.snapshot_id(cid);
-            if health["owner_kind"] != "standalone" || health["owner_pane"].as_u64() != Some(pane)
-                || binding["native_pane"].as_u64() != Some(pane) || health["token"] != token || snapshot["cwd"] != text(&cwd) {
-                return Ok(None);
-            }
-            let lease = fs::read_to_string(h.inbox().join(format!("managed-{cid}.lease"))).unwrap_or_default();
-            let fields: Vec<_> = lease.split_whitespace().collect();
-            if fields.len() != 5 || fields[0] != token || fields[1].parse::<u64>().ok() != Some(pane) {
-                return Ok(None);
-            }
-            for entry in fs::read_dir("/proc").map_err(|e| e.to_string())?.flatten() {
-                let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) else { continue };
-                if !fs::read_link(entry.path().join("exe")).is_ok_and(|exe| exe == Path::new("/usr/bin/yazi")) {
-                    continue;
-                }
-                let args = fs::read(entry.path().join("cmdline")).unwrap_or_default();
-                if !args.split(|byte| *byte == 0).any(|arg| arg == cid.as_bytes()) { continue; }
-                let Some((backend, parent, _)) = process(pid) else { continue };
-                let Some((supervisor, _, _)) = process(parent) else { continue };
-                let command = fs::read(format!("/proc/{}/cmdline", supervisor.pid)).map_err(|e| e.to_string())?;
-                let arguments: Vec<_> = command.split(|byte| *byte == 0).filter(|arg| !arg.is_empty()).collect();
-                let helper = fs::canonicalize(h.path("libexec/tern-yazi-launch")).map_err(|e| e.to_string())?;
-                let launched_helper = arguments.first().and_then(|arg| std::str::from_utf8(arg).ok())
-                    .and_then(|path| fs::canonicalize(path).ok());
-                let real = fs::read_to_string(h.path("libexec/tern-yazi-launch.real")).map_err(|e| e.to_string())?;
-                if launched_helper != Some(helper)
-                    || !arguments.windows(2).any(|pair| pair[0] == b"--real" && pair[1] == real.trim_end().as_bytes()) {
-                    return Err("Native supervisor did not discover the installed-prefix helper and its original-path metadata".into());
-                }
-                let environment = fs::read(format!("/proc/{}/environ", supervisor.pid)).map_err(|e| e.to_string())?;
-                if environment.split(|byte| *byte == 0).any(|entry|
-                    entry.starts_with(b"TERN_YAZI_LAUNCHER_PATH=") || entry.starts_with(b"TERN_YAZI_REAL=")) {
-                    return Err("Native installed-prefix startup was masked by a helper or original executable environment override".into());
-                }
-                return Ok(Some(Client { cid: cid.to_owned(), token: token.to_owned(), owner: pane, pane,
-                    supervisor, backend, cwd: cwd.clone(), nonce: fields[4].to_owned(), owner_shell: None,
-                    original_tab: None, original_layout: Value::Null, original_panes: BTreeSet::new() }));
-            }
-            Ok(None)
-        })?;
-        self.owned.extend(descendants(client.supervisor));
-        self.clients.push(client.clone());
-        self.expect_ui(
-            ROWS,
-            "standalone native block has actual usable file rows",
-            |value| !nodes(value).is_empty(),
-        )?;
-        Ok(client)
-    }
-
-    fn pinned_pair(&mut self, client: &Client, before: &Value, focused: u64) -> TestResult<()> {
-        self.wait("reload/reopen preserves real pane pair, token, nonce, layout and process identities", |h| {
-            let state = h.layout_state()?;
-            let lease = fs::read_to_string(h.inbox().join(format!("managed-{}.lease", client.cid))).unwrap_or_default();
-            let fields: Vec<_> = lease.split_whitespace().collect();
-            let health = read_json(&h.inbox().join(format!("managed-{}.json", client.cid))).unwrap_or(Value::Null);
-            let parked = client.owner == client.pane || pane_info(&state, client.owner)
-                .is_some_and(|owner| owner["parked"] == true && owner["tab"].is_null());
-            if pane_ids(&state) == pane_ids(before) && state["layouts"] == before["layouts"]
-                && state["focused"].as_u64() == Some(focused) && parked
-                && health["token"] == client.token && fields.first().copied() == Some(client.token.as_str())
-                && fields.get(1).and_then(|s| s.parse::<u64>().ok()) == Some(client.pane)
-                && fields.get(4).copied() == Some(client.nonce.as_str())
-                && client.supervisor.alive() && client.backend.alive() { Ok(Some(())) }
-            else { Err(format!("Pinned native pair changed after reload/reopen: {state}; original {before}; lease {lease}")) }
-        })
-    }
-
-    fn reopen_window(&mut self) -> TestResult<()> {
-        let mut previous = self
-            .renderer
-            .take()
-            .ok_or("Missing owned renderer to reopen")?;
-        previous.kill().map_err(|e| e.to_string())?;
-        previous.wait().map_err(|e| e.to_string())?;
-        if !self.daemon_process.is_some_and(Process::alive) {
-            return Err("Closing the renderer terminated its private session daemon".into());
-        }
-        let log = File::create(self.path("renderer-reopened.log")).map_err(|e| e.to_string())?;
-        let hook = env::var_os("TERN_YAZI_TEST_WINDOW_HOOK");
-        let mut renderer = if hook.is_some() {
-            let mut command = self.command("/bin/sh");
-            command.args([
-                "-c",
-                "kill -STOP $$; exec \"$@\"",
-                "tern-yazi-test-renderer",
-                &text(&self.tern),
-            ]);
-            command
-        } else {
-            self.command(&self.tern)
-        };
-        renderer
-            .args(["--control", &text(&self.path("control.sock")), "--dir", &text(&self.path("files"))])
-            .stdin(Stdio::piped())
-            .stdout(log.try_clone().map_err(|e| e.to_string())?)
-            .stderr(log)
-            .process_group(0);
-        self.renderer = Some(renderer.spawn().map_err(|e| e.to_string())?);
-        if let Some(hook) = hook {
-            let pid = self
-                .renderer
-                .as_ref()
-                .ok_or("Missing reopened renderer")?
-                .id();
-            self.wait("reopened owned renderer is stopped before showing", |_| {
-                Ok(process(pid as i32)
-                    .filter(|(_, _, state)| *state == 'T')
-                    .map(|_| ()))
-            })?;
-            self.execute(
-                Path::new(&hook),
-                &[pid.to_string(), text(&self.root), "start".into()],
-            )?;
-            if unsafe { libc::kill(pid as i32, libc::SIGCONT) } != 0 {
-                return Err(format!(
-                    "Cannot release reopened renderer: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-        }
-        self.wait(
-            "reopened real daemon-backed window has a control endpoint",
-            |h| Ok(h.ctl("state", &[]).ok().map(|_| ())),
-        )
     }
 
     fn click_node(&mut self, selector: &str, label: &str, double: bool) -> TestResult<()> {
@@ -1657,103 +1437,6 @@ end })
         Ok(())
     }
 
-    fn idle(&mut self, client: &Client, duration: Duration) -> TestResult<()> {
-        // Observe private files and the real PTY only: no ctl, screenshot, event or render wake.
-        let begin = Instant::now();
-        let initial = read_json(&self.inbox().join(format!("managed-{}.json", client.cid)))
-            .ok_or("Missing initial health")?["seq"]
-            .as_u64()
-            .unwrap_or(0);
-        let mut stable = None;
-        let initial_size = self.wait(
-            "real native lease and backend PTY dimensions settle without an artificial UI wake",
-            |h| {
-                let lease =
-                    fs::read_to_string(h.inbox().join(format!("managed-{}.lease", client.cid)))
-                        .map_err(|e| e.to_string())?;
-                let fields: Vec<_> = lease.split_whitespace().collect();
-                let size = (
-                    fields
-                        .get(2)
-                        .and_then(|s| s.parse::<u16>().ok())
-                        .unwrap_or(0),
-                    fields
-                        .get(3)
-                        .and_then(|s| s.parse::<u16>().ok())
-                        .unwrap_or(0),
-                );
-                if size.0 <= 1 || size.1 <= 1 || tty_size(client.backend)? != size {
-                    stable = None;
-                    return Ok(None);
-                }
-                match stable {
-                    Some((previous, since)) if previous == size => Ok((Instant::now()
-                        .duration_since(since)
-                        >= Duration::from_millis(600))
-                    .then_some(size)),
-                    _ => {
-                        stable = Some((size, Instant::now()));
-                        Ok(None)
-                    }
-                }
-            },
-        )?;
-        let mut progressed = false;
-        while begin.elapsed() < duration {
-            let health = read_json(&self.inbox().join(format!("managed-{}.json", client.cid)))
-                .ok_or("Health disappeared while idle")?;
-            progressed |= health["seq"].as_u64().unwrap_or(0) > initial;
-            let lease_path = self.inbox().join(format!("managed-{}.lease", client.cid));
-            let lease = fs::read_to_string(&lease_path).map_err(|e| e.to_string())?;
-            let fields: Vec<_> = lease.split_whitespace().collect();
-            if fields.len() < 5 {
-                thread::sleep(Duration::from_millis(20));
-                continue;
-            }
-            if fields.first().copied() != Some(client.token.as_str())
-                || fields.get(1).and_then(|s| s.parse::<u64>().ok()) != Some(client.pane)
-                || fields.get(4).copied() != Some(client.nonce.as_str())
-            {
-                return Err(format!(
-                    "Idle native lease lost its pinned client/pane identity: lease={lease:?}, expected token={}, pane={}, nonce={}",
-                    client.token, client.pane, client.nonce
-                ));
-            }
-            let leased_size = (
-                fields
-                    .get(2)
-                    .and_then(|s| s.parse::<u16>().ok())
-                    .ok_or("Lease has no native rows")?,
-                fields
-                    .get(3)
-                    .and_then(|s| s.parse::<u16>().ok())
-                    .ok_or("Lease has no native cols")?,
-            );
-            let actual_size = tty_size(client.backend)?;
-            if leased_size != initial_size || actual_size != initial_size {
-                return Err(format!("Idle native lease/real PTY dimensions changed: lease {leased_size:?}, PTY {actual_size:?}, initial {initial_size:?}"));
-            }
-            let age = fs::metadata(&lease_path)
-                .and_then(|m| m.modified())
-                .map_err(|e| e.to_string())?
-                .elapsed()
-                .map_err(|e| e.to_string())?;
-            if age >= Duration::from_secs(3)
-                || !client.supervisor.alive()
-                || !client.backend.alive()
-            {
-                return Err(format!(
-                    "Idle lease expired or a real backend exited; lease age {age:?}"
-                ));
-            }
-            thread::sleep(POLL);
-        }
-        if !progressed {
-            return Err("Real supervisor health did not progress during idle observation".into());
-        }
-        Ok(())
-    }
-
     fn shot(&self, name: &str) -> TestResult<()> {
         self.ctl("shot", &[name]).map(|_| ())
     }
@@ -1761,13 +1444,14 @@ end })
     /// Takes a screenshot and copies the PNG out of the artifact root into `dir`.
     fn keep_shot(&self, name: &str, dir: &Path) -> TestResult<PathBuf> {
         let shot = self.ctl("shot", &[name])?;
-        let png = shot["png"].as_str().ok_or_else(|| format!("Screenshot has no PNG: {shot}"))?;
+        let png = shot["png"]
+            .as_str()
+            .ok_or_else(|| format!("Screenshot has no PNG: {shot}"))?;
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let kept = dir.join(format!("{name}.png"));
         fs::copy(self.root.join(png), &kept).map_err(|e| e.to_string())?;
         Ok(kept)
     }
-
 
     fn opened(&mut self, path: &Path) -> TestResult<u64> {
         self.wait(
@@ -1788,63 +1472,33 @@ end })
 
     fn close_file(&mut self, client: &Client, file: u64) -> TestResult<()> {
         self.cli(&["close", &file.to_string()])?;
-        self.focus(client.pane)?;
-        self.expect_ui(ROWS, "native browser restored after Tern file close", |v| {
-            !nodes(v).is_empty()
-        })?;
+        self.focus(client.owner)?;
+        self.expect_ui(
+            ROWS,
+            "the browser is visible again after the Tern file closes",
+            |v| !nodes(v).is_empty(),
+        )?;
         Ok(())
     }
 
-    fn shell(&mut self, client: &Client, input: &str, background: bool) -> TestResult<Option<u64>> {
-        self.focus(client.pane)?;
-        self.key(if background { ";" } else { ":" })?;
-        self.paste(client.pane, input)?;
+    /// Types `input` on the `:` (blocking) or `;` (background) shell line and submits it.
+    fn shell(&mut self, client: &Client, input: &str, block: bool) -> TestResult<()> {
+        self.focus(client.owner)?;
+        self.key(if block { ":" } else { ";" })?;
+        self.paste(client.owner, input)?;
         self.expect_ui("", "command bar contains the actual pasted script", |v| {
             ui_text(v).contains(input)
         })?;
         self.key("Enter")?;
-        if background {
-            return Ok(None);
-        }
-        self.wait("actual visible foreground native-shell terminal", |h| {
-            let state = h.ctl("state", &[])?;
-            let id = state["focused"]["id"].as_u64().unwrap_or(0);
-            Ok((id != 0
-                && id != client.pane
-                && id != client.owner
-                && state["focused"]["label"]
-                    .as_str()
-                    .is_some_and(|s| !s.starts_with("Companion"))
-                && state["focused"]["prompt"] == false)
-                .then_some(Some(id)))
-        })
+        // Until Yazi acknowledges, the bar stays open and a following Escape would close it.
+        self.expect_ui("", "Yazi acknowledges the shell command", |v| {
+            ui_text(v).contains("Shell queued in Yazi")
+        })?;
+        Ok(())
     }
 
     fn capture(&self, pane: u64) -> TestResult<String> {
         self.cli(&["capture", &pane.to_string()])
-    }
-    fn output(&mut self, pane: u64, expected: &str) -> TestResult<String> {
-        self.wait(&format!("real terminal output {expected}"), |h| {
-            let output = h.capture(pane)?;
-            if output.contains(expected) {
-                Ok(Some(output))
-            } else {
-                Err(format!("terminal capture: {output}"))
-            }
-        })
-    }
-
-    fn dismiss_shell(&mut self, client: &Client, pane: u64) -> TestResult<()> {
-        self.focus(pane)?;
-        self.key("Enter")?;
-        self.wait("native shell pane closes after acknowledgment", |h| {
-            let state = h.ctl("state", &[])?;
-            Ok((state["focused"]["id"].as_u64() == Some(client.pane)).then_some(()))
-        })?;
-        self.expect_ui(ROWS, "browser remains live after foreground shell", |v| {
-            !nodes(v).is_empty()
-        })?;
-        Ok(())
     }
 
     fn removed(&mut self, client: &Client, watched: &BTreeSet<Process>) -> TestResult<()> {
@@ -1852,10 +1506,10 @@ end })
             "owned supervisor/backend/command descendants exit and private controls disappear",
             |h| {
                 let prefixes = [
-                    format!("managed-{}", client.cid),
                     format!("state-{}", client.cid),
                     format!("listing-{}", client.cid),
-                    format!("native-shell-{}-", client.cid),
+                    format!("client-{}.lock", client.cid),
+                    format!("reply-{}-", client.cid),
                 ];
                 let remaining: Vec<_> = fs::read_dir(h.inbox())
                     .into_iter()
@@ -1891,7 +1545,7 @@ end })
                 "client {} owner {} pane {}\nsnapshot {}\n",
                 client.cid,
                 client.owner,
-                client.pane,
+                client.owner,
                 self.snapshot(client)
             ));
             if let Ok(output) = self.capture(client.owner) {
@@ -2005,7 +1659,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     )?;
     h.expect_ui(
         "[data-role=\"yazi.input-row\"]",
-        "idle command slot is blank",
+        "idle command row is blank",
         |v| nodes(v).len() == 1 && ui_text(v).trim().is_empty(),
     )?;
     let columns = h.tree("[data-role=\"yazi.column.current\"]")?;
@@ -2087,7 +1741,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         "editor contains the complete ancestor path",
         |v| ui_text(v).contains(&root_path),
     )?;
-    h.paste(first.pane, "files")?;
+    h.paste(first.owner, "files")?;
     h.key("Enter")?;
     h.expect_state(
         &first,
@@ -2119,7 +1773,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     )?;
     h.key("Escape")?;
     h.click_target("[data-role=\"yazi.path-edit\"]")?;
-    h.paste(first.pane, "/does/not/exist/tern-yazi")?;
+    h.paste(first.owner, "/does/not/exist/tern-yazi")?;
     h.key("Escape")?;
     h.expect_ui(
         crumbs,
@@ -2138,7 +1792,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     long_dir = long_dir.join(&leaf);
     fs::create_dir_all(&long_dir).map_err(|e| e.to_string())?;
     h.open_path_editor(&text(&first.cwd))?;
-    h.paste(first.pane, &text(&long_dir))?;
+    h.paste(first.owner, &text(&long_dir))?;
     h.key("Enter")?;
     h.expect_state(&first, "long Unicode directory input is lossless", |s| {
         s["cwd"] == text(&long_dir)
@@ -2198,7 +1852,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         |s| s["cwd"] == breadcrumb_root,
     )?;
     h.open_path_editor(&breadcrumb_root)?;
-    h.paste(first.pane, &text(&first.cwd.join("alpha.txt")))?;
+    h.paste(first.owner, &text(&first.cwd.join("alpha.txt")))?;
     h.key("Enter")?;
     h.expect_ui(
         "[data-role=\"yazi.path-input\"]",
@@ -2213,7 +1867,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     })?;
     h.key("Escape")?;
     h.open_path_editor(&breadcrumb_root)?;
-    h.paste(first.pane, &text(&first.cwd))?;
+    h.paste(first.owner, &text(&first.cwd))?;
     h.key("Enter")?;
     h.expect_state(&first, "absolute input returns to the fixture", |s| {
         s["cwd"] == text(&first.cwd)
@@ -2308,7 +1962,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
 
     h.case = "smartcase filtering, Enter, visual Escape priority and stale bar";
     h.key("f")?;
-    h.paste(first.pane, "alpha")?;
+    h.paste(first.owner, "alpha")?;
     h.expect_state(&first, "lowercase filter matches both cases", |s| {
         names(s, "files").into_iter().collect::<BTreeSet<_>>()
             == BTreeSet::from(["Alpha.txt".into(), "alpha.txt".into()])
@@ -2337,7 +1991,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         names(s, "files").len() > 2 && s["filter"].as_str().unwrap_or_default().is_empty()
     })?;
     h.key("f")?;
-    h.paste(first.pane, "Alpha")?;
+    h.paste(first.owner, "Alpha")?;
     h.key("Enter")?;
     h.expect_state(&first, "uppercase filter is case-sensitive", |s| {
         names(s, "files") == vec!["Alpha.txt"]
@@ -2360,7 +2014,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         "files",
     );
     h.key("/")?;
-    h.paste(first.pane, "alpha")?;
+    h.paste(first.owner, "alpha")?;
     h.key("Enter")?;
     h.expect_state(
         &first,
@@ -2380,7 +2034,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     h.hover_stays(&first, &text(&first.cwd.join("Alpha.txt")))?;
     h.key("G")?;
     h.key("?")?;
-    h.paste(first.pane, "alpha")?;
+    h.paste(first.owner, "alpha")?;
     h.key("Enter")?;
     h.expect_state(
         &first,
@@ -2389,13 +2043,13 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     )?;
     h.key("Escape")?;
     h.key("f")?;
-    h.paste(first.pane, "beta")?;
+    h.paste(first.owner, "beta")?;
     h.key("Enter")?;
     h.expect_state(&first, "filter remains distinct from find", |s| {
         names(s, "files") == vec!["beta.txt"]
     })?;
     h.key("/")?;
-    h.paste(first.pane, "beta")?;
+    h.paste(first.owner, "beta")?;
     h.key("Enter")?;
     h.key("Escape")?;
     h.expect_state(
@@ -2412,7 +2066,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
 
     h.case = "UTF-8, punctuation paste/editing and hidden native listing";
     h.key("f")?;
-    h.paste(first.pane, "雪's 100%雪")?;
+    h.paste(first.owner, "雪's 100%雪")?;
     h.expect_ui("", "UTF-8 paste enters filter unchanged", |v| {
         ui_text(v).contains("雪's 100%雪")
     })?;
@@ -2494,10 +2148,10 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         quote(text(&marker))
     );
     let terminal_count = h.ctl("state", &[])?["panes"].as_array().map_or(0, Vec::len);
-    h.shell(&first, &script, true)?;
+    h.shell(&first, &script, false)?;
     h.wait("real background command writes its delayed marker", |h| {
         let state = h.ctl("state", &[])?;
-        if state["focused"]["id"].as_u64() != Some(first.pane) {
+        if state["focused"]["id"].as_u64() != Some(first.owner) {
             return Err("Background command stole focus into a terminal".into());
         }
         if state["panes"].as_array().map_or(0, Vec::len) != terminal_count {
@@ -2587,17 +2241,17 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
 
     h.case = "two clients preserve independent cwd and hover";
     let second = h.launch(h.path("other"), true)?;
-    if first.cid == second.cid || first.pane == second.pane {
+    if first.cid == second.cid || first.owner == second.owner {
         return Err("Two actual managed launches reused a pinned identity".into());
     }
     h.click_file(&second, "other.txt")?;
     let second_before = h.snapshot(&second);
-    h.focus(first.pane)?;
+    h.focus(first.owner)?;
     h.click_file(&first, "beta.txt")?;
     h.expect_state(&second, "other client cwd and hover do not change", |s| {
         s["cwd"] == second_before["cwd"] && hover(s) == hover(&second_before)
     })?;
-    h.focus(second.pane)?;
+    h.focus(second.owner)?;
     h.expect_ui(
         ROWS,
         "second client does not render first client files",
@@ -2605,7 +2259,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     )?;
 
     h.case = "q cleans only the owning real backend process group";
-    h.focus(first.pane)?;
+    h.focus(first.owner)?;
     let watched = descendants(first.supervisor);
     h.owned.extend(watched.iter().copied());
     h.key("q")?;
@@ -2614,7 +2268,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     if !second.supervisor.alive() || !second.backend.alive() {
         return Err("Closing first client killed the unrelated second client".into());
     }
-    h.focus(second.pane)?;
+    h.focus(second.owner)?;
     h.expect_ui(ROWS, "second client survives first client q", |v| {
         ui_text(v).contains("other.txt")
     })?;
@@ -2622,7 +2276,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     h.case = "closing the surface pane cleans its own backend";
     let watched = descendants(second.supervisor);
     h.owned.extend(watched.iter().copied());
-    h.cli(&["close", &second.pane.to_string()])?;
+    h.cli(&["close", &second.owner.to_string()])?;
     h.removed(&second, &watched)?;
 
     h.case = "backend crash closes the surface and returns the shell prompt";
@@ -2634,9 +2288,10 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     h.prompt_returned(&fourth)
 }
 
-/// Phase 2: window-level features of the plugin block (Tern file opens, native shell
-/// terminals, plugin reload) that the program surface does not provide yet.
+/// Window actions from the surface (Tern file opens, terminal, clipboard), `:` through Yazi,
+/// and the palette entry and Ctrl+Alt+Y.
 fn window_flow(h: &mut Harness) -> TestResult<()> {
+    h.case = "o, Enter, multi-select and double-click open paths in Tern";
     let first = h.launch(h.path("files"), true)?;
     h.click_file(&first, "alpha.txt")?;
     h.key("o")?;
@@ -2709,7 +2364,7 @@ fn window_flow(h: &mut Harness) -> TestResult<()> {
     for file in files {
         h.cli(&["close", &file.to_string()])?;
     }
-    h.focus(first.pane)?;
+    h.focus(first.owner)?;
     h.key("Escape")?;
     h.expect_state(&first, "multiple-open selection clears", |s| {
         selected(s).is_empty()
@@ -2725,65 +2380,91 @@ fn window_flow(h: &mut Harness) -> TestResult<()> {
     h.shot("05-tern-image-open")?;
     h.close_file(&first, file)?;
 
-    h.case = "typed colon ls uses real visible native terminal";
-    h.key(":")?;
-    h.key("l")?;
-    h.key("s")?;
-    h.expect_ui("", "typed l and s appear in command bar", |v| {
-        ui_text(v).contains(":ls")
+    h.case = "Shift+W opens a terminal below the browser in its directory";
+    let panes = pane_ids(&h.layout_state()?);
+    h.key("W")?;
+    let terminal = h.wait("a shell pane below the browser at the browser's cwd", |h| {
+        let state = h.layout_state()?;
+        let added: Vec<u64> = pane_ids(&state).difference(&panes).copied().collect();
+        let [pane] = added[..] else {
+            return Ok(None);
+        };
+        let info = pane_info(&state, pane).ok_or("New pane has no info")?;
+        let tab = info["tab"].as_u64().and_then(|tab| tab_layout(&state, tab));
+        let below = tab.is_some_and(|tab| {
+            let root = &tab["root"];
+            root["split"] == "down"
+                && root["first"]["pane"].as_u64() == Some(first.owner)
+                && root["second"]["pane"].as_u64() == Some(pane)
+        });
+        Ok((below && info["cwd"] == text(&first.cwd) && info["at_prompt"] == true).then_some(pane))
     })?;
-    h.key("Enter")?;
-    let terminal = h.wait("ls opens a real terminal", |h| {
-        let state = h.ctl("state", &[])?;
-        let id = state["focused"]["id"].as_u64().unwrap_or(0);
-        Ok((id != 0 && id != first.pane && id != first.owner).then_some(id))
-    })?;
-    h.output(terminal, "alpha.txt")?;
-    h.output(terminal, "[exit 0]")?;
-    h.shot("06-real-colon-ls")?;
-    h.dismiss_shell(&first, terminal)?;
+    h.cli(&["close", &terminal.to_string()])?;
+    h.focus(first.owner)?;
+    h.expect_ui(
+        ROWS,
+        "the browser keeps its pane after the terminal closes",
+        |v| nodes(v).iter().any(|node| theme_visible(node)),
+    )?;
 
-    h.case = "native shell stdout stderr exit status and interactive stdin";
-    let terminal = h
-        .shell(
-            &first,
-            "printf 'REAL_STDOUT\\n'; printf 'REAL_STDERR\\n' >&2; exit 7",
-            false,
-        )?
-        .ok_or("No foreground terminal")?;
-    h.output(terminal, "REAL_STDOUT")?;
-    h.output(terminal, "REAL_STDERR")?;
-    h.output(terminal, "[exit 7]")?;
-    h.dismiss_shell(&first, terminal)?;
-    let terminal = h.shell(&first, "printf 'STDIN_READY\\n'; IFS= read -r answer; printf 'STDIN_ECHO=<%%s>\\n' \"$answer\"", false)?.ok_or("No stdin terminal")?;
-    h.output(terminal, "STDIN_READY")?;
-    h.paste(terminal, "雪's 100%")?;
-    h.key("Enter")?;
-    h.output(terminal, "STDIN_ECHO=<雪's 100%>")?;
-    h.output(terminal, "[exit 0]")?;
-    h.dismiss_shell(&first, terminal)?;
+    h.case = "cc and cf copy the hovered path and name through OSC 52";
+    let saved = Command::new("wl-paste")
+        .arg("--no-newline")
+        .output()
+        .map_err(|e| format!("wl-paste is required: {e}"))?;
+    h.click_file(&first, "beta.txt")?;
+    let copied = (|| -> TestResult<()> {
+        for (second, expected) in [
+            ("c", text(&first.cwd.join("beta.txt"))),
+            ("f", "beta.txt".to_owned()),
+        ] {
+            h.key("c")?;
+            h.key(second)?;
+            h.wait(&format!("the clipboard holds {expected}"), |_| {
+                let clip = Command::new("wl-paste")
+                    .arg("--no-newline")
+                    .output()
+                    .map_err(|e| e.to_string())?;
+                Ok((clip.stdout == expected.as_bytes()).then_some(()))
+            })?;
+        }
+        Ok(())
+    })();
+    // Hand the user's clipboard back; wl-copy keeps serving it from the background.
+    let mut restore = Command::new("wl-copy");
+    if saved.status.success() {
+        restore.stdin(Stdio::piped());
+    } else {
+        restore.arg("--clear").stdin(Stdio::null());
+    }
+    let mut restore = restore
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    if let Some(mut stdin) = restore.stdin.take() {
+        stdin.write_all(&saved.stdout).map_err(|e| e.to_string())?;
+    }
+    restore.wait().map_err(|e| e.to_string())?;
+    copied?;
 
-    h.case = "native selected/hover macro context preserves Unicode quotes percent and cwd";
+    h.case = ": runs through Yazi; macros keep Unicode, quotes, percent and the cwd";
     h.click_file(&first, "雪's 100%.txt")?;
     h.key("Space")?;
-    h.expect_state(&first, "Unicode native selected path", |s| {
+    h.expect_state(&first, "Unicode selected path", |s| {
         selected(s).contains(&text(&first.cwd.join("雪's 100%.txt")))
     })?;
     h.click_file(&first, "beta.txt")?;
-    let marker = h.path("native-args.txt");
-    let cwd_marker = h.path("native-cwd.txt");
+    let marker = h.path("shell-args.txt");
+    let cwd_marker = h.path("shell-cwd.txt");
     let script = format!(
-        "printf '%%s\\n' %h %s > {}; pwd > {}; printf 'MACRO_CONTEXT_DONE\\n'",
+        "printf '%%s\\n' %h %s > {}; pwd > {}",
         quote(text(&marker)),
         quote(text(&cwd_marker))
     );
-    let terminal = h
-        .shell(&first, &script, false)?
-        .ok_or("No macro terminal")?;
-    h.output(terminal, "MACRO_CONTEXT_DONE")?;
-    h.output(terminal, "[exit 0]")?;
+    h.shell(&first, &script, true)?;
     h.wait(
-        "real shell expands hovered %h and selected %s paths exactly",
+        "the shell expands hovered %h and selected %s paths exactly",
         |_| {
             let actual = fs::read_to_string(&marker).map_err(|e| e.to_string())?;
             let expected = format!(
@@ -2801,412 +2482,105 @@ fn window_flow(h: &mut Harness) -> TestResult<()> {
             }
         },
     )?;
-    h.dismiss_shell(&first, terminal)?;
     h.key("Escape")?;
     h.expect_state(&first, "macro selection cleared", |s| {
         selected(s).is_empty()
     })?;
 
-    h.case =
-        "plugin reload preserves pinned client token pane and never duplicates native terminal";
-    h.click_file(&first, "alpha.txt")?;
-    let terminal = h
-        .shell(
-            &first,
-            "printf 'RELOAD_STDIN_READY\\n'; IFS= read -r reply; printf 'RELOAD_DONE\\n'",
-            false,
-        )?
-        .ok_or("No reload terminal")?;
-    h.output(terminal, "RELOAD_STDIN_READY")?;
-    let before = h.ctl("state", &[])?;
-    let terminal_count = before["panes"].as_array().map_or(0, Vec::len);
-    h.cli(&["plugin", "reload"])?;
-    h.wait("reload keeps exact native terminal focus without duplicate panes", |h| {
-        let state = h.ctl("state", &[])?;
-        let health = read_json(&h.inbox().join(format!("managed-{}.json", first.cid))).unwrap_or(Value::Null);
-        let lease = fs::read_to_string(h.inbox().join(format!("managed-{}.lease", first.cid))).unwrap_or_default();
-        let fields: Vec<_> = lease.split_whitespace().collect();
-        if health["token"] == first.token && fields.first().copied() == Some(first.token.as_str())
-            && fields.get(1).and_then(|s| s.parse::<u64>().ok()) == Some(first.pane)
-            && fields.get(4).copied() == Some(first.nonce.as_str())
-            && state["focused"]["id"].as_u64() == Some(terminal)
-            && state["panes"].as_array().map_or(0, Vec::len) == terminal_count { Ok(Some(())) }
-        else { Err(format!("reload focused {}, terminal count {} expected {terminal_count}; pinned pane {}", state["focused"]["id"], state["panes"].as_array().map_or(0, Vec::len), first.pane)) }
-    })?;
-    h.paste(terminal, "continue")?;
-    h.key("Enter")?;
-    h.output(terminal, "RELOAD_DONE")?;
-    h.output(terminal, "[exit 0]")?;
-    h.dismiss_shell(&first, terminal)?;
-    h.idle(&first, Duration::from_secs(4))?;
-
-    h.case = "owner close terminates live native command children and Yazi group";
-    let third = h.launch(h.path("files"), true)?;
-    let child_marker = h.path("native-child.pid");
-    let script = format!("sleep 120 & child=$!; printf '%%s\\n' \"$child\" > {}; printf 'OWNED_CHILD_READY\\n'; wait", quote(text(&child_marker)));
-    let terminal = h
-        .shell(&third, &script, false)?
-        .ok_or("No live child terminal")?;
-    h.output(terminal, "OWNED_CHILD_READY")?;
-    let child = h.wait("actual native command child PID", |_| {
-        let pid = fs::read_to_string(&child_marker)
-            .ok()
-            .and_then(|s| s.trim().parse().ok());
-        Ok(pid.and_then(process).map(|(p, _, _)| p))
-    })?;
-    let mut watched = descendants(third.supervisor);
-    watched.insert(child);
-    h.owned.extend(watched.iter().copied());
-    h.cli(&["close", &third.owner.to_string()])?;
-    h.removed(&third, &watched)?;
-    h.wait("owner close also removes foreground native terminal", |h| {
-        let state = h.ctl("state", &[])?;
-        Ok((!state["panes"]
-            .as_array()
-            .is_some_and(|p| p.iter().any(|p| p["id"].as_u64() == Some(terminal))))
-        .then_some(()))
-    })?;
-
-    Ok(())
-}
-
-fn native_slot_flow(h: &mut Harness) -> TestResult<()> {
-    for (path, content) in [
-        ("slot/alpha.txt", "NATIVE_SLOT_ALPHA\n"),
-        ("slot/beta.txt", "NATIVE_SLOT_BETA\n"),
-    ] {
-        h.write_fixture(path, content)?;
-    }
-    let cwd = h.path("slot");
-    h.case = "already-split unzoomed owner keeps sibling, ratio and original native visual slot";
-    let owner = h.fixture(json!({"op": "shell-tab", "cwd": text(&cwd)}))?["result"]
-        .as_u64()
-        .ok_or("Private slot fixture created no shell owner")?;
-    h.shell_prompt(owner)?;
-    let sibling = h
-        .fixture(json!({"op": "split", "pane": owner, "dir": "right", "cwd": text(&cwd)}))?
-        ["result"]
-        .as_u64()
-        .ok_or("Private slot fixture created no real sibling")?;
-    h.shell_prompt(sibling)?;
-    h.fixture(json!({"op": "resize", "pane": owner, "dir": "right", "cells": 11}))?;
-    h.focus(owner)?;
-    let before = h.layout_state()?;
-    let tab = pane_info(&before, owner)
-        .and_then(|p| p["tab"].as_u64())
-        .ok_or("Split owner has no tab")?;
-    let original = tab_layout(&before, tab).ok_or("Split owner has no real layout")?;
-    if original["zoomed"] == true
-        || !original["root"]["ratio"]
-            .as_f64()
-            .is_some_and(|ratio| (ratio - 0.5).abs() >= 0.01)
-    {
-        return Err(format!(
-            "Real split fixture must start unzoomed with a non-equal ratio: {original}"
-        ));
-    }
-    let split = h.launch(cwd.clone(), false)?;
-    h.key("Escape")?;
-    h.expect_ui(ROWS, "online Escape keeps the native browser open", |v| {
-        ui_text(v).contains("alpha.txt")
-    })?;
-    h.idle(&split, Duration::from_secs(4))?;
-
-    h.case = "reload and toggle reopen keep parked pair, lease nonce and no duplicate native pane";
-    let pinned = h.layout_state()?;
-    h.cli(&["plugin", "reload"])?;
-    h.pinned_pair(&split, &pinned, split.pane)?;
-    h.ctl("plugins", &["run", "plugin.tern-yazi.toggle"])?;
-    h.pinned_pair(&split, &pinned, split.pane)?;
-    h.case = "renderer close and reopen reconnect the same daemon-owned native pair";
-    h.reopen_window()?;
-    h.focus(split.pane)?;
-    h.pinned_pair(&split, &pinned, split.pane)?;
-    h.idle(&split, Duration::from_secs(4))?;
-    h.case = "q restores exact split slot, sibling, ratio, tab and original shell ID";
-    let watched = descendants(split.supervisor);
-    h.owned.extend(watched.iter().copied());
-    h.key("q")?;
-    h.removed(&split, &watched)?;
-    h.restored(&split, true, Some(owner))?;
-
-    h.case = "raw native close with sibling restores owner in original tab without stealing sibling focus";
-    h.focus(owner)?;
-    let raw = h.launch(cwd.clone(), false)?;
-    let watched = descendants(raw.supervisor);
-    h.owned.extend(watched.iter().copied());
-    h.focus(sibling)?;
-    h.cli(&["close", &raw.pane.to_string()])?;
-    h.removed(&raw, &watched)?;
-    h.restored(&raw, false, Some(sibling))?;
-    let state = h.layout_state()?;
-    if pane_info(&state, owner).and_then(|p| p["tab"].as_u64()) != Some(tab)
-        || pane_info(&state, sibling).and_then(|p| p["tab"].as_u64()) != Some(tab)
-    {
-        return Err(format!(
-            "Raw close did not restore beside the surviving original-tab sibling: {state}"
-        ));
-    }
-
-    h.case = "backend crash stays offline until Escape restores original owner and cleans controls";
-    h.focus(owner)?;
-    let offline = h.launch(cwd.clone(), false)?;
-    let watched = descendants(offline.supervisor);
-    h.owned.extend(watched.iter().copied());
-    offline.backend.signal(libc::SIGKILL);
-    h.expect_ui(ROWS, "real crashed backend withdraws file controls", |v| {
-        nodes(v).is_empty()
-    })?;
-    for key in ["j", "Enter", "o"] {
-        h.key(key)?;
-    }
-    h.wait(
-        "offline native remains pinned with its actual owner parked",
-        |h| {
-            let state = h.layout_state()?;
-            Ok((state["focused"].as_u64() == Some(offline.pane)
-                && pane_info(&state, owner).is_some_and(|p| p["parked"] == true))
-            .then_some(()))
-        },
-    )?;
-    h.key("Escape")?;
-    h.removed(&offline, &watched)?;
-    h.restored(&offline, true, Some(owner))?;
-    h.cli(&["plugin", "reload"])?;
-    h.removed(&offline, &watched)?;
-
-    h.case = "raw close of final native tab restores owner in a dedicated tab, not unrelated focused tab";
-    let final_tab = h.launch(cwd.clone(), true)?;
-    let watched = descendants(final_tab.supervisor);
-    h.owned.extend(watched.iter().copied());
-    h.focus(sibling)?;
-    let unrelated = h.layout_state()?;
-    h.cli(&["close", &final_tab.pane.to_string()])?;
-    h.removed(&final_tab, &watched)?;
-    h.restored(&final_tab, false, Some(sibling))?;
-    let state = h.layout_state()?;
-    let restored_tab = pane_info(&state, final_tab.owner)
-        .and_then(|p| p["tab"].as_u64())
-        .ok_or("Final-tab owner was not restored")?;
-    if restored_tab == tab || tab_layout(&state, tab) != tab_layout(&unrelated, tab) {
-        return Err(format!(
-            "Final-tab restoration modified the unrelated focused tab: {state}"
-        ));
-    }
-
-    h.case =
-        "native moved to another tab restores the owner beside its surviving original-tab sibling";
-    h.focus(owner)?;
-    let moved = h.launch(cwd.clone(), false)?;
-    h.fixture(json!({"op": "move-tab", "pane": moved.pane}))?;
-    h.focus(moved.pane)?;
-    let watched = descendants(moved.supervisor);
-    h.owned.extend(watched.iter().copied());
-    h.key("q")?;
-    h.removed(&moved, &watched)?;
-    h.restored(&moved, false, Some(owner))?;
-    let state = h.layout_state()?;
-    if pane_info(&state, owner).and_then(|p| p["tab"].as_u64()) != Some(tab)
-        || pane_info(&state, sibling).and_then(|p| p["tab"].as_u64()) != Some(tab)
-    {
-        return Err(format!(
-            "User-moved native returned its owner to an unrelated tab: {state}"
-        ));
-    }
-
-    h.case =
-        "two real owners close independently without stealing the unrelated native client focus";
-    h.focus(owner)?;
-    let first = h.launch(cwd.clone(), false)?;
-    let second = h.launch(h.path("other"), true)?;
-    if first.owner == second.owner
-        || first.cid == second.cid
-        || first.token == second.token
-        || first.pane == second.pane
-    {
-        return Err("Independent actual owners reused a managed identity".into());
-    }
-    let second_before = h.layout_state()?;
-    let watched = descendants(first.supervisor);
-    h.owned.extend(watched.iter().copied());
-    h.cli(&["close", &first.pane.to_string()])?;
-    h.removed(&first, &watched)?;
-    h.restored(&first, false, Some(second.pane))?;
-    if !second.supervisor.alive()
-        || !second.backend.alive()
-        || tab_layout(
-            &h.layout_state()?,
-            second.original_tab.ok_or("Second owner lacks tab")?,
-        ) != tab_layout(
-            &second_before,
-            second.original_tab.ok_or("Second owner lacks tab")?,
-        )
-    {
-        return Err(
-            "Closing first owner affected the other client's real processes or layout".into(),
-        );
-    }
-    h.expect_ui(ROWS, "unrelated native client remains usable", |v| {
-        ui_text(v).contains("other.txt")
-    })?;
-    let watched = descendants(second.supervisor);
-    h.owned.extend(watched.iter().copied());
-    h.key("q")?;
-    h.removed(&second, &watched)?;
-    h.restored(&second, true, Some(second.owner))?;
-
-    h.case = "floating shell launches real Yazi in the same over/corner without changing the background tree";
-    let background = h.fixture(json!({"op": "shell-tab", "cwd": text(&cwd)}))?["result"]
-        .as_u64()
-        .ok_or("Floating fixture created no real background shell")?;
-    h.shell_prompt(background)?;
-    let background_sibling = h
-        .fixture(json!({"op": "split", "pane": background, "dir": "right", "cwd": text(&cwd)}))?
-        ["result"]
-        .as_u64()
-        .ok_or("Floating fixture created no real background sibling")?;
-    h.shell_prompt(background_sibling)?;
-    h.fixture(json!({"op": "resize", "pane": background, "dir": "right", "cells": 9}))?;
-    let floating_sibling = h.fixture(
-        json!({"op": "split", "pane": background_sibling, "dir": "down", "cwd": text(&cwd)}),
-    )?["result"]
-        .as_u64()
-        .ok_or("Floating fixture created no independent floating sibling shell")?;
-    h.shell_prompt(floating_sibling)?;
-    h.fixture(json!({"op": "float", "pane": floating_sibling, "over": background_sibling, "corner": "tl"}))?;
-    let floating_owner = h
-        .fixture(json!({"op": "split", "pane": background, "dir": "down", "cwd": text(&cwd)}))?
-        ["result"]
-        .as_u64()
-        .ok_or("Floating fixture created no real owner shell")?;
-    h.shell_prompt(floating_owner)?;
-    h.fixture(json!({"op": "float", "pane": floating_owner, "over": background, "corner": "br"}))?;
-    h.focus(floating_owner)?;
-    let floating = h.launch(cwd.clone(), false)?;
-    let float_tab = floating.original_tab.ok_or("Floating owner has no tab")?;
-    if floating.original_layout["zoomed"] != false
-        || floating.original_layout["floats"]
-            != json!([
-                { "pane": floating_sibling, "over": background_sibling, "corner": "tl" },
-                { "pane": floating_owner, "over": background, "corner": "br" }
-            ])
-    {
-        return Err(format!(
-            "Real floating fixture has unexpected presentation: {}",
-            floating.original_layout
-        ));
-    }
-    h.click_file(&floating, "beta.txt")?;
-    h.key("k")?;
-    h.expect_state(
-        &floating,
-        "floating native keyboard navigates the actual Yazi backend",
-        |s| hover(s) == text(&cwd.join("alpha.txt")),
-    )?;
-    let floating_pinned = h.layout_state()?;
-    h.cli(&["plugin", "reload"])?;
-    h.pinned_pair(&floating, &floating_pinned, floating.pane)?;
-    h.idle(&floating, Duration::from_secs(4))?;
-    h.case = "floating q restores original shell PID and exact float/background presentation";
-    let watched = descendants(floating.supervisor);
-    h.owned.extend(watched.iter().copied());
-    h.key("q")?;
-    h.removed(&floating, &watched)?;
-    h.restored(&floating, true, Some(floating_owner))?;
-
-    h.case = "raw floating native close restores the original float without changing background focus or tree";
-    h.focus(floating_owner)?;
-    let floating_raw = h.launch(cwd.clone(), false)?;
-    let watched = descendants(floating_raw.supervisor);
-    h.owned.extend(watched.iter().copied());
-    h.focus(background_sibling)?;
-    h.cli(&["close", &floating_raw.pane.to_string()])?;
-    h.removed(&floating_raw, &watched)?;
-    h.restored(&floating_raw, true, Some(background_sibling))?;
-
-    h.case = "floating backend crash and offline Escape restore the original float and Bash";
-    h.focus(floating_owner)?;
-    let floating_offline = h.launch(cwd.clone(), false)?;
-    let watched = descendants(floating_offline.supervisor);
-    h.owned.extend(watched.iter().copied());
-    floating_offline.backend.signal(libc::SIGKILL);
-    h.expect_ui(
-        ROWS,
-        "floating real backend crash withdraws file controls",
-        |v| nodes(v).is_empty(),
-    )?;
-    h.key("Escape")?;
-    h.removed(&floating_offline, &watched)?;
-    h.restored(&floating_offline, true, Some(floating_owner))?;
-    if tab_layout(&h.layout_state()?, float_tab).ok_or("Floating source tab disappeared")?["root"]
-        != floating.original_layout["root"]
-    {
-        return Err("Floating lifecycle changed its actual background split tree".into());
-    }
-    h.case = "default native block discovers installed-prefix helper and original metadata without environment overrides";
-    h.focus(owner)?;
-    let before = h.layout_state()?;
-    let pane = h.fixture(json!({"op": "new", "how": "tab"}))?["result"]
-        .as_u64()
-        .ok_or("No default native pane")?;
-    let direct = h.standalone(pane, cwd.clone(), pane_ids(&before))?;
-    let mut expected = pane_ids(&before);
-    expected.insert(pane);
-    if pane_ids(&h.layout_state()?) != expected {
-        return Err("Default native block created an extra terminal or pane".into());
-    }
-    h.click_file(&direct, "beta.txt")?;
-    h.key("k")?;
-    h.expect_state(
-        &direct,
-        "default native keyboard controls the real backend",
-        |s| hover(s) == text(&cwd.join("alpha.txt")),
-    )?;
-    let pinned = h.layout_state()?;
-    h.cli(&["plugin", "reload"])?;
-    h.pinned_pair(&direct, &pinned, pane)?;
-    h.reopen_window()?;
-    h.focus(pane)?;
-    h.pinned_pair(&direct, &pinned, pane)?;
-    h.idle(&direct, Duration::from_secs(4))?;
-    let watched = descendants(direct.supervisor);
-    h.owned.extend(watched.iter().copied());
-    h.key("q")?;
-    h.removed(&direct, &watched)?;
-    if h.inbox().join(format!("native-{pane}.json")).exists() {
-        return Err("Standalone native close left its live binding".into());
-    }
-
-    h.case = "default toggle starts a real backend with no extra terminal and closes cleanly after reload";
-    h.focus(owner)?;
-    let before = h.layout_state()?;
-    h.ctl("plugins", &["run", "plugin.tern-yazi.toggle"])?;
-    let pane = h.wait("toggle focuses a newly created real native block", |h| {
-        let state = h.layout_state()?;
-        let pane = state["focused"].as_u64().ok_or("Toggle has no focus")?;
-        Ok((!pane_ids(&before).contains(&pane)
-            && pane_info(&state, pane).is_some_and(|p| p["block"] == "tern-yazi.companion"))
-        .then_some(pane))
-    })?;
-    let toggled = h.standalone(pane, cwd, pane_ids(&before))?;
-    let mut expected = pane_ids(&before);
-    expected.insert(pane);
-    for _ in 0..2 {
-        h.ctl("plugins", &["run", "plugin.tern-yazi.toggle"])?;
-        if pane_ids(&h.layout_state()?) != expected {
-            return Err("Toggle created a duplicate native block or extra terminal".into());
+    // `ctl key` does not reach the window keymap (built-in Ctrl+Shift+T does not fire either),
+    // so the chord is checked where the keymap shows it, the palette row, and its action is run
+    // by name exactly as the chord runs it.
+    h.case = "the palette entry and the Ctrl+Alt+Y action open the browser in a new pane";
+    for trigger in ["palette", "plugin.tern-yazi.open"] {
+        let shell = h.shell_tab(&h.path("files"))?;
+        let panes = pane_ids(&h.layout_state()?);
+        let before = h.pid_markers();
+        let known: BTreeSet<_> = fs::read_dir(h.inbox())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        if trigger == "palette" {
+            h.ctl("plugins", &["run", "palette"])?;
+            // The browser's own tab is titled Yazi; query the command title so it is the only row.
+            h.ctl("type", &["\"Open File Browser\""])?;
+            h.expect_ui(
+                "",
+                "the palette lists Yazi: Open File Browser with its Ctrl+Alt+Y chord",
+                |v| {
+                    // Query highlights split the row into runs; compare it without whitespace.
+                    let row: String = ui_text(v).split_whitespace().collect();
+                    row.contains("Yazi:OpenFileBrowserCtrlAltY")
+                },
+            )?;
+            h.key("Enter")?;
+        } else {
+            h.ctl("plugins", &["run", trigger])?;
         }
-    }
-    h.focus(pane)?;
-    let pinned = h.layout_state()?;
-    h.cli(&["plugin", "reload"])?;
-    h.pinned_pair(&toggled, &pinned, pane)?;
-    let watched = descendants(toggled.supervisor);
-    h.owned.extend(watched.iter().copied());
-    h.cli(&["close", &pane.to_string()])?;
-    h.removed(&toggled, &watched)?;
-    if h.inbox().join(format!("native-{pane}.json")).exists() {
-        return Err("Toggle native close left its live binding".into());
+        let (pane, supervisor) =
+            h.wait(
+                &format!("{trigger} splits a focused pane right of the shell"),
+                |h| {
+                    let state = h.layout_state()?;
+                    let added: Vec<u64> = pane_ids(&state).difference(&panes).copied().collect();
+                    let supervisor = h
+                        .pid_markers()
+                        .difference(&before)
+                        .copied()
+                        .find_map(process)
+                        .map(|(p, _, _)| p);
+                    let (&[pane], Some(supervisor)) = (&added[..], supervisor) else {
+                        return Ok(None);
+                    };
+                    let tab = pane_info(&state, pane)
+                        .and_then(|info| info["tab"].as_u64())
+                        .and_then(|tab| tab_layout(&state, tab));
+                    let right = tab.is_some_and(|tab| {
+                        tab["root"]["split"] == "right"
+                            && tab["root"]["first"]["pane"].as_u64() == Some(shell)
+                            && tab["root"]["second"]["pane"].as_u64() == Some(pane)
+                    });
+                    Ok((right && state["focused"].as_u64() == Some(pane))
+                        .then_some((pane, supervisor)))
+                },
+            )?;
+        h.owned.insert(supervisor);
+        h.wait("the new browser starts in the shell's directory", |h| {
+            let fresh = fs::read_dir(h.inbox())
+                .map_err(|e| e.to_string())?
+                .flatten()
+                .filter(|e| !known.contains(&e.file_name()));
+            Ok(fresh
+                .filter_map(|e| {
+                    e.file_name()
+                        .to_str()?
+                        .strip_prefix("state-")?
+                        .strip_suffix(".json")
+                        .map(str::to_owned)
+                })
+                .any(|cid| h.snapshot_id(&cid)["cwd"] == text(&h.path("files")))
+                .then_some(()))
+        })?;
+        h.expect_ui(ROWS, "the new pane draws the browser", |v| {
+            nodes(v).iter().any(|node| theme_visible(node))
+        })?;
+        h.shot(&format!(
+            "07-open-{}",
+            if trigger == "palette" {
+                "palette"
+            } else {
+                "shortcut"
+            }
+        ))?;
+        let watched = descendants(supervisor);
+        h.owned.extend(watched.iter().copied());
+        h.key("q")?;
+        h.wait("q ends Yazi and closes its pane", |h| {
+            let gone = !pane_ids(&h.layout_state()?).contains(&pane);
+            Ok((gone && !supervisor.alive() && watched.iter().all(|p| !p.alive())).then_some(()))
+        })?;
+        h.cli(&["close", &shell.to_string()])?;
     }
     Ok(())
 }
@@ -3865,8 +3239,11 @@ fn extended_preview_flow(h: &mut Harness) -> TestResult<()> {
         68, 174, 66, 96, 130,
     ];
     fs::write(preview_dir.join("pixel.png"), pixel).map_err(|e| e.to_string())?;
-    fs::write(preview_dir.join("main.rs"), "fn main() {\n    let marker = \"CODE_PREVIEW_MARKER\";\n}\n")
-        .map_err(|e| e.to_string())?;
+    fs::write(
+        preview_dir.join("main.rs"),
+        "fn main() {\n    let marker = \"CODE_PREVIEW_MARKER\";\n}\n",
+    )
+    .map_err(|e| e.to_string())?;
 
     let client = h.launch(preview_dir, true)?;
 
@@ -3887,9 +3264,7 @@ fn extended_preview_flow(h: &mut Harness) -> TestResult<()> {
     h.expect_ui(
         &format!("{PREVIEW} [data-role=\"yazi.pdf-preview\"]"),
         "PDF preview renders the actual pdfinfo page count",
-        |v| {
-            nodes(v).len() == 1 && theme_visible(nodes(v)[0]) && ui_text(v).contains("1 pages")
-        },
+        |v| nodes(v).len() == 1 && theme_visible(nodes(v)[0]) && ui_text(v).contains("1 pages"),
     )?;
     // The column must give the zero-basis image node real height.
     h.expect_ui(
@@ -3905,7 +3280,9 @@ fn extended_preview_flow(h: &mut Harness) -> TestResult<()> {
     h.expect_ui(
         &format!("{PREVIEW} [data-role=\"yazi.model-preview\"] .m3d-facts"),
         "VRML preview renders a parsed model figure",
-        |v| nodes(v).len() == 1 && theme_visible(nodes(v)[0]) && ui_text(v).contains("12 triangles"),
+        |v| {
+            nodes(v).len() == 1 && theme_visible(nodes(v)[0]) && ui_text(v).contains("12 triangles")
+        },
     )?;
     h.shot("16-native-model-preview")?;
 
@@ -3989,7 +3366,11 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
         "tab labels follow real directories",
         |v| ui_text(v).contains("1 files") && ui_text(v).contains("2 child"),
     )?;
-    h.click_node("[data-role=\"yazi.tab\"], [data-role=\"yazi.tab-active\"]", "1 files", false)?;
+    h.click_node(
+        "[data-role=\"yazi.tab\"], [data-role=\"yazi.tab-active\"]",
+        "1 files",
+        false,
+    )?;
     h.expect_state(first, "mouse switches to tab one", |s| {
         s["cwd"] == text(&first.cwd) && s["tabs"]["idx"] == 1
     })?;
@@ -4025,7 +3406,7 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
     })?;
     h.shot("native-tabs-keyboard-and-mouse")?;
     // Close tab 2 via Ctrl+c -> returns to tab 1 root cwd!
-    h.cli(&["send", &first.pane.to_string(), "keys", "ctrl+c"])?;
+    h.cli(&["send", &first.owner.to_string(), "keys", "ctrl+c"])?;
     h.expect_state(first, "closing tab 2 returns to tab 1 root cwd", |s| {
         s["cwd"] == text(&first.cwd)
     })?;
@@ -4051,7 +3432,7 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
     )?;
     // Re-enter create mode and submit a new file
     h.key("a")?;
-    h.paste(first.pane, "created-probe.txt")?;
+    h.paste(first.owner, "created-probe.txt")?;
     h.key("Enter")?;
     let created_path = first.cwd.join("created-probe.txt");
     h.wait(
@@ -4081,7 +3462,7 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
     h.key("Escape")?;
     // Re-enter rename mode, clear, type new name, and submit
     h.key("r")?;
-    h.cli(&["send", &first.pane.to_string(), "keys", "ctrl+a"])?;
+    h.cli(&["send", &first.owner.to_string(), "keys", "ctrl+a"])?;
     for key in ["q", "d", "j", "k", "y"] {
         h.key(key)?;
     }
@@ -4090,8 +3471,8 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
         "shortcut letters stay inside rename editor",
         |v| ui_text(v) == "qdjky",
     )?;
-    h.cli(&["send", &first.pane.to_string(), "keys", "ctrl+a"])?;
-    h.paste(first.pane, "renamed-probe.txt")?;
+    h.cli(&["send", &first.owner.to_string(), "keys", "ctrl+a"])?;
+    h.paste(first.owner, "renamed-probe.txt")?;
     h.key("Enter")?;
     let renamed_path = first.cwd.join("renamed-probe.txt");
     h.wait(
@@ -4119,7 +3500,7 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
     h.case = "create nested directories, POSIX special filenames and failure preservation";
     for name in ["nested/newdir/", "雪's\\literal.txt", "trailing\\"] {
         h.key("a")?;
-        h.paste(first.pane, name)?;
+        h.paste(first.owner, name)?;
         h.key("Enter")?;
         let target = first.cwd.join(name.trim_end_matches('/'));
         h.expect_state(first, "created target is authoritative hover", |s| {
@@ -4140,8 +3521,8 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
     }
     h.click_file(first, "nested")?;
     h.key("r")?;
-    h.cli(&["send", &first.pane.to_string(), "keys", "ctrl+a"])?;
-    h.paste(first.pane, "renamed-directory")?;
+    h.cli(&["send", &first.owner.to_string(), "keys", "ctrl+a"])?;
+    h.paste(first.owner, "renamed-directory")?;
     h.key("Enter")?;
     h.expect_state(
         first,
@@ -4161,9 +3542,9 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
     ] {
         h.key(if op == "create" { "a" } else { "r" })?;
         if op == "rename" {
-            h.cli(&["send", &first.pane.to_string(), "keys", "ctrl+a"])?;
+            h.cli(&["send", &first.owner.to_string(), "keys", "ctrl+a"])?;
         }
-        h.paste(first.pane, name)?;
+        h.paste(first.owner, name)?;
         h.key("Enter")?;
         // Toasts are window chrome outside the block surface tree, so the
         // observable contract is the authoritative no-op: cursor, listing and
@@ -4252,7 +3633,6 @@ fn real_native_interactions() {
 }
 
 #[test]
-#[ignore = "Phase 2: Tern file opens, native shell terminals and plugin reload"]
 fn real_window_interactions() {
     let mut harness = Harness::new()
         .unwrap_or_else(|error| panic!("Real interaction prerequisites/setup failed: {error}"));
@@ -4260,18 +3640,17 @@ fn real_window_interactions() {
     conclude(&mut harness, result);
 }
 
-#[test]
-#[ignore = "Phase 2: parked slot restoration belongs to the plugin block"]
-fn real_native_slot_interactions() {
-    let mut harness = Harness::new()
-        .unwrap_or_else(|error| panic!("Real interaction prerequisites/setup failed: {error}"));
-    let result = native_slot_flow(&mut harness);
-    conclude(&mut harness, result);
-}
-
 /// Layout theme ids in picker order.
-const LAYOUT_THEMES: [&str; 8] =
-    ["current", "aurora", "editorial", "amber", "blueprint", "brutalist", "zen", "swiss"];
+const LAYOUT_THEMES: [&str; 8] = [
+    "current",
+    "aurora",
+    "editorial",
+    "amber",
+    "blueprint",
+    "brutalist",
+    "zen",
+    "swiss",
+];
 const THEME_SHOTS: &str = "/tmp/tyi-inline-p1";
 const PICKER: &str = "[data-role=\"yazi.theme-picker\"]";
 
@@ -4280,7 +3659,10 @@ fn theme_scope(id: &str) -> String {
 }
 
 fn first_rect(value: &Value) -> [f64; 4] {
-    let rect = nodes(value).first().map(|node| node["rect"].clone()).unwrap_or(Value::Null);
+    let rect = nodes(value)
+        .first()
+        .map(|node| node["rect"].clone())
+        .unwrap_or(Value::Null);
     [0, 1, 2, 3].map(|at| rect[at].as_f64().unwrap_or(0.0))
 }
 
@@ -4290,22 +3672,36 @@ fn surface_flow(h: &mut Harness) -> TestResult<()> {
     let client = h.launch(h.path("files"), true)?;
     let settings = h.path("config/tern-yazi/settings.json");
     h.key("T")?;
-    h.expect_ui(&format!("{PICKER} .sf-item"), "the picker lists every layout theme", |v| {
-        let rows: Vec<_> = nodes(v).iter().map(|node| ui_text(node)).collect();
-        ["Current", "Aurora Glass", "Editorial Paper", "Amber Ledger", "Blueprint Draft"]
+    h.expect_ui(
+        &format!("{PICKER} .sf-item"),
+        "the picker lists every layout theme",
+        |v| {
+            let rows: Vec<_> = nodes(v).iter().map(|node| ui_text(node)).collect();
+            [
+                "Current",
+                "Aurora Glass",
+                "Editorial Paper",
+                "Amber Ledger",
+                "Blueprint Draft",
+            ]
             .iter()
             .chain(&["Brutalist Block", "Zen Minimal", "Swiss Grid"])
             .all(|title| rows.iter().any(|row| row.starts_with(title)))
-    })?;
+        },
+    )?;
     h.key("j")?;
-    h.expect_ui(&theme_scope("aurora"), "j previews the next theme live", |v| {
-        !nodes(v).is_empty()
-    })?;
+    h.expect_ui(
+        &theme_scope("aurora"),
+        "j previews the next theme live",
+        |v| !nodes(v).is_empty(),
+    )?;
     h.key("Escape")?;
     h.expect_ui(PICKER, "Escape closes the picker", |v| nodes(v).is_empty())?;
-    h.expect_ui(&theme_scope("current"), "Escape restores the original theme", |v| {
-        !nodes(v).is_empty()
-    })?;
+    h.expect_ui(
+        &theme_scope("current"),
+        "Escape restores the original theme",
+        |v| !nodes(v).is_empty(),
+    )?;
     if settings.exists() {
         return Err("Escape persisted a theme choice".into());
     }
@@ -4323,7 +3719,9 @@ fn surface_flow(h: &mut Harness) -> TestResult<()> {
                     h.key(key)?;
                 }
                 h.wait(&format!("Enter persists {id}"), |_| {
-                    Ok(read_json(&settings).filter(|s| s["theme"] == *id).map(|_| ()))
+                    Ok(read_json(&settings)
+                        .filter(|s| s["theme"] == *id)
+                        .map(|_| ()))
                 })?;
             }
             h.expect_ui(PICKER, "the picker is closed", |v| nodes(v).is_empty())?;
@@ -4340,7 +3738,9 @@ fn surface_flow(h: &mut Harness) -> TestResult<()> {
         }
         h.key("Enter")?;
         h.wait("the picker returns to the first theme", |_| {
-            Ok(read_json(&settings).filter(|s| s["theme"] == "current").map(|_| ()))
+            Ok(read_json(&settings)
+                .filter(|s| s["theme"] == "current")
+                .map(|_| ()))
         })?;
     }
     h.ctl("theme", &["light", "light-catppuccin"])?;
@@ -4363,24 +3763,32 @@ fn surface_flow(h: &mut Harness) -> TestResult<()> {
         ])?;
         let created: Value = serde_json::from_str(&created).map_err(|e| e.to_string())?;
         let other = created["block"].as_u64().ok_or("Split returned no block")?;
-        h.expect_ui(SURFACE_BROWSER, &format!("split {side} re-lays out the browser"), |v| {
-            let rect = first_rect(v);
-            if narrower {
-                rect[2] > 0.0 && rect[2] < full[2] * 0.75 && (rect[3] - full[3]).abs() < 2.0
-            } else {
-                rect[3] > 0.0 && rect[3] < full[3] * 0.75 && (rect[2] - full[2]).abs() < 2.0
-            }
-        })?;
+        h.expect_ui(
+            SURFACE_BROWSER,
+            &format!("split {side} re-lays out the browser"),
+            |v| {
+                let rect = first_rect(v);
+                if narrower {
+                    rect[2] > 0.0 && rect[2] < full[2] * 0.75 && (rect[3] - full[3]).abs() < 2.0
+                } else {
+                    rect[3] > 0.0 && rect[3] < full[3] * 0.75 && (rect[2] - full[2]).abs() < 2.0
+                }
+            },
+        )?;
         h.expect_ui(ROWS, "file rows stay visible in the smaller pane", |v| {
             nodes(v).iter().any(|node| theme_visible(node))
         })?;
         h.keep_shot(&format!("resize-split-{side}"), Path::new(THEME_SHOTS))?;
         h.cli(&["close", &other.to_string()])?;
         h.focus(client.owner)?;
-        h.expect_ui(SURFACE_BROWSER, "the browser grows back to the full pane", |v| {
-            let rect = first_rect(v);
-            (rect[2] - full[2]).abs() < 2.0 && (rect[3] - full[3]).abs() < 2.0
-        })?;
+        h.expect_ui(
+            SURFACE_BROWSER,
+            "the browser grows back to the full pane",
+            |v| {
+                let rect = first_rect(v);
+                (rect[2] - full[2]).abs() < 2.0 && (rect[3] - full[3]).abs() < 2.0
+            },
+        )?;
         if h.settled(&client, Duration::ZERO)? != pane_size {
             return Err("Yazi's PTY no longer matches the pane after the split closed".into());
         }

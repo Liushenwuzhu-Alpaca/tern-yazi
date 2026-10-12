@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::sys::last_error;
 
-pub(crate) const BRIDGE_ENV: &str = "TERN_YAZI_BRIDGE";
+const BRIDGE_ENV: &str = "TERN_YAZI_BRIDGE";
 
 // A fixed-size startup-only diagnostic tail. No ANSI/control bytes reach stderr.
 pub(crate) struct StartupDiagnostic {
@@ -120,7 +120,6 @@ impl Backend {
         cid: &str,
         caller_umask: libc::mode_t,
         bridge: &str,
-        path: &OsStr,
     ) -> io::Result<Self> {
         let mut dimensions = libc::winsize {
             ws_row: 40,
@@ -160,7 +159,6 @@ impl Backend {
                 .arg("--client-id")
                 .arg(cid)
                 .args(args)
-                .env("PATH", path)
                 .env(BRIDGE_ENV, bridge)
                 .env("TERM", "xterm-256color")
                 .env_remove("TERM_PROGRAM")
@@ -196,18 +194,6 @@ impl Backend {
             return Err(last_error());
         }
         Ok(backend)
-    }
-
-    /// Sleeps until Yazi writes to its PTY or `ms` elapse.
-    pub(crate) fn wait_readable(&self, ms: i32) {
-        let mut poll = libc::pollfd {
-            fd: self.master.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        unsafe {
-            libc::poll(&mut poll, 1, ms);
-        }
     }
 
     pub(crate) fn poll_child(&mut self) -> io::Result<Option<i32>> {

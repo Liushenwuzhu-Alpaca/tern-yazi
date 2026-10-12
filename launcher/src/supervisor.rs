@@ -21,23 +21,10 @@ const STARTUP_LIMIT: Duration = Duration::from_secs(15);
 pub(crate) struct LaunchArgs {
     pub(crate) real: OsString,
     pub(crate) args: Vec<OsString>,
-    pub(crate) standalone_pane: Option<u64>,
 }
 
 pub(crate) fn launch_args(mut input: impl Iterator<Item = OsString>) -> io::Result<LaunchArgs> {
-    let mut option = input.next();
-    let standalone_pane = if option.as_deref() == Some(OsStr::new("--standalone-pane")) {
-        let pane = input
-            .next()
-            .and_then(|value| value.to_str().and_then(|value| value.parse::<u64>().ok()))
-            .filter(|pane| *pane > 0)
-            .ok_or_else(|| invalid("expected a positive native pane ID after --standalone-pane"))?;
-        option = input.next();
-        Some(pane)
-    } else {
-        None
-    };
-    if option.as_deref() != Some(OsStr::new("--real")) {
+    if input.next().as_deref() != Some(OsStr::new("--real")) {
         return Err(invalid("expected --real ORIGINAL -- [Yazi arguments]"));
     }
     let real = input
@@ -49,7 +36,6 @@ pub(crate) fn launch_args(mut input: impl Iterator<Item = OsString>) -> io::Resu
     Ok(LaunchArgs {
         real,
         args: input.collect(),
-        standalone_pane,
     })
 }
 
@@ -57,7 +43,6 @@ pub(crate) fn launch_args(mut input: impl Iterator<Item = OsString>) -> io::Resu
 pub(crate) struct Launch {
     pub(crate) real: PathBuf,
     pub(crate) args: Vec<OsString>,
-    pub(crate) cwd: PathBuf,
 }
 
 /// What to do with a launch: supervise it, or hand the arguments to the original Yazi.
@@ -66,12 +51,12 @@ pub(crate) enum Plan {
     Passthrough,
 }
 
-pub(crate) fn plan(real: &OsStr, args: &[OsString], standalone: bool) -> io::Result<Plan> {
+pub(crate) fn plan(real: &OsStr, args: &[OsString]) -> io::Result<Plan> {
     for arg in args {
         if arg == "--" {
             break;
         }
-        if !standalone && (arg == "--help" || arg == "--version" || arg == "-h" || arg == "-V") {
+        if arg == "--help" || arg == "--version" || arg == "-h" || arg == "-V" {
             return Ok(Plan::Passthrough);
         }
         if arg == "--client-id" || arg.as_bytes().starts_with(b"--client-id=") {
@@ -87,7 +72,6 @@ pub(crate) fn plan(real: &OsStr, args: &[OsString], standalone: bool) -> io::Res
     Ok(Plan::Supervise(Launch {
         real,
         args: args.to_vec(),
-        cwd: env::current_dir()?,
     }))
 }
 
@@ -106,48 +90,33 @@ pub(crate) fn prepare() -> libc::mode_t {
     caller_umask
 }
 
-/// Starts Yazi with the PATH shim and the bridge record its helpers authenticate with.
+/// Starts Yazi with the bridge record that names this binary as the plugin's rename helper.
 pub(crate) fn spawn(
     inbox: &Inbox,
     launch: &Launch,
-    owner_pane: u64,
     caller_umask: libc::mode_t,
 ) -> io::Result<Backend> {
     let helper = fs::canonicalize(env::current_exe()?)?;
-    let shim = inbox.shim(&helper)?;
-    let original_path = env::var_os("PATH");
-    let original_path_text = original_path.as_deref().map(utf8).transpose()?;
-    let bridge = serde_json::to_string(&serde_json::json!({"cid":inbox.cid,"token":inbox.token,
-        "owner_pane":owner_pane,"inbox":utf8(inbox.path()?.as_os_str())?,
-        "helper":utf8(helper.as_os_str())?,"original_path":original_path_text}))
-    .map_err(io::Error::other)?;
-    let mut path = shim.into_os_string();
-    path.push(":");
-    path.push(
-        original_path
-            .as_deref()
-            .unwrap_or_else(|| OsStr::new("/usr/local/bin:/usr/bin:/bin")),
-    );
+    let bridge = serde_json::json!({"helper": utf8(helper.as_os_str())?}).to_string();
     Backend::spawn(
         launch.real.as_os_str(),
         &launch.args,
         &inbox.cid,
         caller_umask,
         &bridge,
-        &path,
     )
 }
 
 pub(crate) enum Step {
     Starting,
-    Ready(Instant),
+    Ready,
     Exited(i32),
 }
 
 /// Tracks the backend until Yazi publishes its first complete snapshot.
 pub(crate) struct Startup {
     started: Instant,
-    published: Option<Instant>,
+    published: bool,
     early_exit: Option<i32>,
 }
 
@@ -155,7 +124,7 @@ impl Startup {
     pub(crate) fn new() -> Self {
         Self {
             started: Instant::now(),
-            published: None,
+            published: false,
             early_exit: None,
         }
     }
@@ -164,20 +133,19 @@ impl Startup {
         backend.drain()?;
         if let Some(status) = backend.poll_child()? {
             let code = child_code(status);
-            if self.published.is_none() {
+            if !self.published {
                 self.early_exit = Some(code);
                 return Ok(Step::Exited(if code == 0 { 1 } else { code }));
             }
             return Ok(Step::Exited(code));
         }
-        if let Some(at) = self.published {
-            return Ok(Step::Ready(at));
+        if self.published {
+            return Ok(Step::Ready);
         }
         if inbox.ready()? {
-            let now = Instant::now();
-            self.published = Some(now);
+            self.published = true;
             backend.capture_startup = false;
-            return Ok(Step::Ready(now));
+            return Ok(Step::Ready);
         }
         if self.started.elapsed() >= STARTUP_LIMIT {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "Yazi did not publish an initial snapshot within 15s; install the tern.yazi plugin and enable require(\"tern\"):setup() in init.lua"));
@@ -190,7 +158,7 @@ impl Startup {
         if let Some(code) = self.early_exit {
             eprintln!("tern-yazi: Yazi exited before publishing a snapshot (status {code}); enable require(\"tern\"):setup() in Yazi init.lua");
         }
-        if self.published.is_none()
+        if !self.published
             && pending_signal() == 0
             && result.as_ref().map_or(true, |code| *code != 0)
         {
@@ -225,27 +193,6 @@ mod tests {
     }
 
     #[test]
-    fn standalone_argv_keeps_native_identity_separate_from_yazi_arguments() {
-        let launch = parse(&[
-            "--standalone-pane",
-            "42",
-            "--real",
-            "/usr/bin/yazi",
-            "--",
-            "--cwd-file",
-            "/tmp/path with spaces",
-            "/tmp/files",
-        ])
-        .unwrap();
-        assert_eq!(launch.standalone_pane, Some(42));
-        assert_eq!(launch.real, OsStr::new("/usr/bin/yazi"));
-        assert_eq!(
-            launch.args,
-            ["--cwd-file", "/tmp/path with spaces", "/tmp/files"].map(OsString::from)
-        );
-    }
-
-    #[test]
     fn shell_argv_preserves_existing_interface_and_non_utf8_arguments() {
         let path = OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff]);
         let launch = launch_args(
@@ -258,21 +205,17 @@ mod tests {
             .into_iter(),
         )
         .unwrap();
-        assert_eq!(launch.standalone_pane, None);
         assert_eq!(launch.args, vec![path]);
     }
 
     #[test]
-    fn standalone_argv_rejects_missing_invalid_identity_or_delimiters() {
-        for pane in ["0", "-1", "native", "18446744073709551616"] {
-            assert!(parse(&["--standalone-pane", pane, "--real", "/usr/bin/yazi", "--"]).is_err());
-        }
+    fn argv_rejects_missing_delimiters() {
         for args in [
-            vec!["--standalone-pane"],
-            vec!["--standalone-pane", "42"],
-            vec!["--standalone-pane", "42", "/usr/bin/yazi", "--"],
-            vec!["--standalone-pane", "42", "--real"],
-            vec!["--standalone-pane", "42", "--real", "/usr/bin/yazi"],
+            vec![],
+            vec!["/usr/bin/yazi", "--"],
+            vec!["--real"],
+            vec!["--real", "/usr/bin/yazi"],
+            vec!["--real", "/usr/bin/yazi", "/tmp"],
         ] {
             assert!(parse(&args).is_err());
         }

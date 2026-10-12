@@ -490,7 +490,9 @@ local function reveal_listed(target)
 		if listed(url) then break end
 		ya.sleep(0.05)
 	end
-	ya.exec("reveal", { target, no_dummy = true })
+	-- `ya.exec` takes ownership of a Url argument; reveal a copy so callers can still read
+	-- `target` (its userdata would otherwise be destructed).
+	ya.exec("reveal", { Url(url), no_dummy = true })
 	snapshot()
 end
 
@@ -523,96 +525,6 @@ local commit = ya.sync(function(self, req, files)
 	for _, file in ipairs(files) do ya.emit("toggle", { file, state = "on" }) end
 	ya.emit("plugin", { "tern", "finalize", mode = "sync" })
 end)
-
--- Quote transport only; Yazi's shell actor owns all template/context semantics.
-local function shell_quote(value)
-	return "'" .. value:gsub("'", "'\\''") .. "'"
-end
-
-local SHELL_PREP_LIMIT = 256 * 1024
-
-local function read_shell_prep(path)
-	local f, err = io.open(path, "rb")
-	assert(f, tostring(err))
-	local ok, data = pcall(f.read, f, SHELL_PREP_LIMIT + 1)
-	f:close()
-	assert(ok, tostring(data))
-	data = data or ""
-	assert(#data <= SHELL_PREP_LIMIT, "Native shell preparation exceeds 256 KiB")
-	return data
-end
-
-local function prepare_shell(req, run)
-	local directory = state_dir() .. "/prep-" .. req.id
-	local created, create_err = fs.create("dir", Url(directory))
-	assert(created, "Native shell preparation failed: " .. tostring(create_err))
-	local ok, result = pcall(function()
-		-- A request-specific delimiter is never chosen from user script content.
-		-- This transport is not a sandbox against a malicious same-user filesystem.
-		local delimiter = "TERN_PREP_" .. ya.hash(req.id .. tostring(ya.time()) .. tostring(math.random()))
-		while run:find(delimiter, 1, true) do delimiter = delimiter .. "_" end
-		local function path(name)
-			-- The wrapper itself also passes through native percent expansion.
-			return (shell_quote(directory .. "/" .. name):gsub("%%", "%%%%"))
-		end
-		local wrapper = table.concat({
-			"umask 077",
-			"set -e",
-			"cat > " .. path("run") .. " <<'" .. delimiter .. "'",
-			run,
-			delimiter,
-			"printf '%%s\\0' \"$0\" \"$@\" > " .. path("args"),
-			"pwd > " .. path("cwd"),
-			"printf 'done' > " .. path("done"),
-		}, "\n")
-		-- Only the preparation script executes here, never the user's script.
-		-- The native actor performs visual escape and captures its own argv/cwd.
-		ya.exec("shell", { wrapper, block = false })
-		local deadline = ya.time() + 5
-		local ready = false
-		for _ = 1, 250 do
-			local marker = io.open(directory .. "/done", "rb")
-			if marker then
-				marker:close()
-				ready = true
-				break
-			end
-			if ya.time() >= deadline then break end
-			ya.sleep(0.02)
-		end
-		assert(ready, "Native shell preparation timed out; user script was not executed")
-		local expanded = read_shell_prep(directory .. "/run")
-		local argv = read_shell_prep(directory .. "/args")
-		local cwd = read_shell_prep(directory .. "/cwd")
-		assert(expanded:sub(-1) == "\n" and cwd:sub(-1) == "\n", "Incomplete native shell preparation")
-		-- Strip exactly the newline added by the heredoc/pwd, not script/path data.
-		expanded, cwd = expanded:sub(1, -2), cwd:sub(1, -2)
-		local command = { "sh", "-c", shell_quote(expanded) }
-		local pos = 1
-		while pos <= #argv do
-			local ending = assert(argv:find("\0", pos, true), "Incomplete native shell arguments")
-			command[#command + 1] = shell_quote(argv:sub(pos, ending - 1))
-			pos = ending + 1
-		end
-		assert(#command > 3 and cwd ~= "", "Missing native shell context")
-		return { command = table.concat(command, " "), cwd = cwd, block = true }
-	end)
-	-- Revoke the original pathname first: a delayed native task cannot recreate
-	-- staging after timeout, even if it already opened one of the removed files.
-	local retired = directory .. ".cleanup"
-	local renamed, rename_err = fs.rename(Url(directory), Url(retired))
-	if not renamed and rename_err and rename_err.kind == "NotFound" then
-		-- The companion may already have removed staging while closing.
-		assert(ok, "Native shell preparation failed: " .. tostring(result))
-		return result
-	end
-	local removed, remove_err = fs.remove("dir_all", Url(renamed and retired or directory))
-	assert(removed or (remove_err and remove_err.kind == "NotFound"),
-		"Native shell preparation cleanup failed: " .. tostring(remove_err))
-	assert(renamed, "Native shell preparation cleanup failed: " .. tostring(rename_err))
-	assert(ok, "Native shell preparation failed: " .. tostring(result))
-	return result
-end
 
 local companion_actors = {}
 for name in ("cd arrow leave enter back forward reveal yank toggle toggle_all visual_mode escape hidden find_arrow paste unyank link hardlink seek tab_create tab_switch tab_swap tab_close close"):gmatch("%S+") do
@@ -654,23 +566,17 @@ function M:entry(job)
 			req.args = args
 		end
 		if req.op == "command" then
-			assert(req.action == "shell", "Command input only accepts native shell scripts")
+			assert(req.action == "shell", "Command input only accepts shell scripts")
 			local run = req.args.run or req.args[1]
-			assert(type(run) == "string" and run ~= "", "Supply a shell script in the native command input")
-			assert(not req.args.interactive, "Local command input does not open another interactive Yazi prompt")
+			assert(type(run) == "string" and run ~= "", "Supply a shell script in the command input")
+			assert(not req.args.interactive, "Command input does not open another interactive Yazi prompt")
 			assert(not req.args.cwd, "Shell runs in Yazi's current directory; use cd first")
 			assert(req.args.block == nil or type(req.args.block) == "boolean", "--block is a boolean flag")
 			assert(req.args.orphan == nil or type(req.args.orphan) == "boolean", "--orphan is a boolean flag")
-			if os.getenv("TERN_YAZI_BRIDGE") then
-				-- Acknowledgement is acceptance, not completion of the blocking actor.
-				reply(req, { ok = true, queued = true, orphan = req.args.orphan == true })
-				ya.exec("shell", req.args)
-			elseif req.args.orphan or not req.args.block then
-				ya.exec("shell", req.args)
-				reply(req, { ok = true, queued = true, orphan = req.args.orphan == true })
-			else
-				reply(req, { ok = true, shell = prepare_shell(req, run) })
-			end
+			-- Acknowledgement is acceptance, not completion: Yazi runs the shell (blocking or as a
+			-- task) on its own terminal, which the launcher never shows.
+			reply(req, { ok = true, queued = true, orphan = req.args.orphan == true })
+			ya.exec("shell", req.args)
 			return
 		end
 		if req.op == "ping" then

@@ -68,10 +68,8 @@ impl Editor {
 
     /// Replaces UTF-16 `[from, to)` (default: the selection) and collapses the caret after it.
     pub(crate) fn replace(&mut self, insert: &str, range: Option<(usize, usize)>) {
-        let (from, to) = range.unwrap_or((
-            self.cursor.min(self.anchor),
-            self.cursor.max(self.anchor),
-        ));
+        let (from, to) =
+            range.unwrap_or((self.cursor.min(self.anchor), self.cursor.max(self.anchor)));
         let (start, end) = (byte_at(&self.text, from), byte_at(&self.text, to.max(from)));
         self.text.replace_range(start..end, insert);
         self.cursor = utf16_len(&self.text[..start]) + utf16_len(insert);
@@ -89,9 +87,15 @@ impl Editor {
         }
         let at = byte_at(&self.text, self.cursor);
         let span = if forward {
-            self.text[at..].chars().next().map(|c| (at, at + c.len_utf8()))
+            self.text[at..]
+                .chars()
+                .next()
+                .map(|c| (at, at + c.len_utf8()))
         } else {
-            self.text[..at].chars().next_back().map(|c| (at - c.len_utf8(), at))
+            self.text[..at]
+                .chars()
+                .next_back()
+                .map(|c| (at - c.len_utf8(), at))
         };
         if let Some((start, end)) = span {
             let from = utf16_len(&self.text[..start]);
@@ -102,9 +106,15 @@ impl Editor {
     fn step(&mut self, right: bool, extend: bool) {
         let at = byte_at(&self.text, self.cursor);
         let next = if right {
-            self.text[at..].chars().next().map_or(at, |c| at + c.len_utf8())
+            self.text[at..]
+                .chars()
+                .next()
+                .map_or(at, |c| at + c.len_utf8())
         } else {
-            self.text[..at].chars().next_back().map_or(at, |c| at - c.len_utf8())
+            self.text[..at]
+                .chars()
+                .next_back()
+                .map_or(at, |c| at - c.len_utf8())
         };
         self.cursor = utf16_len(&self.text[..next]);
         if !extend {
@@ -167,15 +177,29 @@ fn typed(key: &Key) -> Option<String> {
 pub(crate) enum Mode {
     Normal,
     Path(Editor),
-    Command(String),
-    Find { query: String, previous: bool },
+    /// The `:` (Yazi `shell --block`) or `;` (Yazi background task) shell line. Yazi runs both
+    /// on its own invisible terminal; their output is not shown, as in Yazi.
+    Command {
+        query: String,
+        block: bool,
+    },
+    Find {
+        query: String,
+        previous: bool,
+    },
     Filter,
     Create(String),
-    Rename { editor: Editor, target: String },
+    Rename {
+        editor: Editor,
+        target: String,
+    },
     /// Exact paths Yazi prepared for Trash, awaiting confirmation.
     Trash(Vec<String>),
     /// The theme picker; `original` is restored on cancel.
-    Theme { at: usize, original: usize },
+    Theme {
+        at: usize,
+        original: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,7 +242,7 @@ pub(crate) enum Then {
     Jump(Jump),
     TrashPrepared,
     TrashQueued,
-    ShellQueued(String),
+    ShellQueued { query: String, block: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,6 +257,10 @@ pub(crate) enum Effect {
     Request(Value, Then),
     Notice(Level, String),
     SaveTheme(usize),
+    /// Window actions: open paths in Tern, a terminal in a directory, text to the clipboard.
+    Open(Vec<String>),
+    Terminal(String),
+    Copy(String),
     Quit,
 }
 
@@ -249,6 +277,7 @@ pub(crate) struct Reply {
 enum Pending {
     G,
     T,
+    C,
 }
 
 pub(crate) struct Ui {
@@ -299,6 +328,31 @@ pub(crate) fn resolve_directory(query: &str, cwd: &str, home: &str) -> Option<St
         query = join_path(cwd, &query);
     }
     Some(query)
+}
+
+/// What `cc`, `cd`, `cf` and `cn` copy, like Yazi's `copy`: the selection, else the hovered
+/// entry, one per line.
+fn copy_paths(what: &str, yz: &Snapshot) -> Option<String> {
+    let urls: Vec<&str> = if yz.selected_urls.is_empty() {
+        yz.hovered.iter().map(|hover| hover.url.as_str()).collect()
+    } else {
+        yz.selected_urls.iter().map(String::as_str).collect()
+    };
+    let lines: Vec<&str> = urls
+        .into_iter()
+        .map(|url| match what {
+            "d" => parent_dir(url).unwrap_or(url),
+            "f" => basename(url),
+            "n" => {
+                let name = basename(url);
+                name.rfind('.')
+                    .filter(|dot| *dot > 0)
+                    .map_or(name, |dot| &name[..dot])
+            }
+            _ => url,
+        })
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 impl Ui {
@@ -386,16 +440,16 @@ impl Ui {
                 Level::Info,
                 "Trash queued in Yazi; completion is reported by Yazi tasks".to_owned(),
             )),
-            Then::ShellQueued(query) if reply.ok => {
+            Then::ShellQueued { query, block } if reply.ok => {
                 effects.push(Effect::Notice(
                     Level::Info,
                     "Shell queued in Yazi; completion is reported by Yazi tasks".to_owned(),
                 ));
-                if self.mode == Mode::Command(query) {
+                if self.mode == (Mode::Command { query, block }) {
                     self.mode = Mode::Normal;
                 }
             }
-            Then::TrashPrepared | Then::TrashQueued | Then::ShellQueued(_) => {}
+            Then::TrashPrepared | Then::TrashQueued | Then::ShellQueued { .. } => {}
         }
         effects
     }
@@ -472,7 +526,11 @@ impl Ui {
                     return vec![Effect::SaveTheme(at)];
                 } else if matches!(name, "j" | "down" | "k" | "up") {
                     let down = matches!(name, "j" | "down");
-                    let at = if down { (at + 1).min(THEMES.len() - 1) } else { at.saturating_sub(1) };
+                    let at = if down {
+                        (at + 1).min(THEMES.len() - 1)
+                    } else {
+                        at.saturating_sub(1)
+                    };
                     self.theme = at;
                     self.mode = Mode::Theme { at, original };
                 }
@@ -494,19 +552,19 @@ impl Ui {
                 }
                 return Vec::new();
             }
-            Mode::Command(query) => {
+            Mode::Command { query, block } => {
                 if escape {
                     self.mode = Mode::Normal;
                 } else if enter {
-                    let query = query.clone();
+                    let (query, block) = (query.clone(), *block);
                     if query.is_empty() {
                         self.mode = Mode::Normal;
                         return Vec::new();
                     }
                     return vec![Effect::Request(
                         json!({"op": "command", "action": "shell",
-                            "args": {"positional": [query], "options": {"block": false}}}),
-                        Then::ShellQueued(query),
+                            "args": {"positional": [query], "options": {"block": block}}}),
+                        Then::ShellQueued { query, block },
                     )];
                 } else if name == "backspace" {
                     erase_last(query);
@@ -535,7 +593,9 @@ impl Ui {
                     query.clone()
                 };
                 self.active_file = None;
-                return vec![request(json!({"op": "find", "query": query, "previous": previous}))];
+                return vec![request(
+                    json!({"op": "find", "query": query, "previous": previous}),
+                )];
             }
             Mode::Filter => {
                 if escape {
@@ -543,7 +603,9 @@ impl Ui {
                 }
                 if enter {
                     self.mode = Mode::Normal;
-                    return vec![request(json!({"op": "filter", "query": self.filter_query, "done": true}))];
+                    return vec![request(
+                        json!({"op": "filter", "query": self.filter_query, "done": true}),
+                    )];
                 }
                 if name == "backspace" {
                     erase_last(&mut self.filter_query);
@@ -553,7 +615,9 @@ impl Ui {
                     return Vec::new();
                 }
                 self.active_file = None;
-                return vec![request(json!({"op": "filter", "query": self.filter_query, "done": false}))];
+                return vec![request(
+                    json!({"op": "filter", "query": self.filter_query, "done": false}),
+                )];
             }
             Mode::Create(query) => {
                 if escape {
@@ -618,7 +682,11 @@ impl Ui {
         let page_up = name == "page_up" || (key.ctrl && matches!(name, "u" | "b"));
         if page_down || page_up {
             let half = (key.ctrl && matches!(name, "d" | "u")) || (!key.ctrl && key.shift);
-            let step = format!("{}{}", if page_up { "-" } else { "" }, if half { "50%" } else { "100%" });
+            let step = format!(
+                "{}{}",
+                if page_up { "-" } else { "" },
+                if half { "50%" } else { "100%" }
+            );
             return vec![action("arrow", &[&step], json!({}))];
         }
         if key.ctrl {
@@ -644,8 +712,15 @@ impl Ui {
             self.pending = Some(Pending::T);
             return Vec::new();
         }
-        if name == "n" {
+        if name == "n" && pending != Some(Pending::C) {
             return vec![action("find_arrow", &[], json!({"previous": upper}))];
+        }
+        if plain && pending == Some(Pending::C) && matches!(name, "c" | "d" | "f" | "n") {
+            return copy_paths(name, yz).map(Effect::Copy).into_iter().collect();
+        }
+        if name == "c" && plain {
+            self.pending = Some(Pending::C);
+            return Vec::new();
         }
         let letter = name.len() == 1 && name.as_bytes()[0].is_ascii_alphabetic();
         if upper && letter {
@@ -657,6 +732,8 @@ impl Ui {
                 "y" | "x" => vec![action("unyank", &[], json!({}))],
                 "j" => vec![action("seek", &["5"], json!({}))],
                 "k" => vec![action("seek", &["-5"], json!({}))],
+                // Yazi's default keymap leaves `W` unbound; it opens a terminal below.
+                "w" => vec![Effect::Terminal(self.cwd(yz).to_owned())],
                 // Yazi's default keymap leaves `T` unbound; it opens the theme picker.
                 "t" => {
                     self.mode = Mode::Theme {
@@ -673,12 +750,13 @@ impl Ui {
             "k" | "up" => action("arrow", &["-1"], json!({})),
             "h" | "left" => action("leave", &[], json!({})),
             "l" | "right" => action("enter", &[], json!({})),
-            // Opening files in Tern belongs to the window integration; directories enter.
-            _ if enter => match &yz.hovered {
-                Some(hover) if hover.dir == Some(true) && yz.selected_urls.is_empty() => {
-                    action("enter", &[], json!({}))
-                }
-                _ => return Vec::new(),
+            // Enter on a directory enters it; otherwise Enter and `o` open the selection, or
+            // the hovered entry, in Tern.
+            _ if enter || name == "o" => match &yz.hovered {
+                _ if !yz.selected_urls.is_empty() => Effect::Open(yz.selected_urls.clone()),
+                Some(hover) if enter && hover.dir == Some(true) => action("enter", &[], json!({})),
+                Some(hover) => Effect::Open(vec![hover.url.clone()]),
+                None => return Vec::new(),
             },
             "space" | " " => request(json!({"op": "toggle_advance"})),
             "v" => action("visual_mode", &[], json!({})),
@@ -700,8 +778,11 @@ impl Ui {
                 };
                 return Vec::new();
             }
-            ";" | "semicolon" if !key.shift => {
-                self.mode = Mode::Command(String::new());
+            ":" | "colon" | ";" | "semicolon" => {
+                self.mode = Mode::Command {
+                    query: String::new(),
+                    block: key.shift || matches!(name, ":" | "colon"),
+                };
                 return Vec::new();
             }
             "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" if !upper => {
@@ -742,18 +823,23 @@ impl Ui {
     }
 
     fn submit_rename(&mut self) -> Vec<Effect> {
-        let Mode::Rename { editor, target } = std::mem::replace(&mut self.mode, Mode::Normal) else {
+        let Mode::Rename { editor, target } = std::mem::replace(&mut self.mode, Mode::Normal)
+        else {
             return Vec::new();
         };
         if editor.text.is_empty() {
             return Vec::new();
         }
-        vec![request(json!({"op": "rename", "target": target, "new_name": editor.text}))]
+        vec![request(
+            json!({"op": "rename", "target": target, "new_name": editor.text}),
+        )]
     }
 
     fn editor(&mut self, field: Field) -> Option<&mut Editor> {
         match (&mut self.mode, field) {
-            (Mode::Path(editor), Field::Path) | (Mode::Rename { editor, .. }, Field::Rename) => Some(editor),
+            (Mode::Path(editor), Field::Path) | (Mode::Rename { editor, .. }, Field::Rename) => {
+                Some(editor)
+            }
             _ => None,
         }
     }
@@ -809,7 +895,9 @@ impl Ui {
             Msg::ClearInput => match &self.mode {
                 Mode::Find { .. } => return vec![self.clear_find()],
                 Mode::Filter => return vec![self.clear_filter()],
-                Mode::Command(_) | Mode::Create(_) | Mode::Rename { .. } => self.mode = Mode::Normal,
+                Mode::Command { .. } | Mode::Create(_) | Mode::Rename { .. } => {
+                    self.mode = Mode::Normal
+                }
                 _ => {}
             },
             Msg::TabSwitch(index) => {
@@ -844,7 +932,11 @@ impl Ui {
             List::Child => self
                 .active_file
                 .clone()
-                .or_else(|| yz.hovered.as_ref().map(|hover| basename(&hover.url).to_owned()))
+                .or_else(|| {
+                    yz.hovered
+                        .as_ref()
+                        .map(|hover| basename(&hover.url).to_owned())
+                })
                 .map(|active| join_path(&cwd, &active)),
             List::Themes => None,
         };
@@ -864,10 +956,11 @@ impl Ui {
                 Some(true) => {
                     self.optimistic_cwd = Some(target.clone());
                     self.active_file = None;
-                    vec![request(json!({"op": "activate", "target": target, "action": "enter"}))]
+                    vec![request(
+                        json!({"op": "activate", "target": target, "action": "enter"}),
+                    )]
                 }
-                // Opening files in Tern belongs to the window integration.
-                _ => Vec::new(),
+                _ => vec![Effect::Open(vec![target])],
             };
         }
         if base != yz.current.cwd {
@@ -880,8 +973,8 @@ impl Ui {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::model::{Folder, Hover};
+    use super::*;
 
     fn key(name: &str) -> Key {
         Key {
@@ -932,15 +1025,24 @@ mod tests {
         assert_eq!((editor.text.as_str(), editor.cursor), ("ab", 1));
         editor.key(&key("x"));
         assert_eq!((editor.text.as_str(), editor.cursor), ("axb", 2));
-        editor.key(&Key { shift: true, ..Key::named("home") });
+        editor.key(&Key {
+            shift: true,
+            ..Key::named("home")
+        });
         assert_eq!((editor.cursor, editor.anchor), (0, 2));
         editor.key(&key("é"));
         assert_eq!((editor.text.as_str(), editor.cursor), ("éb", 1));
         editor.key(&key("delete"));
         assert_eq!(editor.text, "é");
-        editor.key(&Key { ctrl: true, ..Key::named("a") });
+        editor.key(&Key {
+            ctrl: true,
+            ..Key::named("a")
+        });
         editor.key(&key("backspace"));
-        assert_eq!((editor.text.as_str(), editor.cursor, editor.anchor), ("", 0, 0));
+        assert_eq!(
+            (editor.text.as_str(), editor.cursor, editor.anchor),
+            ("", 0, 0)
+        );
     }
 
     #[test]
@@ -967,17 +1069,40 @@ mod tests {
         let mut ui = Ui::new(0);
         ui.key(&key("r"), &yz, "/home/u");
         ui.msg(Msg::FieldFocus(Field::Rename), &yz, "/home/u");
-        let edit = |from, to, text: &str, len| FieldEdit { from, to, text: text.to_owned(), cursor: from + 1, len };
+        let edit = |from, to, text: &str, len| FieldEdit {
+            from,
+            to,
+            text: text.to_owned(),
+            cursor: from + 1,
+            len,
+        };
         // An edit against text the editor no longer holds is stale and ignored.
-        ui.msg(Msg::FieldEdit(Field::Rename, edit(0, 0, "x", 3)), &yz, "/home/u");
-        ui.msg(Msg::FieldEdit(Field::Rename, edit(5, 5, "2", 8)), &yz, "/home/u");
+        ui.msg(
+            Msg::FieldEdit(Field::Rename, edit(0, 0, "x", 3)),
+            &yz,
+            "/home/u",
+        );
+        ui.msg(
+            Msg::FieldEdit(Field::Rename, edit(5, 5, "2", 8)),
+            &yz,
+            "/home/u",
+        );
         let Mode::Rename { editor, .. } = &ui.mode else {
             panic!("rename mode expected");
         };
-        assert_eq!((editor.text.as_str(), editor.cursor, editor.anchor), ("notes2.md", 6, 6));
+        assert_eq!(
+            (editor.text.as_str(), editor.cursor, editor.anchor),
+            ("notes2.md", 6, 6)
+        );
         // A path field event cannot touch the rename editor.
-        assert!(ui.msg(Msg::FieldSend(Field::Path, "/".to_owned()), &yz, "/home/u").is_empty());
-        let effects = ui.msg(Msg::FieldSend(Field::Rename, "final.md".to_owned()), &yz, "/home/u");
+        assert!(ui
+            .msg(Msg::FieldSend(Field::Path, "/".to_owned()), &yz, "/home/u")
+            .is_empty());
+        let effects = ui.msg(
+            Msg::FieldSend(Field::Rename, "final.md".to_owned()),
+            &yz,
+            "/home/u",
+        );
         assert_eq!(
             body(&effects),
             &json!({"op": "rename", "target": "/tmp/files/notes.md", "new_name": "final.md"})
@@ -991,13 +1116,22 @@ mod tests {
         let mut ui = Ui::new(0);
         ui.key(&key("f"), &yz, "");
         let effects = ui.key(&key("n"), &yz, "");
-        assert_eq!(body(&effects), &json!({"op": "filter", "query": "n", "done": false}));
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "filter", "query": "n", "done": false})
+        );
         let effects = ui.key(&key("enter"), &yz, "");
-        assert_eq!(body(&effects), &json!({"op": "filter", "query": "n", "done": true}));
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "filter", "query": "n", "done": true})
+        );
         assert_eq!(ui.filter_query, "n");
         ui.key(&key("?"), &yz, "");
         let effects = ui.key(&key("c"), &yz, "");
-        assert_eq!(body(&effects), &json!({"op": "find", "query": "c", "previous": true}));
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "find", "query": "c", "previous": true})
+        );
         let effects = ui.key(&key("escape"), &yz, "");
         assert_eq!(body(&effects)["args"]["options"], json!({"find": true}));
     }
@@ -1012,13 +1146,136 @@ mod tests {
             &json!({"op": "action", "action": "arrow", "args": {"positional": ["1"], "options": {}}})
         );
         assert!(ui.key(&key("g"), &yz, "").is_empty());
-        assert_eq!(body(&ui.key(&key("g"), &yz, ""))["args"]["positional"], json!(["top"]));
-        assert_eq!(body(&ui.key(&shifted("g"), &yz, ""))["args"]["positional"], json!(["bot"]));
-        let half = ui.key(&Key { ctrl: true, ..Key::named("u") }, &yz, "");
+        assert_eq!(
+            body(&ui.key(&key("g"), &yz, ""))["args"]["positional"],
+            json!(["top"])
+        );
+        assert_eq!(
+            body(&ui.key(&shifted("g"), &yz, ""))["args"]["positional"],
+            json!(["bot"])
+        );
+        let half = ui.key(
+            &Key {
+                ctrl: true,
+                ..Key::named("u")
+            },
+            &yz,
+            "",
+        );
         assert_eq!(body(&half)["args"]["positional"], json!(["-50%"]));
-        assert_eq!(body(&ui.key(&key("3"), &yz, ""))["args"]["positional"], json!(["2"]));
+        assert_eq!(
+            body(&ui.key(&key("3"), &yz, ""))["args"]["positional"],
+            json!(["2"])
+        );
         assert_eq!(ui.key(&key("q"), &yz, ""), vec![Effect::Quit]);
-        assert!(ui.key(&key(":"), &yz, "").is_empty());
+    }
+
+    #[test]
+    fn colon_queues_a_blocking_shell_and_semicolon_a_background_one() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        for (opener, block) in [(key(":"), true), (shifted(";"), true), (key(";"), false)] {
+            assert!(ui.key(&opener, &yz, "").is_empty());
+            assert_eq!(
+                ui.mode,
+                Mode::Command {
+                    query: String::new(),
+                    block
+                }
+            );
+            ui.key(&key("l"), &yz, "");
+            ui.key(&key("s"), &yz, "");
+            let effects = ui.key(&key("enter"), &yz, "");
+            assert_eq!(
+                body(&effects),
+                &json!({"op": "command", "action": "shell",
+                    "args": {"positional": ["ls"], "options": {"block": block}}})
+            );
+            let then = Then::ShellQueued {
+                query: "ls".to_owned(),
+                block,
+            };
+            let notices = ui.reply(
+                then,
+                &Reply {
+                    ok: true,
+                    ..Reply::default()
+                },
+            );
+            assert_eq!(notices.len(), 1);
+            assert_eq!(ui.mode, Mode::Normal);
+        }
+    }
+
+    #[test]
+    fn open_follows_the_selection_then_the_hovered_entry() {
+        let mut yz = snapshot();
+        let mut ui = Ui::new(0);
+        let note = vec!["/tmp/files/notes.md".to_owned()];
+        assert_eq!(ui.key(&key("o"), &yz, ""), vec![Effect::Open(note.clone())]);
+        assert_eq!(ui.key(&key("enter"), &yz, ""), vec![Effect::Open(note)]);
+        assert!(ui.key(&shifted("o"), &yz, "").is_empty());
+        yz.hovered = Some(Hover {
+            url: "/tmp/files/child".to_owned(),
+            dir: Some(true),
+            ..Hover::default()
+        });
+        assert_eq!(body(&ui.key(&key("enter"), &yz, ""))["action"], "enter");
+        assert_eq!(
+            ui.key(&key("o"), &yz, ""),
+            vec![Effect::Open(vec!["/tmp/files/child".to_owned()])]
+        );
+        yz.selected_urls = vec![
+            "/tmp/files/child".to_owned(),
+            "/tmp/files/notes.md".to_owned(),
+        ];
+        assert_eq!(
+            ui.key(&key("enter"), &yz, ""),
+            vec![Effect::Open(yz.selected_urls.clone())]
+        );
+        yz.hovered = None;
+        yz.selected_urls.clear();
+        assert!(ui.key(&key("o"), &yz, "").is_empty());
+    }
+
+    #[test]
+    fn copy_prefix_copies_like_yazi() {
+        let mut yz = snapshot();
+        let mut ui = Ui::new(0);
+        let mut copy = |second: &str, yz: &Snapshot| {
+            assert!(ui.key(&key("c"), yz, "").is_empty());
+            ui.key(&key(second), yz, "")
+        };
+        assert_eq!(
+            copy("c", &yz),
+            vec![Effect::Copy("/tmp/files/notes.md".to_owned())]
+        );
+        assert_eq!(copy("d", &yz), vec![Effect::Copy("/tmp/files".to_owned())]);
+        assert_eq!(copy("f", &yz), vec![Effect::Copy("notes.md".to_owned())]);
+        assert_eq!(copy("n", &yz), vec![Effect::Copy("notes".to_owned())]);
+        yz.selected_urls = vec![
+            "/tmp/files/.env".to_owned(),
+            "/tmp/files/a.tar.gz".to_owned(),
+        ];
+        assert_eq!(copy("n", &yz), vec![Effect::Copy(".env\na.tar".to_owned())]);
+        // Any other key ends the prefix and acts on its own.
+        assert_eq!(body(&copy("j", &yz))["action"], "arrow");
+        assert_eq!(body(&ui.key(&key("n"), &yz, ""))["action"], "find_arrow");
+    }
+
+    #[test]
+    fn shift_w_opens_a_terminal_in_the_shown_directory() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        assert_eq!(
+            ui.key(&shifted("w"), &yz, ""),
+            vec![Effect::Terminal("/tmp/files".to_owned())]
+        );
+        ui.optimistic_cwd = Some("/tmp/files/child".to_owned());
+        assert_eq!(
+            ui.key(&shifted("w"), &yz, ""),
+            vec![Effect::Terminal("/tmp/files/child".to_owned())]
+        );
     }
 
     #[test]
@@ -1026,7 +1283,10 @@ mod tests {
         let yz = snapshot();
         let mut ui = Ui::new(0);
         let effects = ui.key(&key("d"), &yz, "");
-        assert!(matches!(&effects[..], [Effect::Request(_, Then::TrashPrepared)]));
+        assert!(matches!(
+            &effects[..],
+            [Effect::Request(_, Then::TrashPrepared)]
+        ));
         let reply = Reply {
             ok: true,
             paths: vec!["/tmp/files/notes.md".to_owned()],
@@ -1035,8 +1295,14 @@ mod tests {
         assert!(ui.reply(Then::TrashPrepared, &reply).is_empty());
         assert!(ui.key(&key("j"), &yz, "").is_empty());
         let effects = ui.key(&key("enter"), &yz, "");
-        assert_eq!(body(&effects), &json!({"op": "trash_commit", "paths": ["/tmp/files/notes.md"]}));
-        let empty = Reply { ok: true, ..Reply::default() };
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "trash_commit", "paths": ["/tmp/files/notes.md"]})
+        );
+        let empty = Reply {
+            ok: true,
+            ..Reply::default()
+        };
         let notice = ui.reply(Then::TrashPrepared, &empty);
         assert!(matches!(&notice[..], [Effect::Notice(Level::Info, _)]));
         assert_eq!(ui.mode, Mode::Normal);
@@ -1055,13 +1321,22 @@ mod tests {
         ui.key(&key("k"), &yz, "");
         assert_eq!(ui.key(&key("enter"), &yz, ""), vec![Effect::SaveTheme(1)]);
         let effects = ui.msg(Msg::Activate(List::Themes, "zen".to_owned()), &yz, "");
-        assert_eq!(effects, vec![Effect::SaveTheme(theme::index("zen").unwrap())]);
+        assert_eq!(
+            effects,
+            vec![Effect::SaveTheme(theme::index("zen").unwrap())]
+        );
     }
 
     #[test]
     fn path_editing_resolves_and_jumps() {
-        assert_eq!(resolve_directory("~/x", "/tmp", "/home/u").as_deref(), Some("/home/u/x"));
-        assert_eq!(resolve_directory("sub", "/tmp", "").as_deref(), Some("/tmp/sub"));
+        assert_eq!(
+            resolve_directory("~/x", "/tmp", "/home/u").as_deref(),
+            Some("/home/u/x")
+        );
+        assert_eq!(
+            resolve_directory("sub", "/tmp", "").as_deref(),
+            Some("/tmp/sub")
+        );
         assert_eq!(resolve_directory("a\nb", "/tmp", ""), None);
         let mut yz = snapshot();
         let mut ui = Ui::new(0);
@@ -1080,12 +1355,26 @@ mod tests {
         let yz = snapshot();
         let mut ui = Ui::new(0);
         let effects = ui.msg(Msg::Select(List::Files, "child".to_owned()), &yz, "");
-        assert_eq!(body(&effects)["args"]["positional"], json!(["/tmp/files/child"]));
+        assert_eq!(
+            body(&effects)["args"]["positional"],
+            json!(["/tmp/files/child"])
+        );
         assert_eq!(ui.active_file.as_deref(), Some("child"));
         let effects = ui.msg(Msg::Activate(List::Files, "child".to_owned()), &yz, "");
-        assert_eq!(body(&effects), &json!({"op": "activate", "target": "/tmp/files/child", "action": "enter"}));
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "activate", "target": "/tmp/files/child", "action": "enter"})
+        );
         assert_eq!(ui.optimistic_cwd.as_deref(), Some("/tmp/files/child"));
-        assert!(ui.msg(Msg::Select(List::Files, "missing".to_owned()), &yz, "").is_empty());
+        assert!(ui
+            .msg(Msg::Select(List::Files, "missing".to_owned()), &yz, "")
+            .is_empty());
+        ui.optimistic_cwd = None;
+        let effects = ui.msg(Msg::Activate(List::Files, "notes.md".to_owned()), &yz, "");
+        assert_eq!(
+            effects,
+            vec![Effect::Open(vec!["/tmp/files/notes.md".to_owned()])]
+        );
     }
 
     #[test]

@@ -76,24 +76,10 @@ pub(crate) fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
-pub(crate) fn json_text<'a>(value: &'a serde_json::Value, key: &str) -> io::Result<&'a str> {
-    value
-        .get(key)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| invalid("invalid native shell metadata"))
-}
-
-pub(crate) fn json_number(value: &serde_json::Value, key: &str) -> io::Result<u64> {
-    value
-        .get(key)
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| invalid("invalid native shell metadata"))
-}
-
 pub(crate) fn utf8(value: &OsStr) -> io::Result<&str> {
-    value.to_str().ok_or_else(|| {
-        invalid("native shell protocol requires UTF-8 arguments, paths and environment")
-    })
+    value
+        .to_str()
+        .ok_or_else(|| invalid("the launcher requires UTF-8 arguments and paths"))
 }
 
 pub(crate) fn install_signals() {

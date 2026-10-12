@@ -26,16 +26,34 @@ const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Preview {
     /// The whole file exceeds `limit` or is not a readable regular file.
-    Unavailable { limit: u64 },
+    Unavailable {
+        limit: u64,
+    },
     Archive(Vec<String>),
-    Pdf { meta: HashMap<String, String>, cover: Option<Blob> },
+    Pdf {
+        meta: HashMap<String, String>,
+        cover: Option<Blob>,
+    },
     PdfUnavailable,
-    Image { ext: String, mime: &'static str, size: usize, blob: Option<Blob> },
+    Image {
+        ext: String,
+        mime: &'static str,
+        size: usize,
+        blob: Option<Blob>,
+    },
     Mermaid(String),
     Markdown(String),
-    Model { fence: &'static str, text: String },
-    Binary { size: usize },
-    Code { text: String, lang: &'static str },
+    Model {
+        fence: &'static str,
+        text: String,
+    },
+    Binary {
+        size: usize,
+    },
+    Code {
+        text: String,
+        lang: &'static str,
+    },
 }
 
 /// Image bytes before upload, or the session blob id after.
@@ -151,7 +169,19 @@ fn pdf(path: &str) -> Preview {
         .unwrap_or_default();
     // Rasterize to stdout: no shared temp path to pre-seed, follow or race.
     let cover = helper(
-        &["pdftocairo", "-f", "1", "-l", "1", "-singlefile", "-jpeg", "-r", "100", path, "-"],
+        &[
+            "pdftocairo",
+            "-f",
+            "1",
+            "-l",
+            "1",
+            "-singlefile",
+            "-jpeg",
+            "-r",
+            "100",
+            path,
+            "-",
+        ],
         IMAGE_BYTES,
     )
     .filter(|bytes| !bytes.is_empty());
@@ -186,7 +216,12 @@ pub(crate) fn load(path: &str) -> Preview {
     if let Some(mime) = mime {
         let size = bytes.len();
         let blob = (!bytes.is_empty()).then_some(Blob::Bytes(bytes, mime));
-        return Preview::Image { ext, mime, size, blob };
+        return Preview::Image {
+            ext,
+            mime,
+            size,
+            blob,
+        };
     }
     let text = || String::from_utf8_lossy(&bytes).into_owned();
     match ext.as_str() {
@@ -195,7 +230,10 @@ pub(crate) fn load(path: &str) -> Preview {
         // Binary STL/PLY share the text extensions; NUL bytes keep them out of the fence.
         _ if bytes.contains(&0) => Preview::Binary { size: bytes.len() },
         _ => match model_fence(&ext) {
-            Some(fence) => Preview::Model { fence, text: text() },
+            Some(fence) => Preview::Model {
+                fence,
+                text: text(),
+            },
             None => Preview::Code {
                 text: text(),
                 lang: language(&ext),
@@ -212,14 +250,14 @@ pub(crate) struct Stamp {
     pub(crate) mtime: Option<f64>,
 }
 
-pub(crate) enum Slot {
+pub(crate) enum Load {
     Loading(Instant),
     Ready(Preview),
 }
 
 /// The preview of the active file, loaded on a worker thread per request.
 pub(crate) struct Previews {
-    current: Option<(Stamp, Slot)>,
+    current: Option<(Stamp, Load)>,
     tx: Sender<(Stamp, Preview)>,
     rx: Receiver<(Stamp, Preview)>,
 }
@@ -236,7 +274,11 @@ impl Previews {
 
     /// Makes `stamp` the active preview, starting its load when it is new.
     pub(crate) fn want(&mut self, stamp: Stamp) {
-        if self.current.as_ref().is_some_and(|(current, _)| *current == stamp) {
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|(current, _)| *current == stamp)
+        {
             return;
         }
         let tx = self.tx.clone();
@@ -245,7 +287,7 @@ impl Previews {
             let preview = load(&job.path);
             let _ = tx.send((job, preview));
         });
-        self.current = Some((stamp, Slot::Loading(Instant::now())));
+        self.current = Some((stamp, Load::Loading(Instant::now())));
     }
 
     pub(crate) fn forget(&mut self) {
@@ -256,9 +298,9 @@ impl Previews {
     pub(crate) fn poll(&mut self) -> bool {
         let mut ready = false;
         while let Ok((stamp, preview)) = self.rx.try_recv() {
-            if let Some((current, slot)) = &mut self.current {
+            if let Some((current, state)) = &mut self.current {
                 if *current == stamp {
-                    *slot = Slot::Ready(preview);
+                    *state = Load::Ready(preview);
                     ready = true;
                 }
             }
@@ -266,17 +308,17 @@ impl Previews {
         ready
     }
 
-    pub(crate) fn get(&self, stamp: &Stamp) -> Option<&Slot> {
+    pub(crate) fn get(&self, stamp: &Stamp) -> Option<&Load> {
         self.current
             .as_ref()
             .filter(|(current, _)| current == stamp)
-            .map(|(_, slot)| slot)
+            .map(|(_, state)| state)
     }
 
     /// The ready preview, for uploading its image bytes.
     pub(crate) fn ready_mut(&mut self) -> Option<&mut Preview> {
         match &mut self.current {
-            Some((_, Slot::Ready(preview))) => Some(preview),
+            Some((_, Load::Ready(preview))) => Some(preview),
             _ => None,
         }
     }
@@ -292,7 +334,8 @@ mod tests {
 
     impl Dir {
         fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("tern-yazi-preview-{}-{name}", std::process::id()));
+            let path = std::env::temp_dir()
+                .join(format!("tern-yazi-preview-{}-{name}", std::process::id()));
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }
@@ -327,21 +370,46 @@ mod tests {
         let dir = Dir::new("classify");
         assert_eq!(
             load(&dir.file("a.rs", b"fn main() {}")),
-            Preview::Code { text: "fn main() {}".to_owned(), lang: "rust" }
+            Preview::Code {
+                text: "fn main() {}".to_owned(),
+                lang: "rust"
+            }
         );
-        assert_eq!(load(&dir.file("a.md", b"# t")), Preview::Markdown("# t".to_owned()));
-        assert_eq!(load(&dir.file("a.mmd", b"graph TD")), Preview::Mermaid("graph TD".to_owned()));
+        assert_eq!(
+            load(&dir.file("a.md", b"# t")),
+            Preview::Markdown("# t".to_owned())
+        );
+        assert_eq!(
+            load(&dir.file("a.mmd", b"graph TD")),
+            Preview::Mermaid("graph TD".to_owned())
+        );
         assert_eq!(
             load(&dir.file("a.wrl", b"#VRML V2.0")),
-            Preview::Model { fence: "vrml", text: "#VRML V2.0".to_owned() }
+            Preview::Model {
+                fence: "vrml",
+                text: "#VRML V2.0".to_owned()
+            }
         );
-        assert_eq!(load(&dir.file("a.stl", b"solid\0x")), Preview::Binary { size: 7 });
+        assert_eq!(
+            load(&dir.file("a.stl", b"solid\0x")),
+            Preview::Binary { size: 7 }
+        );
         assert!(matches!(
             load(&dir.file("a.svg", b"<svg/>")),
-            Preview::Image { mime: "image/svg+xml", size: 6, blob: Some(_), .. }
+            Preview::Image {
+                mime: "image/svg+xml",
+                size: 6,
+                blob: Some(_),
+                ..
+            }
         ));
         let big = vec![b'x'; (MERMAID_BYTES + 1) as usize];
-        assert_eq!(load(&dir.file("b.mmd", &big)), Preview::Unavailable { limit: MERMAID_BYTES });
+        assert_eq!(
+            load(&dir.file("b.mmd", &big)),
+            Preview::Unavailable {
+                limit: MERMAID_BYTES
+            }
+        );
         assert_eq!(Preview::Unavailable { limit: 1 }.kind("x.py"), "python");
     }
 }

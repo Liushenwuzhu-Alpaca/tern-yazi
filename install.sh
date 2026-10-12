@@ -154,4 +154,6 @@ mv -f -- "$tmp_wrapper" "$wrapper"
 mv -f -- "$tmp_manifest" "$manifest"
 trap - EXIT HUP INT TERM
 printf 'Installed %s (original: %s).\n' "$wrapper" "$real"
-printf '%s\n' 'Put this prefix/bin before the original Yazi directory on PATH.' 'Tern and Yazi plugins must also be linked/enabled; see the repository installation instructions.'
+printf '%s\n' 'Put this prefix/bin before the original Yazi directory on PATH.'
+printf 'Enable the Yazi plugin (link %s/yazi-plugin/tern.yazi and add require("tern"):setup() to init.lua).\n' "$repo"
+printf 'Optional: tern plugin link %s adds the Yazi palette entry and Ctrl+Alt+Y.\n' "$repo"
