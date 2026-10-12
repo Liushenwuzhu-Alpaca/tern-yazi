@@ -5,7 +5,7 @@ version = "0.2.0"
 description = "Native interactive companion panel and inspector for Yazi"
 host = "host.luau"
 window = "window.luau"
-styles = ["companion.css", "themes/current.css", "themes/aurora.css", "themes/editorial.css", "themes/amber.css"]
+styles = ["companion.css", "themes/current.css", "themes/aurora.css", "themes/editorial.css", "themes/amber.css", "themes/blueprint.css", "themes/brutalist.css", "themes/zen.css", "themes/swiss.css"]
 
 [[blocks]]
 id = "companion"

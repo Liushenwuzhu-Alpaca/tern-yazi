@@ -1,13 +1,18 @@
 -- Presentation-only layout preference shared by host and window VMs.
--- Each theme is `themes/<id>.css` (listed in plugin.toml `styles`) plus one entry here.
+-- Each theme is `themes/<id>.css` (listed in plugin.toml `styles`) plus one entry here;
+-- `detail` is the one-line description shown in the theme picker.
 -- Optional structural flags: `narrow` (role gains `.narrow` below 120 columns),
 -- `plain_parent` (no parent-column icons), `ordinals` (row numbers), `tray` (selection tray in the dock).
 local M = {}
 M.options = {
-	{ id = "current", title = "Current" },
-	{ id = "aurora", title = "Aurora Glass", narrow = true },
-	{ id = "editorial", title = "Editorial Paper", narrow = true, plain_parent = true },
-	{ id = "amber", title = "Amber Ledger", narrow = true, ordinals = true, tray = true },
+	{ id = "current", title = "Current", detail = "Yazi capsules, compact 4:9:7 grid" },
+	{ id = "aurora", title = "Aurora Glass", detail = "Frosted rounded panels", narrow = true },
+	{ id = "editorial", title = "Editorial Paper", detail = "Serif headings, hairline rules", narrow = true, plain_parent = true },
+	{ id = "amber", title = "Amber Ledger", detail = "Mono ledger, ordinals, selection tray", narrow = true, ordinals = true, tray = true },
+	{ id = "blueprint", title = "Blueprint Draft", detail = "Drafting grid, dashed cursor, title-block footer", narrow = true },
+	{ id = "brutalist", title = "Brutalist Block", detail = "Thick borders, hard shadows, inverted cursor", narrow = true },
+	{ id = "zen", title = "Zen Minimal", detail = "No chrome, whitespace and an accent bar", narrow = true, plain_parent = true },
+	{ id = "swiss", title = "Swiss Grid", detail = "Bold flush-left type, red ordinals", narrow = true, ordinals = true },
 }
 local by_id = {}
 for _, option in ipairs(M.options) do by_id[option.id] = option end

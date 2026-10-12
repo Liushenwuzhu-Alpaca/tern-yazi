@@ -312,7 +312,10 @@
     min-width: 0;
     max-width: 180px;
     padding: 0 10px;
+    height: auto;
     border: 0;
+    /* Tern's .sf-badge draws an inset tone ring; themes opt into their own outline. */
+    box-shadow: none;
     border-radius: 999px;
     background: rgb(from var(--accent) r g b / 16%);
     color: var(--accent);

@@ -371,22 +371,34 @@ function Window.register(control_route)
 	end)
 	arm_timer()
 
-	for _, option in ipairs(theme.options) do
-		local id = option.id
-		tern.command({
-			id = "theme_" .. id,
-			title = "Yazi: Layout - " .. option.title,
-			group = "Yazi",
-			run = function(cx)
-				if not theme.set(id) then return end
-				for _, pane in ipairs(cx.session:panes()) do
-					if pane.block == BLOCK_KIND then
-						cx.session:event(pane.pane, { ev = "action", id = "main.theme", act = "set_theme=" .. id })
-					end
-				end
-			end,
-		})
+	-- One palette entry opens a picker instead of one command per theme.
+	local function apply_theme(cx, id: string)
+		if not theme.set(id) then return end
+		for _, pane in ipairs(cx.session:panes()) do
+			if pane.block == BLOCK_KIND then
+				cx.session:event(pane.pane, { ev = "action", id = "main.theme", act = "set_theme=" .. id })
+			end
+		end
 	end
+	tern.command({
+		id = "theme",
+		title = "Yazi: Layout Theme…",
+		group = "Yazi",
+		run = function(cx)
+			local active = theme.read()
+			local items = {}
+			for _, option in ipairs(theme.options) do
+				table.insert(items, {
+					label = option.title, detail = option.detail, current = option.id == active, theme_id = option.id,
+				})
+			end
+			cx:pick({ items = items, placeholder = "Layout theme", action = "apply" })
+				:next(function(item, err, picked_cx)
+					if err or not item or type(item.theme_id) ~= "string" then return end
+					apply_theme(picked_cx or cx, item.theme_id)
+				end)
+		end,
+	})
 
 	tern.command({ id = "toggle", title = "Yazi: Toggle Companion Panel", group = "Yazi", run = toggle })
 	tern.bind("ctrl+alt+y", toggle)
