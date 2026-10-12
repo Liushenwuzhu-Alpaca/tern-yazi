@@ -139,16 +139,31 @@ end
 
 -- Aggregate task state: totals come from cx.tasks.summary (status-bar component
 -- source), byte counters summed over cx.tasks.snaps. Callers wrap it in pcall so a
--- shape change in Yazi degrades to empty counters.
+-- shape change in Yazi degrades to empty counters. Yazi fills snaps only while its task
+-- manager is open; they are exported as that manager's rows.
 local function read_tasks()
 	local summary = cx.tasks.summary
 	local found, processed = 0, 0
-	for _, snap in ipairs(cx.tasks.snaps) do
-		local p = snap.prog
-		if p and p.total_bytes then
+	local rows = {}
+	for i, snap in ipairs(cx.tasks.snaps) do
+		local p = snap.prog or {}
+		if p.total_bytes then
 			found = found + p.total_bytes
 			processed = processed + (p.processed_bytes or 0)
 		end
+		rows[i] = {
+			kind = p.kind,
+			title = snap.title,
+			percent = snap.percent,
+			cooked = snap.cooked,
+			running = snap.running,
+			failed = snap.failed,
+			processed_bytes = p.processed_bytes,
+			total_bytes = p.total_bytes,
+			success_files = p.success_files,
+			failed_files = p.failed_files,
+			total_files = p.total_files,
+		}
 	end
 	return {
 		selected = selected_count(),
@@ -159,6 +174,7 @@ local function read_tasks()
 			found = found,
 			processed = processed,
 		},
+		manager = { cursor = cx.tasks.cursor, items = rows },
 	}
 end
 
@@ -296,6 +312,7 @@ local function dump_state()
 		mode = mode,
 		hovered = hovered.url and hovered or nil,
 		tasks = tasks_data,
+		task_manager = ok_p and task_data.manager or nil,
 		tabs = tabs_data,
 	}
 	local ok_encoded, key = pcall(ya.json_encode, payload)
@@ -498,6 +515,7 @@ for name in ("cd arrow leave enter back forward reveal yank toggle toggle_all vi
 end
 -- Plugins the browser's keys run, as Yazi's default keymap does (`z` fzf, `Z` zoxide).
 local request_plugins = { fzf = true, zoxide = true }
+local task_actions = { show = true, close = true, arrow = true, inspect = true, cancel = true }
 
 function M:entry(job)
 	local stage = job.args[1]
@@ -593,6 +611,13 @@ function M:entry(job)
 			ya.exec("find_do", { req.query, smart = true, previous = req.previous == true })
 			snapshot()
 			reply(req, { ok = true })
+		elseif req.op == "tasks" then
+			-- Yazi's task manager actions (`w` opens it; `tasks:inspect` borrows the terminal).
+			assert(task_actions[req.action], "Unsupported task manager action")
+			assert(req.step == nil or req.step == "prev" or req.step == "next", "Invalid task step")
+			reply(req, { ok = true })
+			ya.exec("tasks:" .. req.action, req.step and { req.step } or {})
+			snapshot()
 		elseif req.op == "search" then
 			assert(type(req.query) == "string" and req.query ~= "", "Search requires a query")
 			assert(req.via == "fd" or req.via == "rg", "Search runs via fd or rg")

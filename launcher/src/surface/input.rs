@@ -192,6 +192,8 @@ pub(crate) enum Mode {
         query: String,
         content: bool,
     },
+    /// Yazi's task manager (`w`), open in Yazi while this mode lasts.
+    Tasks,
     Filter,
     Create(String),
     Rename {
@@ -314,6 +316,15 @@ fn action(name: &str, positional: &[&str], options: Value) -> Effect {
 
 fn request(body: Value) -> Effect {
     Effect::Request(body, Then::Nothing)
+}
+
+/// A Yazi task manager action: `tasks:show`, `tasks:arrow prev`, ...
+fn tasks(action: &str, step: Option<&str>) -> Effect {
+    let mut body = json!({"op": "tasks", "action": action});
+    if let Some(step) = step {
+        body["step"] = json!(step);
+    }
+    request(body)
 }
 
 /// Resolves a typed directory against `cwd`; `..` is left for the filesystem to resolve.
@@ -582,6 +593,22 @@ impl Ui {
                 }
                 return Vec::new();
             }
+            Mode::Tasks => {
+                let effect = if escape || name == "w" || (key.ctrl && name == "c") {
+                    self.mode = Mode::Normal;
+                    tasks("close", None)
+                } else if enter {
+                    tasks("inspect", None)
+                } else {
+                    match name {
+                        "k" | "up" => tasks("arrow", Some("prev")),
+                        "j" | "down" => tasks("arrow", Some("next")),
+                        "x" => tasks("cancel", None),
+                        _ => return Vec::new(),
+                    }
+                };
+                return vec![effect];
+            }
             Mode::Find { query, previous } => {
                 let previous = *previous;
                 if escape {
@@ -797,6 +824,10 @@ impl Ui {
                 };
                 return Vec::new();
             }
+            "w" => {
+                self.mode = Mode::Tasks;
+                tasks("show", None)
+            }
             "s" => {
                 self.mode = Mode::Search {
                     query: String::new(),
@@ -925,6 +956,10 @@ impl Ui {
                 | Mode::Search { .. }
                 | Mode::Create(_)
                 | Mode::Rename { .. } => self.mode = Mode::Normal,
+                Mode::Tasks => {
+                    self.mode = Mode::Normal;
+                    return vec![tasks("close", None)];
+                }
                 _ => {}
             },
             Msg::TabSwitch(index) => {

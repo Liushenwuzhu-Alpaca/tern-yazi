@@ -349,8 +349,9 @@
     text-transform: none;
 }
 
-/* The picker floats over the browser it previews, so it stays opaque. */
-[data-role="yazi.layer"] [data-role="yazi.theme-picker"] {
+/* The picker and the task manager float over the browser, so they stay opaque. */
+[data-role="yazi.layer"] [data-role="yazi.theme-picker"],
+[data-role="yazi.layer"] [data-role="yazi.task-manager"] {
     background: rgb(from var(--card) r g b / 100%);
     color: var(--t1);
     border: 1px solid var(--l3);

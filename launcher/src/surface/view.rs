@@ -8,7 +8,7 @@ use tern_sdk::ui::{self, Node, Span, View};
 
 use super::format::{self, path_segments};
 use super::input::{Editor, Field, FieldEdit, Level, List, Mode, Msg, Ui};
-use super::model::{basename, join_path, parent_dir, relative, Folder, Snapshot};
+use super::model::{basename, join_path, parent_dir, relative, Folder, Snapshot, TaskManager};
 use super::preview::{Blob, Load, Preview, Stamp};
 use super::theme::{self, Theme, THEMES};
 
@@ -130,6 +130,7 @@ pub(crate) fn view(frame: &Frame) -> View<Msg> {
     let layer = match &frame.ui.mode {
         Mode::Trash(paths) => Some(trash_layer(paths, frame.rows)),
         Mode::Theme { at, .. } => Some(theme_layer(*at)),
+        Mode::Tasks => Some(tasks_layer(&yz.task_manager)),
         _ => path_layer,
     };
     if let Some(layer) = layer {
@@ -215,6 +216,80 @@ fn theme_layer(at: usize) -> N {
         .prop("head", "Layout theme")
         .child(list)
         .child(muted("j/k preview · Enter keep · Esc restore"))
+}
+
+/// Yazi's task manager: each task's title, then its progress, as Yazi's `Tasks` component.
+fn tasks_layer(manager: &TaskManager) -> N {
+    let rows: Vec<N> = manager
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(index, task)| {
+            let hovered = index == manager.cursor;
+            let icon = match task.kind.as_str() {
+                "FileCopy" => '\u{f0c5}',
+                "FileCut" => '\u{f0c4}',
+                "FileDelete" => '\u{f1f8}',
+                "FileDownload" => '\u{f019}',
+                "FileUpload" => '\u{f093}',
+                _ => '\u{f085}',
+            };
+            let title = span(
+                format!("{icon}  {}", task.title),
+                if hovered { "accent" } else { "" },
+            );
+            let file = matches!(
+                task.kind.as_str(),
+                "FileCopy" | "FileCut" | "FileDelete" | "FileDownload" | "FileUpload"
+            );
+            let progress: N = if file {
+                let percent = if task.cooked {
+                    "Cleaning…".to_owned()
+                } else {
+                    format!("{:3}%", task.percent.floor() as i64)
+                };
+                let label = format!(
+                    "{percent} - {} / {}   {}/{}",
+                    format::size(task.processed_bytes),
+                    format::size(task.total_bytes),
+                    task.success_files,
+                    task.total_files,
+                );
+                let bar = ui::progress()
+                    .value((task.percent / 100.0).clamp(0.0, 1.0))
+                    .label(label);
+                Node::from(bar).role(if task.failed || task.failed_files > 0 {
+                    "yazi.task-progress.error"
+                } else {
+                    "yazi.task-progress"
+                })
+            } else {
+                muted(if task.cooked {
+                    "Cleaning…"
+                } else if task.running {
+                    "Running…"
+                } else {
+                    "Failed, press Enter to view log…"
+                })
+            };
+            ui::col()
+                .key(format!("task{index}"))
+                .role(if hovered { "yazi.task.hovered" } else { "yazi.task" })
+                .children([spans(vec![title]), progress])
+                .into()
+        })
+        .collect();
+    let body = if rows.is_empty() {
+        muted("No tasks")
+    } else {
+        ui::col().key("tasks").children(rows).into()
+    };
+    ui::node("card")
+        .key("tasks")
+        .role("yazi.task-manager")
+        .prop("head", "Tasks")
+        .child(body)
+        .child(muted("j/k move · Enter inspect · x cancel · Esc close"))
 }
 
 struct Browser<'a> {
@@ -873,6 +948,7 @@ impl Browser<'_> {
             Mode::Command { .. } => "CMD",
             Mode::Find { .. } => "FIND",
             Mode::Search { .. } => "SEARCH",
+            Mode::Tasks => "TASKS",
             Mode::Filter => "FILTER",
             Mode::Create(_) => "CREATE",
             Mode::Rename { .. } => "RENAME",

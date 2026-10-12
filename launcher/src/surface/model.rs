@@ -45,6 +45,67 @@ pub(crate) struct Tab {
     pub(crate) active: bool,
 }
 
+/// One row of Yazi's task manager (`cx.tasks.snaps`, filled while the manager is open).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct TaskRow {
+    pub(crate) kind: String,
+    pub(crate) title: String,
+    pub(crate) percent: f64,
+    pub(crate) cooked: bool,
+    pub(crate) running: bool,
+    pub(crate) failed: bool,
+    pub(crate) processed_bytes: Option<u64>,
+    pub(crate) total_bytes: Option<u64>,
+    pub(crate) success_files: u64,
+    pub(crate) failed_files: u64,
+    pub(crate) total_files: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct TaskManager {
+    pub(crate) cursor: usize,
+    pub(crate) rows: Vec<TaskRow>,
+}
+
+impl TaskManager {
+    fn parse(value: Option<&Value>) -> Self {
+        let Some(Value::Object(map)) = value else {
+            return Self::default();
+        };
+        let rows = map
+            .get("items")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|row| {
+                        let text = |key| row.get(key).and_then(Value::as_str).unwrap_or("");
+                        let flag = |key| row.get(key).and_then(Value::as_bool) == Some(true);
+                        let count = |key| row.get(key).and_then(Value::as_u64);
+                        TaskRow {
+                            kind: text("kind").to_owned(),
+                            title: text("title").to_owned(),
+                            percent: row.get("percent").and_then(Value::as_f64).unwrap_or(0.0),
+                            cooked: flag("cooked"),
+                            running: flag("running"),
+                            failed: flag("failed"),
+                            processed_bytes: count("processed_bytes"),
+                            total_bytes: count("total_bytes"),
+                            success_files: count("success_files").unwrap_or(0),
+                            failed_files: count("failed_files").unwrap_or(0),
+                            total_files: count("total_files").unwrap_or(0),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            cursor: map.get("cursor").and_then(Value::as_u64).unwrap_or(0) as usize,
+            rows,
+        }
+    }
+}
+
 /// One complete, consistent Yazi generation.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Snapshot {
@@ -60,6 +121,7 @@ pub(crate) struct Snapshot {
     pub(crate) marked_urls: HashSet<String>,
     pub(crate) mode: String,
     pub(crate) hovered: Option<Hover>,
+    pub(crate) task_manager: TaskManager,
 }
 
 /// The dynamic record (`state-CID.json`) before it is joined with its listing.
@@ -208,6 +270,7 @@ impl StateRecord {
             marked_urls: listing.marked_urls.clone(),
             mode: root.get("mode").and_then(Value::as_str).unwrap_or("normal").to_owned(),
             hovered,
+            task_manager: TaskManager::parse(root.get("task_manager")),
         })
     }
 }
