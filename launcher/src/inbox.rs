@@ -12,7 +12,7 @@ use std::time::SystemTime;
 
 use crate::sys::{cstr, last_error, private_dir};
 
-pub(crate) const NATIVE_CAP: usize = 256 * 1024;
+pub(crate) const STATE_CAP: usize = 256 * 1024;
 pub(crate) const LISTING_CAP: usize = 16 * 1024 * 1024;
 
 /// Inode, size and modification time (seconds, nanoseconds) of an inbox file.
@@ -222,7 +222,7 @@ impl Inbox {
 
     pub(crate) fn ready(&self) -> io::Result<bool> {
         // Both snapshots inherit the caller's umask inside the private inbox.
-        let (bytes, _) = match self.read(&format!("state-{}.json", self.cid), NATIVE_CAP, false) {
+        let (bytes, _) = match self.read(&format!("state-{}.json", self.cid), STATE_CAP, false) {
             Ok(snapshot) => snapshot,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error),

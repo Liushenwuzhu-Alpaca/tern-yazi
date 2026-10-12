@@ -17,6 +17,21 @@ A native Tern file browser powered by Yazi.
 - **Shell**: `:` and `;` hand a command to Yazi's `shell` (blocking and background, as in Yazi), with Yazi's macros such as `%h` and `%s`; output is not shown.
 - **Layout themes**: 8 themes (`Current`, `Aurora Glass`, `Editorial Paper`, `Amber Ledger`, `Blueprint Draft`, `Brutalist Block`, `Zen Minimal`, `Swiss Grid`) chosen with `T` inside the browser. Each theme is a standalone stylesheet in `themes/<id>.css`; see [DEVELOPMENT.md](DEVELOPMENT.md#layout-themes) to customize or add one.
 
+## Themes
+
+Press `T` in the browser to preview the layout themes live; Enter keeps the choice. Every theme follows Tern's light and dark appearance.
+
+| Theme | Light | Dark |
+| --- | --- | --- |
+| Current | <img src="assets/theme-current-light.png" width="380" alt="Current light"> | <img src="assets/theme-current-dark.png" width="380" alt="Current dark"> |
+| Aurora Glass | <img src="assets/theme-aurora-light.png" width="380" alt="Aurora Glass light"> | <img src="assets/theme-aurora-dark.png" width="380" alt="Aurora Glass dark"> |
+| Editorial Paper | <img src="assets/theme-editorial-light.png" width="380" alt="Editorial Paper light"> | <img src="assets/theme-editorial-dark.png" width="380" alt="Editorial Paper dark"> |
+| Amber Ledger | <img src="assets/theme-amber-light.png" width="380" alt="Amber Ledger light"> | <img src="assets/theme-amber-dark.png" width="380" alt="Amber Ledger dark"> |
+| Blueprint Draft | <img src="assets/theme-blueprint-light.png" width="380" alt="Blueprint Draft light"> | <img src="assets/theme-blueprint-dark.png" width="380" alt="Blueprint Draft dark"> |
+| Brutalist Block | <img src="assets/theme-brutalist-light.png" width="380" alt="Brutalist Block light"> | <img src="assets/theme-brutalist-dark.png" width="380" alt="Brutalist Block dark"> |
+| Zen Minimal | <img src="assets/theme-zen-light.png" width="380" alt="Zen Minimal light"> | <img src="assets/theme-zen-dark.png" width="380" alt="Zen Minimal dark"> |
+| Swiss Grid | <img src="assets/theme-swiss-light.png" width="380" alt="Swiss Grid light"> | <img src="assets/theme-swiss-dark.png" width="380" alt="Swiss Grid dark"> |
+
 ## Requirements
 
 - Linux (x86_64)

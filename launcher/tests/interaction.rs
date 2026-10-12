@@ -628,7 +628,7 @@ impl Harness {
             names(listing, "files").iter().any(|entry| entry == name)
                 && listing["file_icons"][name] == expected
         })?;
-        // Compare the actual native row with the authoritative value just exported.
+        // Compare the actual row with the authoritative value just exported.
         // Trim the blank selection marker only; glyph, separator and name stay exact.
         // None of these fixture names or configured glyphs begins with whitespace.
         // Blank/false icons must not insert a generic glyph.
@@ -641,7 +641,7 @@ impl Harness {
         };
         self.expect_ui(
             &row_selector(selector, name),
-            &format!("native row exactly matches {label:?}"),
+            &format!("row exactly matches {label:?}"),
             |v| {
                 nodes(v).iter().any(|node| {
                     node["text"]
@@ -668,7 +668,7 @@ impl Harness {
         let expected = text(path);
         self.expect_ui(
             selector,
-            "native selected row retains its full authoritative path",
+            "selected row retains its full authoritative path",
             |v| {
                 let found = nodes(v);
                 found.len() == 1
@@ -761,7 +761,7 @@ impl Harness {
         )
     }
 
-    fn expect_native_file_metadata(
+    fn expect_file_metadata(
         &mut self,
         client: &Client,
         name: &str,
@@ -948,7 +948,7 @@ impl Harness {
             ("files/beta.txt", "BETA_CONTENT\n"),
             ("files/copy.txt", "COPY_ORIGINAL\n"),
             ("files/cut.txt", "CUT_ORIGINAL\n"),
-            ("files/notes.md", "# Native Markdown\n\n**MARKDOWN_PREVIEW_CONTENT**\n"),
+            ("files/notes.md", "# Markdown\n\n**MARKDOWN_PREVIEW_CONTENT**\n"),
             ("files/image.svg", "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"40\"><rect width=\"40\" height=\"40\" fill=\"red\"/></svg>"),
             ("files/雪's 100%.txt", "UNICODE_QUOTE_PERCENT_CONTENT\n"),
             ("files/trash-a.txt", "TRASH_A\n"),
@@ -1048,10 +1048,10 @@ end })
             },
         )?);
         if hook.is_some() {
-            self.wait("owned native control endpoint", |h| {
+            self.wait("owned control endpoint", |h| {
                 Ok(h.path("control.sock").exists().then_some(()))
             })?;
-            // Initialize the native viewport before launching Yazi; this is not
+            // Initialize the viewport before launching Yazi; this is not
             // an artificial wake of the managed backend startup path.
             self.ctl("shot", &["00-initial-owned-window"])?;
         }
@@ -1312,11 +1312,30 @@ end })
         })
     }
 
-    /// The Yazi PTY follows the pane's tty size; both processes stay alive meanwhile.
+    /// The pane's real `(rows, cols)` from Tern's window state; its tty winsize is frozen while a
+    /// surface is live, so this is the size Yazi's PTY follows.
+    fn pane_size(&self, pane: u64) -> TestResult<Option<(u16, u16)>> {
+        let state = self.ctl("state", &[])?;
+        Ok(state["panes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|entry| entry["id"].as_u64() == Some(pane))
+            .map(|entry| {
+                (
+                    entry["rows"].as_u64().unwrap_or(0) as u16,
+                    entry["cols"].as_u64().unwrap_or(0) as u16,
+                )
+            }))
+    }
+
+    /// The Yazi PTY follows the pane's size; both processes stay alive meanwhile.
     fn settled(&mut self, client: &Client, duration: Duration) -> TestResult<(u16, u16)> {
         let mut stable = None;
-        let size = self.wait("Yazi's PTY settles at the surface pane's size", |_| {
-            let pane = tty_size(client.supervisor)?;
+        let size = self.wait("Yazi's PTY settles at the surface pane's size", |h| {
+            let Some(pane) = h.pane_size(client.owner)? else {
+                return Ok(None);
+            };
             if tty_size(client.backend)? != pane {
                 stable = None;
                 return Ok(None);
@@ -1417,9 +1436,7 @@ end })
     fn click_file(&mut self, client: &Client, name: &str) -> TestResult<()> {
         self.click_node(ROWS, name, false)?;
         let path = text(&client.cwd.join(name));
-        self.expect_state(client, &format!("native hover {path}"), |s| {
-            hover(s) == path
-        })?;
+        self.expect_state(client, &format!("hover {path}"), |s| hover(s) == path)?;
         Ok(())
     }
 
@@ -1429,7 +1446,7 @@ end })
             let actual = hover(&self.snapshot(client));
             if actual != expected {
                 return Err(format!(
-                    "Leader changed native hover: expected {expected}, actual {actual}"
+                    "Leader changed hover: expected {expected}, actual {actual}"
                 ));
             }
             thread::sleep(POLL);
@@ -1646,7 +1663,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     h.expect_ui(ROWS, "the surface stays interactive after idle", |v| {
         !nodes(v).is_empty()
     })?;
-    h.shot("01-cold-native")?;
+    h.shot("01-cold-start")?;
 
     h.case = "header reserves a blank command row without duplicated status";
     h.expect_ui(
@@ -1696,13 +1713,13 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     let index = entries
         .iter()
         .position(|s| s == "alpha.txt")
-        .ok_or("Native listing lacks alpha.txt")?;
+        .ok_or("Listing lacks alpha.txt")?;
     let next = entries
         .get(index + 1)
-        .ok_or("Fixture has no next native row")?
+        .ok_or("Fixture has no next row")?
         .clone();
     h.key("j")?;
-    h.expect_state(&first, "j follows clicked native cursor", |s| {
+    h.expect_state(&first, "j follows clicked cursor", |s| {
         hover(s) == text(&first.cwd.join(&next))
     })?;
     h.click_node(ROWS, "child", true)?;
@@ -1716,7 +1733,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         |s| s["cwd"] == text(&first.cwd) && hover(s) == text(&first.cwd.join("child")),
     )?;
     h.key("H")?;
-    h.expect_state(&first, "H uses native directory history", |s| {
+    h.expect_state(&first, "H uses directory history", |s| {
         s["cwd"] == text(&first.cwd.join("child"))
     })?;
     h.key("L")?;
@@ -1813,7 +1830,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     h.ctl("resize", &["480", "640"])?;
     let header = h.expect_ui(
         "[data-role=\"yazi.path-header\"]",
-        "native resize narrows the header before containment checks",
+        "resize narrows the header before containment checks",
         |v| {
             nodes(v).iter().any(|node| {
                 node["rect"][2]
@@ -1888,8 +1905,8 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     h.case = "gg leader, G/Home, Space, visual selection and Escape";
     h.key("G")?;
     let list = names(&h.snapshot(&first), "files");
-    let bottom = text(&first.cwd.join(list.last().ok_or("Empty native listing")?));
-    h.expect_state(&first, "G reaches native final row", |s| hover(s) == bottom)?;
+    let bottom = text(&first.cwd.join(list.last().ok_or("Empty listing")?));
+    h.expect_state(&first, "G reaches final row", |s| hover(s) == bottom)?;
     h.key("g")?;
     h.expect_state(&first, "first g does not jump", |s| hover(s) == bottom)?;
     h.hover_stays(&first, &bottom)?;
@@ -1900,15 +1917,13 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     )?;
     h.key("g")?;
     let top = text(&first.cwd.join(&list[0]));
-    h.expect_state(&first, "second g reaches native first row", |s| {
-        hover(s) == top
-    })?;
+    h.expect_state(&first, "second g reaches first row", |s| hover(s) == top)?;
     h.key("G")?;
     h.key("Home")?;
-    h.expect_state(&first, "Home reaches native first row", |s| hover(s) == top)?;
+    h.expect_state(&first, "Home reaches first row", |s| hover(s) == top)?;
     h.key("Space")?;
     let second_path = text(&first.cwd.join(&list[1]));
-    h.expect_state(&first, "Space selects and advances native cursor", |s| {
+    h.expect_state(&first, "Space selects and advances cursor", |s| {
         selected(s).contains(&top) && hover(s) == second_path
     })?;
     h.key("k")?;
@@ -1922,7 +1937,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     h.key("Home")?;
     h.key("v")?;
     h.key("j")?;
-    h.expect_state(&first, "v extends native visual range", |s| {
+    h.expect_state(&first, "v extends visual range", |s| {
         s["mode"] == "select" && names(s, "marked_urls").len() >= 2
     })?;
     h.key("Escape")?;
@@ -1946,16 +1961,14 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     h.key("k")?;
     h.key("V")?;
     h.key("j")?;
-    h.expect_state(&first, "V creates native visual unset range", |s| {
+    h.expect_state(&first, "V creates visual unset range", |s| {
         s["mode"] == "unset" && names(s, "marked_urls").len() >= 2
     })?;
     h.key("Escape")?;
     h.key("Escape")?;
-    h.expect_state(
-        &first,
-        "Escape clears selection and keeps native panel",
-        |s| s["mode"] == "normal" && selected(s).is_empty(),
-    )?;
+    h.expect_state(&first, "Escape clears selection and keeps panel", |s| {
+        s["mode"] == "normal" && selected(s).is_empty()
+    })?;
     h.expect_ui(ROWS, "Escape never closes live browser", |v| {
         !nodes(v).is_empty()
     })?;
@@ -1968,7 +1981,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
             == BTreeSet::from(["Alpha.txt".into(), "alpha.txt".into()])
     })?;
     h.key("Enter")?;
-    h.expect_state(&first, "Enter retains native filter", |s| {
+    h.expect_state(&first, "Enter retains filter", |s| {
         s["filter"].as_str().is_some_and(|f| f.contains("alpha"))
     })?;
     h.key("v")?;
@@ -1987,7 +2000,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         },
     )?;
     h.key("Escape")?;
-    h.expect_state(&first, "second Escape removes native filter", |s| {
+    h.expect_state(&first, "second Escape removes filter", |s| {
         names(s, "files").len() > 2 && s["filter"].as_str().unwrap_or_default().is_empty()
     })?;
     h.key("f")?;
@@ -2001,7 +2014,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         names(s, "files").len() > 2
     })?;
 
-    h.case = "native slash find moves hover without filtering the listing";
+    h.case = "slash find moves hover without filtering the listing";
     h.key("Escape")?;
     h.expect_state(&first, "find cases begin without retained selection", |s| {
         selected(s).is_empty()
@@ -2022,11 +2035,11 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         |s| hover(s) == text(&first.cwd.join("Alpha.txt")) && names(s, "files") == full_listing,
     )?;
     h.key("n")?;
-    h.expect_state(&first, "n advances to the next native find match", |s| {
+    h.expect_state(&first, "n advances to the next find match", |s| {
         hover(s) == text(&first.cwd.join("alpha.txt"))
     })?;
     h.key("N")?;
-    h.expect_state(&first, "N returns to the previous native find match", |s| {
+    h.expect_state(&first, "N returns to the previous find match", |s| {
         hover(s) == text(&first.cwd.join("Alpha.txt"))
     })?;
     h.key("Escape")?;
@@ -2058,13 +2071,11 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         |s| names(s, "files") == vec!["beta.txt"] && s["filter"] == "beta",
     )?;
     h.key("Escape")?;
-    h.expect_state(
-        &first,
-        "the following Escape clears the native filter",
-        |s| names(s, "files") == full_listing,
-    )?;
+    h.expect_state(&first, "the following Escape clears the filter", |s| {
+        names(s, "files") == full_listing
+    })?;
 
-    h.case = "UTF-8, punctuation paste/editing and hidden native listing";
+    h.case = "UTF-8, punctuation paste/editing and hidden listing";
     h.key("f")?;
     h.paste(first.owner, "雪's 100%雪")?;
     h.expect_ui("", "UTF-8 paste enters filter unchanged", |v| {
@@ -2081,7 +2092,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         |s| names(s, "files") == vec!["雪's 100%.txt"],
     )?;
     h.key("Escape")?;
-    h.expect_state(&first, "native hidden row initially absent", |s| {
+    h.expect_state(&first, "hidden row initially absent", |s| {
         names(s, "files").len() > 2 && !names(s, "files").contains(&".hidden.txt".into())
     })?;
     h.key(".")?;
@@ -2112,7 +2123,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
             nodes(v)
                 .iter()
                 .any(|node| node["rect"][2].as_f64().is_some_and(|width| width > 0.0))
-                && ["runtime error", "stack traceback", "max_bytes", "host.luau"]
+                && ["runtime error", "stack traceback", "max_bytes"]
                     .iter()
                     .all(|detail| !text.contains(detail))
         },
@@ -2123,7 +2134,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         ("notes.md", "MARKDOWN_PREVIEW_CONTENT"),
     ] {
         h.click_file(&first, name)?;
-        h.expect_ui(PREVIEW, "actual file contents in native preview", |v| {
+        h.expect_ui(PREVIEW, "actual file contents in preview", |v| {
             ui_text(v).contains(content)
         })?;
     }
@@ -2140,7 +2151,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
             })
         },
     )?;
-    h.shot("02-native-image-preview")?;
+    h.shot("02-image-preview")?;
     h.case = "semicolon background has real delayed effects without terminal";
     let marker = h.path("background.txt");
     let script = format!(
@@ -2165,7 +2176,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
 
     shortcut_flow(h, &first)?;
 
-    h.case = "Trash exact native selection, Escape cancellation, confirmed disposable paths";
+    h.case = "Trash exact selection, Escape cancellation, confirmed disposable paths";
     h.click_file(&first, "trash-a.txt")?;
     h.key("Space")?;
     h.expect_state(&first, "first disposable file selected", |s| {
@@ -2193,7 +2204,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         "Escape dismisses destructive confirmation",
         |v| nodes(v).is_empty(),
     )?;
-    h.expect_state(&first, "cancel leaves native selection unchanged", |s| {
+    h.expect_state(&first, "cancel leaves selection unchanged", |s| {
         selected(s) == paths
     })?;
     for path in &paths {
@@ -2586,7 +2597,7 @@ fn window_flow(h: &mut Harness) -> TestResult<()> {
 }
 
 fn glyph_interaction_flow(h: &mut Harness) -> TestResult<()> {
-    h.case = "isolated theme overrides export authoritative native glyphs";
+    h.case = "isolated theme overrides export authoritative glyphs";
     // Keep icon fixtures out of the original suite's visible rows and later mutations.
     for dir in [
         "glyph-files/current/child",
@@ -2707,7 +2718,7 @@ prepend_conds = [
         h.expect_row_icon(&client, folder, selector, name, json!(glyph))?;
     }
 
-    h.case = "hover conditions update both departed and newly hovered native rows";
+    h.case = "hover conditions update both departed and newly hovered rows";
     h.click_file(&client, "conditional-dir")?;
     h.expect_row_icon(&client, None, ROWS, "conditional-dir", json!(""))?;
     h.click_file(&client, "child")?;
@@ -2746,7 +2757,7 @@ prepend_conds = [
             fs::Permissions::from_mode(mode),
         )
         .map_err(|e| e.to_string())?;
-        // No actor/ping/forced export: the native watcher must redraw and publish this
+        // No actor/ping/forced export: the surface must redraw and publish this
         // icon-only mutation with the exact same fields used by snapshot deduplication.
         h.expect_state(
             &client,
@@ -2836,8 +2847,8 @@ prepend_conds = [
     Ok(())
 }
 
-fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
-    h.case = "private native metadata fixtures";
+fn metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
+    h.case = "private metadata fixtures";
     for dir in [
         "metadata",
         "metadata/many/nested",
@@ -2847,7 +2858,7 @@ fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
     ] {
         fs::create_dir_all(h.path(dir)).map_err(|e| e.to_string())?;
     }
-    let large = "// NATIVE_METADATA_PREVIEW_LINE\n".repeat(2048);
+    let large = format!("// {:<28}\n", "METADATA_PREVIEW_LINE").repeat(2048);
     if large.len() != 64 * 1024 {
         return Err("Private text preview fixture must contain exactly 65536 bytes".into());
     }
@@ -2884,7 +2895,7 @@ fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
         match fs::read_dir(&unreadable) {
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
             Err(error) => return Err(format!("Private unreadable fixture failed for the wrong reason: {error}")),
-            Ok(_) => return Err("Native unknown-count fixture requires an unprivileged runtime: mode 000 did not deny real directory loading".into()),
+            Ok(_) => return Err("Unknown-count fixture requires an unprivileged runtime: mode 000 did not deny real directory loading".into()),
         }
         let client = h.launch(h.path("metadata"), true)?;
         h.expect_state(
@@ -2893,9 +2904,9 @@ fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
             |s| s["file_count"].as_u64() == Some(7) && names(s, "files").len() == 7,
         )?;
 
-        h.case = "native file footer/header exact metadata and bounded preview";
+        h.case = "file footer/header exact metadata and bounded preview";
         h.click_file(&client, "large.rs")?;
-        h.expect_native_file_metadata(
+        h.expect_file_metadata(
             &client,
             "large.rs",
             (65536, "64.0 KB"),
@@ -2905,9 +2916,9 @@ fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
         h.expect_ui(
             PREVIEW,
             "large real text fixture produces a preview rather than an unavailable fallback",
-            |v| ui_text(v).contains("NATIVE_METADATA_PREVIEW_LINE"),
+            |v| ui_text(v).contains("METADATA_PREVIEW_LINE"),
         )?;
-        h.shot("09-native-file-metadata")?;
+        h.shot("09-file-metadata")?;
 
         h.case = "same-hover permission-only snapshots preserve uppercase special-mode semantics";
         let large_path = text(&client.cwd.join("large.rs"));
@@ -2929,14 +2940,14 @@ fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
                     && s["hovered"]["permissions"] == "-rwSr-----"
             },
         )?;
-        h.expect_native_file_metadata(
+        h.expect_file_metadata(
             &client,
             "large.rs",
             (65536, "64.0 KB"),
             "-rwSr-----",
             "rust",
         )?;
-        h.shot("09-native-special-permissions")?;
+        h.shot("09-special-permissions")?;
         let special_seq = special["seq"]
             .as_u64()
             .ok_or("Special-mode snapshot has no sequence")?;
@@ -2954,7 +2965,7 @@ fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
                     && s["hovered"]["permissions"] == "-rw-r-----"
             },
         )?;
-        h.expect_native_file_metadata(
+        h.expect_file_metadata(
             &client,
             "large.rs",
             (65536, "64.0 KB"),
@@ -2962,7 +2973,7 @@ fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
             "rust",
         )?;
 
-        h.case = "file-to-file native selection keeps exact metadata without selection counters";
+        h.case = "file-to-file selection keeps exact metadata without selection counters";
         h.key("Space")?;
         let selected_path = text(&client.cwd.join("large.rs"));
         let private_path = text(&client.cwd.join("private.txt"));
@@ -2971,7 +2982,7 @@ fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
             "Space selects large file and advances the actual Yazi cursor",
             |s| selected(s) == BTreeSet::from([selected_path.clone()]) && hover(s) == private_path,
         )?;
-        h.expect_native_file_metadata(&client, "private.txt", (8, "8 B"), "-rw-------", "text")?;
+        h.expect_file_metadata(&client, "private.txt", (8, "8 B"), "-rw-------", "text")?;
         h.key("Escape")?;
         h.expect_state(
             &client,
@@ -2979,7 +2990,7 @@ fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
             |s| selected(s).is_empty(),
         )?;
         h.key("k")?;
-        h.expect_native_file_metadata(
+        h.expect_file_metadata(
             &client,
             "large.rs",
             (65536, "64.0 KB"),
@@ -3038,7 +3049,7 @@ fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
         h.expect_metadata_selection(&format!("{ROWS}.sel"), &client.cwd.join("many"))?;
         h.expect_metadata_header_layout("yazi.column.preview", ".sf-list-scroll.max")?;
         h.expect_ui("[data-role=\"yazi.preview-metadata\"], [data-role=\"yazi.preview-size\"], [data-role=\"yazi.preview-permissions\"]", "directory preview removes stale file-only metadata", |v| nodes(v).is_empty())?;
-        h.shot("10-native-folder-count-before-cap")?;
+        h.shot("10-folder-count-before-cap")?;
 
         h.case =
             "folder footer sums 137 plus nested 211 plus hidden 19 without changing Yazi state";
@@ -3123,7 +3134,7 @@ fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
         h.key("Escape")?;
         h.expect_state(
             &client,
-            "native Escape clears the retained size-fixture selection",
+            "Escape clears the retained size-fixture selection",
             |s| selected(s).is_empty(),
         )?;
 
@@ -3165,11 +3176,11 @@ fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
         let initial_seq = first["seq"]
             .as_u64()
             .ok_or("Unreadable hover snapshot has no sequence")?;
-        // Revisit after a real native cursor hop; managed idle sessions do not poll snapshots.
+        // Revisit after a real cursor hop; managed idle sessions do not poll snapshots.
         h.key("j")?;
         h.expect_state(
             &client,
-            "native cursor leaves the failed directory for the real large file",
+            "cursor leaves the failed directory for the real large file",
             |s| hover(s) == text(&client.cwd.join("large.rs")),
         )?;
         h.key("k")?;
@@ -3197,11 +3208,11 @@ fn native_metadata_footer_headers(h: &mut Harness) -> TestResult<()> {
                 !label.contains("0 entries") && !label.contains("(empty directory)")
             },
         )?;
-        h.shot("11-native-unreadable-folder-unknown")?;
+        h.shot("11-unreadable-folder-unknown")?;
 
         h.case = "folder-to-file restores only exact hovered metadata";
         h.click_file(&client, "private.txt")?;
-        h.expect_native_file_metadata(&client, "private.txt", (8, "8 B"), "-rw-------", "text")?;
+        h.expect_file_metadata(&client, "private.txt", (8, "8 B"), "-rw-------", "text")?;
         let watched = descendants(client.supervisor);
         h.owned.extend(watched.iter().copied());
         h.key("q")?;
@@ -3272,7 +3283,7 @@ fn extended_preview_flow(h: &mut Harness) -> TestResult<()> {
         "PDF preview renders a visible rasterized cover image",
         |v| nodes(v).len() == 1 && theme_visible(nodes(v)[0]),
     )?;
-    h.shot("15-native-pdf-preview")?;
+    h.shot("15-pdf-preview")?;
 
     h.case = "text 3D model preview renders Tern's live model figure";
     h.click_file(&client, "scene.wrl")?;
@@ -3284,7 +3295,7 @@ fn extended_preview_flow(h: &mut Harness) -> TestResult<()> {
             nodes(v).len() == 1 && theme_visible(nodes(v)[0]) && ui_text(v).contains("12 triangles")
         },
     )?;
-    h.shot("16-native-model-preview")?;
+    h.shot("16-model-preview")?;
 
     let watched = descendants(client.supervisor);
     h.owned.extend(watched.iter().copied());
@@ -3293,7 +3304,7 @@ fn extended_preview_flow(h: &mut Harness) -> TestResult<()> {
 }
 
 fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
-    h.case = "native yank copy and cut register downstream paste outcomes";
+    h.case = "yank copy and cut register downstream paste outcomes";
     for (name, key, dest, source_remains) in [
         ("copy.txt", "y", "copydest", true),
         ("cut.txt", "x", "cutdest", false),
@@ -3306,11 +3317,11 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
             "UI navigation reaches isolated paste destination",
             |s| s["cwd"] == text(&first.cwd.join(dest)),
         )?;
-        // Keyboard 'p' triggers native paste action.
+        // Keyboard 'p' triggers paste action.
         h.key("p")?;
         let source = first.cwd.join(name);
         let destination = first.cwd.join(dest).join(name);
-        h.wait("native yank register drives actual copy/cut filesystem task", |_| {
+        h.wait("yank register drives actual copy/cut filesystem task", |_| {
             let contents = fs::read_to_string(&destination).unwrap_or_default();
             let expected = if source_remains { "COPY_ORIGINAL\n" } else { "CUT_ORIGINAL\n" };
             if contents == expected && source.exists() == source_remains { Ok(Some(())) }
@@ -3346,7 +3357,7 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
     h.expect_state(first, "return from unyankdest after unyank check", |s| {
         s["cwd"] == text(&first.cwd)
     })?;
-    h.case = "native tab management via tt, 1-9, brackets and Ctrl+c";
+    h.case = "tab management via tt, 1-9, brackets and Ctrl+c";
     // First t sets pending leader; does not create tab yet.
     h.key("t")?;
     // Second t creates tab 2 in current working directory.
@@ -3404,7 +3415,7 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
     h.expect_state(first, "swap right restores child tab index", |s| {
         s["tabs"]["idx"] == 2 && s["tabs"]["items"][1]["name"] == "child"
     })?;
-    h.shot("native-tabs-keyboard-and-mouse")?;
+    h.shot("tabs-keyboard-and-mouse")?;
     // Close tab 2 via Ctrl+c -> returns to tab 1 root cwd!
     h.cli(&["send", &first.owner.to_string(), "keys", "ctrl+c"])?;
     h.expect_state(first, "closing tab 2 returns to tab 1 root cwd", |s| {
@@ -3415,7 +3426,7 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
         "tab bar hides when only single tab remains",
         |v| nodes(v).is_empty(),
     )?;
-    h.case = "native interactive create ('a') and rename ('r') shortcuts";
+    h.case = "interactive create ('a') and rename ('r') shortcuts";
     // Press 'a' to enter create mode
     h.key("a")?;
     h.expect_ui(
@@ -3520,7 +3531,18 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
         }
     }
     h.click_file(first, "nested")?;
+    // The snapshot file leads the surface; rename targets the surface's hover, so wait for it.
+    h.expect_ui(
+        CHILD_ROWS,
+        "the child column follows the hovered directory",
+        |v| ui_text(v).contains("newdir"),
+    )?;
     h.key("r")?;
+    h.expect_ui(
+        "[data-role=\"yazi.command-bubble.rename\"]",
+        "rename edits the clicked directory",
+        |v| ui_text(v) == "nested",
+    )?;
     h.cli(&["send", &first.owner.to_string(), "keys", "ctrl+a"])?;
     h.paste(first.owner, "renamed-directory")?;
     h.key("Enter")?;
@@ -3546,7 +3568,7 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
         }
         h.paste(first.owner, name)?;
         h.key("Enter")?;
-        // Toasts are window chrome outside the block surface tree, so the
+        // Notices live in the surface's input row, outside the file lists, so the
         // observable contract is the authoritative no-op: cursor, listing and
         // bytes stay exactly as they were.
         h.expect_state(
@@ -3570,19 +3592,19 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
             return Err("Rejected operation changed an existing file".into());
         }
     }
-    h.shot("native-create-rename-collisions")?;
+    h.shot("create-rename-collisions")?;
 
     Ok(())
 }
 
 #[test]
-fn real_native_shortcuts() {
+fn real_browser_shortcuts() {
     let mut harness = Harness::new().expect("Real shortcut runtime setup");
     let result = harness
         .launch(harness.path("files"), false)
         .and_then(|client| {
             shortcut_flow(&mut harness, &client)?;
-            harness.shot("native-shortcuts-complete")?;
+            harness.shot("shortcuts-complete")?;
             let watched = descendants(client.supervisor);
             harness.owned.extend(watched.iter().copied());
             harness.key("q")?;
@@ -3591,7 +3613,7 @@ fn real_native_shortcuts() {
     match result {
         Ok(()) => {
             harness.success = true;
-            println!("Real native shortcut cases passed.");
+            println!("Real shortcut cases passed.");
         }
         Err(error) => {
             harness.diagnostics(&error);
@@ -3608,7 +3630,7 @@ fn conclude(harness: &mut Harness, result: TestResult<()>) {
     match result {
         Ok(()) => {
             harness.success = true;
-            println!("All real native interaction cases passed (owned GUI, isolated daemon).");
+            println!("All real interaction cases passed (owned GUI, isolated daemon).");
         }
         Err(error) => {
             harness.diagnostics(&error);
@@ -3622,12 +3644,12 @@ fn conclude(harness: &mut Harness, result: TestResult<()>) {
 }
 
 #[test]
-fn real_native_interactions() {
+fn real_browser_interactions() {
     let mut harness = Harness::new()
         .unwrap_or_else(|error| panic!("Real interaction prerequisites/setup failed: {error}"));
     let result = interaction_flow(&mut harness)
         .and_then(|()| glyph_interaction_flow(&mut harness))
-        .and_then(|()| native_metadata_footer_headers(&mut harness))
+        .and_then(|()| metadata_footer_headers(&mut harness))
         .and_then(|()| extended_preview_flow(&mut harness));
     conclude(&mut harness, result);
 }
@@ -3746,8 +3768,8 @@ fn surface_flow(h: &mut Harness) -> TestResult<()> {
     h.ctl("theme", &["light", "light-catppuccin"])?;
 
     h.case = "the surface re-lays out when its pane is split and restored";
-    // Tern keeps the pane's tty size while a surface is open; only the surface's region
-    // geometry (and its Resize columns) follow the pane, so assert on the drawn layout.
+    // Tern keeps the pane tty's winsize while a surface is open, so the pane's real size comes
+    // from the window state; assert both the drawn layout and Yazi's PTY.
     let pane_size = h.settled(&client, Duration::ZERO)?;
     let full = first_rect(&h.tree(SURFACE_BROWSER)?);
     for (side, narrower) in [("down", false), ("right", true)] {
@@ -3778,6 +3800,16 @@ fn surface_flow(h: &mut Harness) -> TestResult<()> {
         h.expect_ui(ROWS, "file rows stay visible in the smaller pane", |v| {
             nodes(v).iter().any(|node| theme_visible(node))
         })?;
+        // Tern freezes the pane tty; the window's own state is the row source Yazi's PTY follows.
+        h.wait(
+            "Yazi's PTY follows the split pane's rows and columns",
+            |h| {
+                let Some(real) = h.pane_size(client.owner)? else {
+                    return Ok(None);
+                };
+                Ok((real != pane_size && tty_size(client.backend)? == real).then_some(()))
+            },
+        )?;
         h.keep_shot(&format!("resize-split-{side}"), Path::new(THEME_SHOTS))?;
         h.cli(&["close", &other.to_string()])?;
         h.focus(client.owner)?;

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 
 use super::input::{Reply, Then};
-use crate::inbox::{Inbox, NATIVE_CAP};
+use crate::inbox::{Inbox, STATE_CAP};
 
 const REPLY_POLL: Duration = Duration::from_millis(50);
 const REPLY_ATTEMPTS: u32 = 200;
@@ -42,11 +42,19 @@ fn reply(value: &Value, id: &str) -> Option<Reply> {
     (value.get("id")?.as_str()? == id).then(|| Reply {
         ok: value.get("ok").and_then(Value::as_bool) == Some(true),
         rejected: value.get("rejected").and_then(Value::as_bool) == Some(true),
-        error: value.get("error").and_then(Value::as_str).map(str::to_owned),
+        error: value
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         paths: value
             .get("paths")
             .and_then(Value::as_array)
-            .map(|paths| paths.iter().filter_map(|p| p.as_str().map(str::to_owned)).collect())
+            .map(|paths| {
+                paths
+                    .iter()
+                    .filter_map(|p| p.as_str().map(str::to_owned))
+                    .collect()
+            })
             .unwrap_or_default(),
     })
 }
@@ -137,7 +145,7 @@ impl Actions {
                 if now < *next {
                     None
                 } else if let Some(reply) = inbox
-                    .read(&name, NATIVE_CAP, false)
+                    .read(&name, STATE_CAP, false)
                     .ok()
                     .and_then(|(bytes, _)| serde_json::from_slice::<Value>(&bytes).ok())
                     .and_then(|value| reply(&value, &job.id))
@@ -175,7 +183,11 @@ mod tests {
         assert!(parsed.ok && !parsed.rejected);
         assert_eq!(parsed.paths, ["/x"]);
         assert!(reply(&value, "a-2").is_none());
-        let rejected = reply(&json!({"id": "a-1", "ok": false, "rejected": true, "error": "no"}), "a-1").unwrap();
+        let rejected = reply(
+            &json!({"id": "a-1", "ok": false, "rejected": true, "error": "no"}),
+            "a-1",
+        )
+        .unwrap();
         assert!(!rejected.ok && rejected.rejected && rejected.error.as_deref() == Some("no"));
     }
 
@@ -187,7 +199,9 @@ mod tests {
         let ids: Vec<_> = actions.queue.iter().map(|job| job.id.clone()).collect();
         assert!(ids[0].starts_with("12345-tok-") && ids[0].ends_with("-1"));
         assert!(ids[1].ends_with("-2"));
-        assert!(ids.iter().all(|id| id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')));
+        assert!(ids
+            .iter()
+            .all(|id| id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')));
         assert!(actions.pending_filter());
         actions.clear();
         assert!(!actions.pending_filter() && actions.queue.is_empty());

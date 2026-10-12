@@ -74,10 +74,11 @@ Remove the launcher with `sh "$REPO/install.sh" --uninstall` (add `--prefix` for
 | [`launcher/src/surface/view.rs`](launcher/src/surface/view.rs) | Pure view: `(state) -> UI tree` with stable roles and keys |
 | [`launcher/src/surface/format.rs`](launcher/src/surface/format.rs) | Sizes, permissions, tones, icons, breadcrumbs |
 | [`launcher/src/surface/preview.rs`](launcher/src/surface/preview.rs) | Bounded file reads, archive listings, PDF covers, text 3D detection, off-thread loading |
+| [`launcher/src/surface/panesize.rs`](launcher/src/surface/panesize.rs) | The pane's live rows and columns from `tern ctl state` on a helper thread |
 | [`launcher/src/surface/theme.rs`](launcher/src/surface/theme.rs) | Theme registry, embedded stylesheets, persisted choice |
 | [`launcher/src/surface/window.rs`](launcher/src/surface/window.rs) | Window actions: `tern open`, `tern split`, OSC 52 clipboard |
 | [`companion.css`](companion.css), [`themes/<id>.css`](themes) | Base stylesheet and one stylesheet per layout theme, embedded with `include_str!` |
-| [`yazi-plugin/tern.yazi/main.lua`](yazi-plugin/tern.yazi/main.lua) | Yazi plugin: atomic snapshots, request execution, exact-target trash guard, DDS telemetry |
+| [`yazi-plugin/tern.yazi/main.lua`](yazi-plugin/tern.yazi/main.lua) | Yazi plugin: atomic snapshots, request execution, exact-target trash guard |
 | [`window.luau`](window.luau), [`plugin.toml`](plugin.toml) | Optional Tern plugin: the palette entry and Ctrl+Alt+Y, which open a pane running `yazi` |
 | [`install.sh`](install.sh) | Owned wrapper/helper installation, original executable resolution, reversible uninstall |
 | [`tests/interaction.sh`](tests/interaction.sh), [`launcher/tests/interaction.rs`](launcher/tests/interaction.rs) | Real isolated Tern/Yazi interaction suite |
@@ -105,7 +106,7 @@ Startup waits up to 15 seconds for a valid `state-CID.json` and matching listing
 
 The surface is a `SurfaceOptions::screen()` program surface on the launcher's own pane. The loop is single-threaded: it waits in `session.next()` for at most 25 ms, reloads the snapshot only when the state file's stamp changes, applies input effects, and renders only when something changed, at least 33 ms apart. Preview reads and window CLI calls run on helper threads and report back over channels; the loop never blocks on them. The tty belongs to the session (raw mode), so diagnostics go to the file named by `TERN_YAZI_LOG`, never to stderr. Notices (former toasts) show in the input row for about 5 seconds. When Yazi exits (`q`, or a crash), the surface closes and the shell prompt returns with Yazi's status. Closing the pane hangs up the session; the launcher then terminates Yazi's group.
 
-The Yazi PTY keeps the size the pane had when the surface opened. While a program surface is live, Tern freezes the pane tty's winsize and its `tern inspect` rows, and the surface `Resize` event carries only columns, so there is no row source to follow; the surface's own layout does follow the pane.
+Yazi's PTY follows the pane's real size. While a program surface is live, Tern freezes the pane tty's winsize and its `tern inspect` rows, and the surface `Resize` event carries only columns. The one source that still tracks the pane is `tern ctl state`, a developer command the window answers for the pane it runs in: its `panes[]` list each pane's current `cols` and `rows`. A helper thread (`surface/panesize.rs`) polls it every 500 ms (every 5 s while it fails), matches `TERN_PANE`, and the main loop resizes Yazi's PTY and the surface's row count when the pair changes. On a Tern without that command the tty size read at startup is all there is, and Yazi keeps it.
 
 ### Window actions
 
@@ -180,10 +181,6 @@ The JSON is additionally single-quoted for Yazi's plugin-argument parser, with e
 ### Replies
 
 Replies contain `id` and `ok`, plus `error` on failure or `paths`, `queued`, `target` as the operation defines. A successful `ya` exit only proves dispatch: the surface polls the reply every 50 ms, up to 200 attempts (about 10 seconds), consumes it, and only then sends the next request. A failure clears the queue and optimistic cursor/cwd and shows the actual error. An `ok` reply acknowledges acceptance, not completion of a shell command, trash job or other task; timeout means the outcome is unknown.
-
-### DDS telemetry
-
-The Yazi plugin still publishes `tern-hover`, `tern-cd` and deduplicated `tern-state` with `ps.pub_to(0, ...)` and answers `tern-cmd` (`{"op":"hello"}` republishes; anything else echoes `tern-ack`). The launcher does not subscribe to it; snapshots and replies are its only inputs.
 
 ## 5. UI
 
@@ -278,8 +275,8 @@ cargo test --locked --manifest-path launcher/Cargo.toml --test interaction -- --
 
 | Test | Covers |
 | --- | --- |
-| `real_native_interactions` | Startup in the shell pane, navigation, breadcrumbs and path editing, selection, filter/find, previews (text, Markdown, SVG, PNG, code, PDF, VRML, archives), glyphs and metadata, shortcuts, `;` background shell, trash, two clients, `q`, pane close, Yazi crash |
-| `real_native_shortcuts` | Yank/cut/paste, tabs, create/rename, links |
+| `real_browser_interactions` | Startup in the shell pane, navigation, breadcrumbs and path editing, selection, filter/find, previews (text, Markdown, SVG, PNG, code, PDF, VRML, archives), glyphs and metadata, shortcuts, `;` background shell, trash, two clients, `q`, pane close, Yazi crash |
+| `real_browser_shortcuts` | Yank/cut/paste, tabs, create/rename, links |
 | `real_surface_interactions` | Theme picker and all 8 themes, layout after splits, `q` back to the same shell |
 | `real_window_interactions` | Opens in Tern (`o`, Enter, multi-select, double-click), `W`, `cc`/`cf` clipboard, `:` macros and cwd through Yazi, palette entry and the Ctrl+Alt+Y action |
 

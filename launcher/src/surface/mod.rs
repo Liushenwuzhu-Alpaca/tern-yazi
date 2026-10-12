@@ -6,6 +6,7 @@ mod actions;
 mod format;
 mod input;
 mod model;
+mod panesize;
 mod preview;
 mod theme;
 mod view;
@@ -20,12 +21,13 @@ use std::time::{Duration, Instant};
 use tern_sdk::{Event, Input, Options, Session, Surface, SurfaceOptions};
 
 use crate::backend::Backend;
-use crate::inbox::{FileVersion, Inbox, LISTING_CAP, NATIVE_CAP};
+use crate::inbox::{FileVersion, Inbox, LISTING_CAP, STATE_CAP};
 use crate::supervisor::{self, Launch, Startup, Step};
 use crate::sys::{install_signals, pending_signal};
 use actions::Actions;
 use input::{Effect, Level, Msg, Ui};
 use model::{Listing, Snapshot, StateRecord};
+use panesize::PaneSize;
 use preview::{Blob, Load, Preview, Previews};
 use view::{Frame, Waiting};
 use window::Window;
@@ -59,7 +61,8 @@ fn sdk(error: tern_sdk::Error) -> io::Error {
     io::Error::other(error.to_string())
 }
 
-/// The pane size in cells; caps only report columns, the tty knows both.
+/// The pane tty's size in cells. Tern freezes it while the surface is live, so `PaneSize`
+/// is the source that follows the pane; this one covers startup and a Tern without it.
 fn pane_size() -> Option<(u16, u16)> {
     let mut size: libc::winsize = unsafe { std::mem::zeroed() };
     let ok = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) } == 0;
@@ -113,7 +116,7 @@ impl Snapshots {
 
     fn load(&mut self, inbox: &Inbox) -> Result<Option<Snapshot>, String> {
         let (bytes, _) = inbox
-            .read(&self.state_name, NATIVE_CAP, false)
+            .read(&self.state_name, STATE_CAP, false)
             .map_err(|error| {
                 format!("Cannot read complete Yazi state (256 KiB maximum): {error}")
             })?;
@@ -146,6 +149,7 @@ struct App {
     snapshots: Snapshots,
     previews: Previews,
     window: Window,
+    pane: PaneSize,
     notice: Option<(Level, String, Instant)>,
     home: String,
     cols: u32,
@@ -318,7 +322,7 @@ impl App {
             }
             self.dirty = true;
         }
-        if let Some((rows, cols)) = pane_size() {
+        if let Some((rows, cols)) = self.pane.current(pane_size()) {
             if rows != self.rows {
                 self.rows = rows;
                 self.dirty = true;
@@ -408,6 +412,7 @@ pub(crate) fn run(launch: &Launch, real: &OsStr, args: &[OsString]) -> io::Resul
         snapshots: Snapshots::new(&inbox.cid),
         previews: Previews::new(),
         window: Window::new(env::var("TERN_PANE").unwrap_or_default()),
+        pane: PaneSize::new(&env::var("TERN_PANE").unwrap_or_default()),
         notice: None,
         home: env::var("HOME").unwrap_or_default(),
         cols,

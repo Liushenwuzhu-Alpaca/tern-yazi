@@ -488,6 +488,7 @@
 }
 
 /* Swiss tabs: large bold figures on a baseline; the active tab is red over a thick rule. */
+/* The indicator is a background strip: a border or box-shadow on the active tab makes Tern draw a faint 1px ring around its whole box. */
 [data-role^="yazi.theme.swiss"] [data-role="yazi.main"] [data-role="yazi.tab-bar"] {
     gap: 20px;
     align-items: flex-end;
@@ -495,9 +496,8 @@
 }
 
 [data-role^="yazi.theme.swiss"] [data-role="yazi.main"] :is([data-role="yazi.tab"], [data-role="yazi.tab-active"]) {
-    padding: 0;
+    padding: 0 0 3px;
     border: 0;
-    border-bottom: 3px solid transparent;
     border-radius: 0;
     background: transparent;
     color: var(--t3);
@@ -509,7 +509,6 @@
 }
 
 [data-role^="yazi.theme.swiss"] [data-role="yazi.main"] [data-role="yazi.tab-active"] {
-    border-bottom-color: var(--swiss-red);
-    background: transparent;
+    background: linear-gradient(var(--swiss-red), var(--swiss-red)) bottom / 100% 3px no-repeat;
     color: var(--swiss-red);
 }

@@ -404,16 +404,16 @@
 }
 
 /* Editorial tabs: running-head text over a hairline; the active tab is underscored in ink. */
+/* The indicator is a background strip: a border or box-shadow on the active tab makes Tern draw a faint 1px ring around its whole box. */
 [data-role^="yazi.theme.editorial"] [data-role="yazi.main"] [data-role="yazi.tab-bar"] {
     gap: 18px;
     border-bottom: 1px solid var(--l3);
 }
 
 [data-role^="yazi.theme.editorial"] [data-role="yazi.main"] :is([data-role="yazi.tab"], [data-role="yazi.tab-active"]) {
-    padding: 0 0 2px;
+    padding: 0 0 4px;
     margin-bottom: -1px;
     border-radius: 0;
-    border-bottom: 2px solid transparent;
     background: transparent;
     color: var(--t2);
     font-family: serif;
@@ -423,7 +423,7 @@
 }
 
 [data-role^="yazi.theme.editorial"] [data-role="yazi.main"] [data-role="yazi.tab-active"] {
-    border-bottom-color: var(--ink-pen);
+    background: linear-gradient(var(--ink-pen), var(--ink-pen)) bottom / 100% 2px no-repeat;
     color: var(--ink-pen);
     font-style: normal;
     font-weight: 600;

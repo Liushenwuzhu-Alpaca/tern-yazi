@@ -404,15 +404,15 @@
 }
 
 /* Zen tabs: plain words; the active tab is bold with a short accent bar at its left edge. */
+/* The indicator is a background strip: a border or box-shadow on the active tab makes Tern draw a faint 1px ring around its whole box. */
 [data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.tab-bar"] {
     gap: 18px;
     padding: 0 22px;
 }
 
 [data-role^="yazi.theme.zen"] [data-role="yazi.main"] :is([data-role="yazi.tab"], [data-role="yazi.tab-active"]) {
-    padding: 0 0 0 7px;
+    padding: 0 0 0 9px;
     border: 0;
-    border-left: 2px solid transparent;
     border-radius: 0;
     background: transparent;
     color: var(--t2);
@@ -422,7 +422,7 @@
 }
 
 [data-role^="yazi.theme.zen"] [data-role="yazi.main"] [data-role="yazi.tab-active"] {
-    border-left-color: var(--accent);
+    background: linear-gradient(var(--accent), var(--accent)) left / 2px 100% no-repeat;
     color: var(--t1);
     font-weight: 600;
 }

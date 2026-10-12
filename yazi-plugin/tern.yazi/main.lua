@@ -1,24 +1,12 @@
--- tern.yazi: exports yazi's state to the tern-yazi companion over DDS, and
--- receives companion commands. Zero patches — plugin API + DDS only.
+-- tern.yazi: exports yazi's state to the tern-yazi launcher through atomic
+-- snapshot files in the runtime inbox, and executes its requests (`ya emit-to
+-- <client-id> plugin tern <json>`). Zero patches: plugin API only.
 --
 -- Install: link this directory into ~/.config/yazi/plugins/, then add
 --   require("tern"):setup()
 -- to ~/.config/yazi/init.lua.
 
 local M = {}
-
--- Custom kinds (alphanumeric + dashes; must not collide with builtin kinds).
-local KIND_HOVER = "tern-hover"
-local KIND_CD = "tern-cd"
-local KIND_STATE = "tern-state"
-local KIND_CMD = "tern-cmd"
-local KIND_ACK = "tern-ack"
-
--- Broadcast (receiver 0) to every remote subscriber, e.g. `ya sub <kind>`.
--- ps.* is sync-context only; every call site below runs in one.
-local function broadcast(kind, value)
-	ps.pub_to(0, kind, value)
-end
 
 -- ps.sub callbacks run in the sync context after the manager settles
 -- (yazi publishes hover/cd post-update), so read cx directly here.
@@ -66,7 +54,6 @@ local function read_hovered()
 	}
 end
 
-local icon_error_reported = false
 local function read_icon_text(file, base)
 	local hovered = file.is_hovered
 	if base then hovered = false end
@@ -86,9 +73,6 @@ local function read_entries(folder, limit, base)
 		if ok_icon then
 			-- False means a successful nil result; empty text stays authoritative.
 			icons[name] = icon
-		elseif not icon_error_reported then
-			icon_error_reported = true
-			broadcast(KIND_STATE, { error = tostring(icon) })
 		end
 		-- An API error leaves this entry's icon metadata unknown, not disabled.
 	end
@@ -134,29 +118,10 @@ local function read_icon_overrides(folder)
 end
 
 
--- Hover metadata may change without cursor movement; dedupe the complete payload.
-local last_hover = nil
-local function publish_hover()
-	local payload = read_hovered()
-	local key = ya.json_encode(payload)
-	if key ~= last_hover then
-		last_hover = key
-		broadcast(KIND_HOVER, payload)
-	end
-end
-
-local function publish_folder()
-	last_hover = nil
-	broadcast(KIND_CD, read_folder())
-end
-
--- Selection changes without hover moves (select-all) and task progress have no
--- builtin events of their own, but every redraw refires hover/cd callbacks —
--- piggyback a deduped pulse onto them instead of polling from async context.
--- Aggregate task state: totals come from cx.tasks.summary (status-bar
--- component source), byte counters summed over cx.tasks.snaps. All access
--- stays inside pulse()'s pcall so a shape change degrades to an error pulse.
-local function read_pulse()
+-- Aggregate task state: totals come from cx.tasks.summary (status-bar component
+-- source), byte counters summed over cx.tasks.snaps. Callers wrap it in pcall so a
+-- shape change in Yazi degrades to empty counters.
+local function read_tasks()
 	local summary = cx.tasks.summary
 	local found, processed = 0, 0
 	for _, snap in ipairs(cx.tasks.snaps) do
@@ -178,29 +143,7 @@ local function read_pulse()
 	}
 end
 
-local function pulse_key(pulse_value)
-	local t = pulse_value.tasks
-	return table.concat({ pulse_value.selected, t.total, t.succ, t.fail, t.found, t.processed }, "|")
-end
-
-local last_pulse = nil
-local function pulse()
-	local ok, p = pcall(read_pulse)
-	if not ok then
-		if not last_pulse then
-			last_pulse = "error"
-			broadcast(KIND_STATE, { error = tostring(p) })
-		end
-		return
-	end
-	local key = pulse_key(p)
-	if key ~= last_pulse then
-		last_pulse = key
-		broadcast(KIND_STATE, p)
-	end
-end
-
--- State inbox writer for native Tern companion plugin (Option A).
+-- State inbox writer: atomic state and listing snapshots for the launcher.
 local state_seq = 0
 local last_dump_key = nil
 local listing_epoch = nil
@@ -248,9 +191,9 @@ local function dump_state()
 	local hovered = read_hovered()
 	local parent = read_parent(true)
 	local preview = read_preview(hovered, true)
-	local ok_p, pulse_data = pcall(read_pulse)
-	local tasks_data = ok_p and pulse_data.tasks or { total = 0, succ = 0, fail = 0, found = 0, processed = 0 }
-	local selected = ok_p and pulse_data.selected or selected_count()
+	local ok_p, task_data = pcall(read_tasks)
+	local tasks_data = ok_p and task_data.tasks or { total = 0, succ = 0, fail = 0, found = 0, processed = 0 }
+	local selected = ok_p and task_data.selected or selected_count()
 	local selected_paths = selected_urls()
 	local marked = {}
 	-- File:is_marked() is always zero in normal mode; avoid a redundant full walk.
@@ -370,8 +313,7 @@ local usage_complete = ya.sync(function(_, url, token, bytes)
 	pcall(function()
 		if not owns_directory_usage(url, token) then return end
 		directory_usage.handle, directory_usage.bytes = nil, bytes
-		-- Completion is metadata, not a cursor move; publish even without a redraw.
-		publish_hover()
+		-- Completion is metadata, not a cursor move; snapshot even without a redraw.
 		dump_state()
 	end)
 end)
@@ -526,9 +468,9 @@ local commit = ya.sync(function(self, req, files)
 	ya.emit("plugin", { "tern", "finalize", mode = "sync" })
 end)
 
-local companion_actors = {}
+local request_actors = {}
 for name in ("cd arrow leave enter back forward reveal yank toggle toggle_all visual_mode escape hidden find_arrow paste unyank link hardlink seek tab_create tab_switch tab_swap tab_close close"):gmatch("%S+") do
-	companion_actors[name] = true
+	request_actors[name] = true
 end
 
 function M:entry(job)
@@ -662,12 +604,12 @@ function M:entry(job)
 			reveal_listed(target)
 			reply(req, { ok = true, target = tostring(target) })
 		elseif req.op == "action" then
-			assert(companion_actors[req.action], "Unsupported companion action")
+			assert(request_actors[req.action], "Unsupported action")
 			ya.exec(req.action, req.args or {})
 			snapshot()
 			reply(req, { ok = true, queued = true })
 		else
-			error("Unknown companion operation")
+			error("Unknown operation")
 		end
 	end)
 	if not ok then reply(req, { ok = false, rejected = true, error = tostring(err) }) end
@@ -676,38 +618,13 @@ end
 function M:setup()
 	pcall(os.execute, "mkdir -p " .. state_dir())
 	-- Builtin local event bodies carry only { tab }; snapshot `cx` instead.
-	ps.sub("hover", function()
-		publish_hover()
-		pulse()
-		dump_state()
-	end)
-	ps.sub("cd", function()
-		publish_folder()
-		pulse()
-		dump_state()
-	end)
-	ps.sub("tab", function()
-		publish_folder()
-		publish_hover()
-		pulse()
-		dump_state()
-	end)
-	-- Companion command channel.
-	--   {"op":"hello"} -> full snapshot (companion startup / reattach)
-	--   anything else  -> ack echo (round-trip probe)
-	ps.sub_remote(KIND_CMD, function(body)
-		if type(body) == "table" and body.op == "hello" then
-			publish_folder()
-			publish_hover()
-		else
-			broadcast(KIND_ACK, { got = body })
-		end
-		pulse()
-	end)
-	-- No pubsub event fires for task progress on 26.9, but status children
-	-- redraw together with the built-in progress gauge: pulse from there.
+	ps.sub("hover", dump_state)
+	ps.sub("cd", dump_state)
+	ps.sub("tab", dump_state)
+	-- No pubsub event fires for selection changes without a hover move or for task
+	-- progress on 26.9, but status children redraw together with the built-in progress
+	-- gauge: snapshot from there (dump_state dedupes identical payloads).
 	Status:children_add(function()
-		pulse()
 		dump_state()
 		return ui.Line("")
 	end, 1000, Status.RIGHT)

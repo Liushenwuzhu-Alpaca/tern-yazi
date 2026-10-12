@@ -17,6 +17,21 @@
 - **Shell**：`:` 与 `;` 把命令交给 Yazi 的 `shell` 执行（分别为阻塞与后台，与 Yazi 一致），支持 `%h`、`%s` 等 Yazi 宏；不显示命令输出。
 - **布局主题**：8 款主题（`Current`、`Aurora Glass`、`Editorial Paper`、`Amber Ledger`、`Blueprint Draft`、`Brutalist Block`、`Zen Minimal`、`Swiss Grid`），在浏览器内按 `T` 选择。每个主题是 `themes/<id>.css` 下的独立样式文件，自定义或新增主题见 [DEVELOPMENT.md](DEVELOPMENT.md#layout-themes)。
 
+## 主题
+
+在浏览器内按 `T` 实时预览布局主题，Enter 保留所选主题。每款主题都跟随 Tern 的浅色与深色外观。
+
+| 主题 | 浅色 | 深色 |
+| --- | --- | --- |
+| Current | <img src="assets/theme-current-light.png" width="380" alt="Current light"> | <img src="assets/theme-current-dark.png" width="380" alt="Current dark"> |
+| Aurora Glass | <img src="assets/theme-aurora-light.png" width="380" alt="Aurora Glass light"> | <img src="assets/theme-aurora-dark.png" width="380" alt="Aurora Glass dark"> |
+| Editorial Paper | <img src="assets/theme-editorial-light.png" width="380" alt="Editorial Paper light"> | <img src="assets/theme-editorial-dark.png" width="380" alt="Editorial Paper dark"> |
+| Amber Ledger | <img src="assets/theme-amber-light.png" width="380" alt="Amber Ledger light"> | <img src="assets/theme-amber-dark.png" width="380" alt="Amber Ledger dark"> |
+| Blueprint Draft | <img src="assets/theme-blueprint-light.png" width="380" alt="Blueprint Draft light"> | <img src="assets/theme-blueprint-dark.png" width="380" alt="Blueprint Draft dark"> |
+| Brutalist Block | <img src="assets/theme-brutalist-light.png" width="380" alt="Brutalist Block light"> | <img src="assets/theme-brutalist-dark.png" width="380" alt="Brutalist Block dark"> |
+| Zen Minimal | <img src="assets/theme-zen-light.png" width="380" alt="Zen Minimal light"> | <img src="assets/theme-zen-dark.png" width="380" alt="Zen Minimal dark"> |
+| Swiss Grid | <img src="assets/theme-swiss-light.png" width="380" alt="Swiss Grid light"> | <img src="assets/theme-swiss-dark.png" width="380" alt="Swiss Grid dark"> |
+
 ## 环境要求
 
 - Linux (x86_64)
