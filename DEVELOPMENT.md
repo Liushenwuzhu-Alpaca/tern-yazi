@@ -71,6 +71,7 @@ Remove the launcher with `sh "$REPO/install.sh" --uninstall` (add `--prefix` for
 | [`launcher/src/surface/model.rs`](launcher/src/surface/model.rs) | Snapshot parsing (state joined with its listing generation) and pure classification helpers |
 | [`launcher/src/surface/actions.rs`](launcher/src/surface/actions.rs) | Serialized `ya emit-to` requests and bounded reply polling |
 | [`launcher/src/surface/input.rs`](launcher/src/surface/input.rs) | Pure input reducer: keys, modes, UTF-16 editors, confirmation, theme picker; emits effects |
+| [`launcher/src/surface/handover.rs`](launcher/src/surface/handover.rs) | Lent terminal: suspends the surface and relays the pane's tty to Yazi's PTY while Yazi is away from its alternate screen |
 | [`launcher/src/surface/view.rs`](launcher/src/surface/view.rs) | Pure view: `(state) -> UI tree` with stable roles and keys |
 | [`launcher/src/surface/format.rs`](launcher/src/surface/format.rs) | Sizes, permissions, tones, icons, breadcrumbs |
 | [`launcher/src/surface/preview.rs`](launcher/src/surface/preview.rs) | Bounded file reads, archive listings, PDF covers, text 3D detection, off-thread loading |
@@ -120,7 +121,11 @@ Yazi's PTY follows the pane's real size. While a program surface is live, Tern f
 
 ### Shell commands
 
-`:` and `;` hand the raw text to Yazi's `shell` (`block = true` for `:`, `false` for `;`). Yazi runs both on its own invisible PTY and expands its macros (`%h`, `%s`, ...); as in Yazi, the output is not shown, and the plugin acknowledges acceptance before the command runs, so the surface shows `Shell queued in Yazi`. A blocking command keeps Yazi busy until it exits; a command that waits for terminal input never gets any.
+`:` and `;` hand the raw text to Yazi's `shell` (`block = true` for `:`, `false` for `;`), which expands its macros (`%h`, `%s`, ...). As in Yazi, `;` is a background task whose output goes to the task log (`w`, then Enter), and `:` runs on Yazi's terminal while Yazi is away from its alternate screen.
+
+### Lent terminal
+
+Yazi leaves its alternate screen whenever it lends its terminal to a subprocess: `shell --block`, `ui.hide()` plugins such as `z` (fzf) and `Z` (zoxide), and task inspection. The backend watches Yazi's output for `ESC [ ? 1049 l`/`h` ([`backend.rs`](launcher/src/backend.rs) `Lent`); in between, [`surface/handover.rs`](launcher/src/surface/handover.rs) suspends the surface (TSP `suspend`), turns off the session's kitty-keys and bracketed-paste modes, writes Yazi's output to the pane and types the pane's input (minus TSP messages) into Yazi's PTY. When Yazi re-enters its alternate screen, the modes and the surface resume. The subprocess's output stays in the pane's scrollback, visible after Yazi quits, as with Yazi itself.
 
 ### Palette entry and Ctrl+Alt+Y
 
@@ -167,7 +172,9 @@ The JSON is additionally single-quoted for Yazi's plugin-argument parser, with e
 | --- | --- | --- |
 | `ping` | none | Forces a snapshot and acknowledges |
 | `command` | `action = "shell"`, `args` | Replies `queued`, then runs Yazi's `shell` (`block` as given) |
-| `action` | `action`, `args` | Runs an allowed Yazi actor (`arrow`, `leave`, `enter`, `back`, `forward`, `yank`, `paste`, `link`, `tab_*`, `visual_mode`, `escape`, `hidden`, `find_arrow`, ...) and forces a snapshot |
+| `action` | `action`, `args` | Runs an allowed Yazi actor (`arrow`, `leave`, `enter`, `back`, `forward`, `yank`, `paste`, `link`, `tab_*`, `visual_mode`, `escape`, `hidden`, `find_arrow`, ...) and forces a snapshot; `reveal` maps a real path to its `search://` entry; `plugin` runs only `fzf`/`zoxide`, acknowledging first |
+| `search` | `query`, `via = "fd" \| "rg"` | `search_do`; Yazi streams the results into a `search://` folder |
+| `tasks` | `action`, optional `step` | Acknowledges, then runs `tasks:<action>` (`show`, `close`, `arrow prev\|next`, `inspect`, `cancel`) |
 | `cd` | `target` | Checks the target is a directory, then `cd` |
 | `activate` | `target`, `action = "enter"` | Reveals the exact target, then `enter` |
 | `toggle_advance` | none | `toggle`, then `arrow 1` |
@@ -186,7 +193,7 @@ Replies contain `id` and `ok`, plus `error` on failure or `paths`, `queued`, `ta
 
 ### Regions and lists
 
-The surface renders `main` (path bar, input row, tabs, three columns), `dock` (status footer) and `layer` (trash confirmation, theme picker) regions. Program stylesheets style descendants of a region, not the region element, so each region is `bare root -> theme wrapper (yazi.theme.<id>[.narrow]) -> region wrapper`, and list IDs are `main.theme.region.browser.columns.{parent,current,preview}.*_list`. Rows use filenames as keys and full paths as titles. Selecting a row in the current column reveals it in Yazi; selecting in the parent or child column makes the containing directory the provisional cwd; activating a directory enters it, activating a file opens it in Tern.
+The surface renders `main` (path bar, input row, tabs, three columns), `dock` (status footer) and `layer` (trash confirmation, theme picker, task manager) regions. Program stylesheets style descendants of a region, not the region element, so each region is `bare root -> theme wrapper (yazi.theme.<id>[.narrow]) -> region wrapper`, and list IDs are `main.theme.region.browser.columns.{parent,current,preview}.*_list`. Rows use filenames as keys and full paths as titles; in a Yazi search, rows are the paths below the searched directory, as Yazi lists them, and the path bar adds a `search: <subject>` badge. Selecting a row in the current column reveals it in Yazi; selecting in the parent or child column makes the containing directory the provisional cwd; activating a directory enters it, activating a file opens it in Tern.
 
 Yazi snapshots stay authoritative for listing, cursor, selection, marks and tasks. The surface keeps only local editing state, a provisional `active_file`/`optimistic_cwd` for clicks still being dispatched, the trash confirmation and the request queue. A snapshot with the same source, cwd and hover does not discard a pending click.
 
@@ -221,8 +228,11 @@ Each theme is self-contained in `themes/<id>.css`, scoped under `[data-role^="ya
 | `a` / `r` | Create / rename editor; Enter submits, Esc cancels |
 | `f` | Smart filter editor (`filter_do`, live) |
 | `/`/`?`, `n`/`N` | Smart find forward/backward, next/previous match |
-| `:` | Yazi `shell --block` (section 3) |
+| `:` | Yazi `shell --block`, on the lent terminal (section 3) |
 | `;` | Yazi background shell task |
+| `s` / `S`, Ctrl+S | Recursive search by name via fd / by content via ripgrep (`search_do`), cancel search |
+| `z` / `Z` | Yazi's `fzf` / `zoxide` plugins, on the lent terminal |
+| `w` | Yazi task manager: `j`/`k` move, Enter inspects the log on the lent terminal, `x` cancels, Esc/`w` close |
 | `.` | Toggle hidden files |
 | `tt`, `1`-`9`, `[`/`]`, `{`/`}` | New tab, switch to tab, relative switch, swap |
 | Ctrl+C | Close the active Yazi tab |

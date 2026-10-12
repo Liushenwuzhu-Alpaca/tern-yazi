@@ -12,9 +12,9 @@ A native Tern file browser powered by Yazi.
 
 - **Native UI**: three Miller columns with independent scrolling, a path bar, tabs and a status footer, all declarative Tern UI with no web view or ANSI scraping.
 - **Rich previews**: syntax-highlighted code, Markdown, Mermaid diagrams, raster/SVG images, PDF first-page covers, archive listings, and interactive text 3D models (VRML, X3DV, OBJ, ASCII STL/PLY, glTF with embedded buffers, USDA).
-- **Yazi keys**: upstream bindings (`j/k`, `h/l`, `gg/G`, `/`, `?`, `f`, `Space`, `v`, `y`, `x`, `p`, `d`, `a`, `r`, tabs) drive the real Yazi.
+- **Yazi keys**: upstream bindings (`j/k`, `h/l`, `gg/G`, `/`, `?`, `f`, `Space`, `v`, `y`, `x`, `p`, `d`, `a`, `r`, tabs) drive the real Yazi, including recursive search (`s`/`S`), the fzf and zoxide jumps (`z`/`Z`) and the task manager (`w`).
 - **Tern actions**: `o`/Enter open files in Tern file blocks (the whole selection when there is one), `W` opens a terminal below in the current directory, and `cc`/`cd`/`cf`/`cn` copy the path, directory, name or stem to the clipboard.
-- **Shell**: `:` and `;` hand a command to Yazi's `shell` (blocking and background, as in Yazi), with Yazi's macros such as `%h` and `%s`; output is not shown.
+- **Shell**: `:` and `;` hand a command to Yazi's `shell` with its macros such as `%h` and `%s`. As in Yazi, `:` runs in the pane in the foreground and its output stays in the scrollback; `;` runs as a background task whose log the task manager shows.
 - **Layout themes**: 8 themes (`Current`, `Aurora Glass`, `Editorial Paper`, `Amber Ledger`, `Blueprint Draft`, `Brutalist Block`, `Zen Minimal`, `Swiss Grid`) chosen with `T` inside the browser. Each theme is a standalone stylesheet in `themes/<id>.css`; see [DEVELOPMENT.md](DEVELOPMENT.md#layout-themes) to customize or add one.
 
 ## Themes
@@ -68,5 +68,4 @@ require("tern"):setup()
 
 ## Roadmap
 
-- [ ] Native interactive dialog for Yazi recursive search (`s`/`S`).
 - [ ] Document and media previews (multi-page PDF, audio/video metadata, binary 3D formats).
