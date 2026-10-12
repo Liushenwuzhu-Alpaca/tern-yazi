@@ -11,7 +11,7 @@ Native Tern companion panel and file browser powered by Yazi.
 `tern-yazi` connects [Yazi](https://github.com/sxyazi/yazi) to the [Tern](https://stencil.so/) terminal emulator via a zero-patch native bridge. It executes Yazi inside an invisible PTY and renders authoritative file trees, metadata, and previews using Tern's native Surface Protocol UI.
 
 - **Native UI**: 3-column Miller browsing with independent scrolling, pure declarative UI, and zero web or ANSI terminal scraping.
-- **Rich Previews**: Syntax-highlighted code, Markdown, Mermaid diagrams, and raster/SVG image previews.
+- **Rich Previews**: Syntax-highlighted code, Markdown, Mermaid diagrams, raster/SVG images, PDF first-page covers, archive listings, and interactive text 3D models (VRML, X3DV, OBJ, ASCII STL/PLY, glTF with embedded buffers, USDA).
 - **Full Navigation**: Upstream Yazi keybindings (`j/k`, `h/l`, `gg/G`, `/`, `?`, `f`, `v`, `y`, `x`, `d`).
 - **Interactive Shell**: Native blocking (`:`) and non-blocking (`;`) shell commands with full PTY support.
 - **Layout Themes**: Switch between 4 themes (`Current`, `Aurora Glass`, `Editorial Paper`, `Amber Ledger`) via Tern's command palette. Each theme is a standalone stylesheet in `themes/<id>.css`; see [DEVELOPMENT.md](DEVELOPMENT.md#native-layout-themes) to customize or add one.
@@ -50,4 +50,4 @@ require("tern"):setup()
 ## Roadmap
 
 - [ ] Native interactive dialog for Yazi recursive search (`s`/`S`).
-- [ ] Document and media previews (PDF rendering, audio/video metadata, archive inspection).
+- [ ] Document and media previews (multi-page PDF, audio/video metadata, binary 3D formats).

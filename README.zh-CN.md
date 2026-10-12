@@ -11,7 +11,7 @@
 `tern-yazi` 通过零侵入原生桥接将终端文件管理器 [Yazi](https://github.com/sxyazi/yazi) 无缝接入 [Tern](https://stencil.so/)。它在后台不可见 PTY 中驱动 Yazi，并通过 Tern 声明式 Surface Protocol UI 原生渲染权威文件树、属性元数据与富文本预览。
 
 - **原生界面**：三列米勒（Miller Columns）浏览布局，各列独立有界滚动，纯原生声明式渲染，无网页嵌入、无 ANSI 终端刮取。
-- **丰富预览**：支持语法高亮代码、Markdown、Mermaid 图表及位图/矢量 SVG 图片预览。
+- **丰富预览**：支持语法高亮代码、Markdown、Mermaid 图表、位图/矢量 SVG 图片、PDF 首页封面、压缩包列表，以及可交互的文本 3D 模型（VRML、X3DV、OBJ、ASCII STL/PLY、内嵌缓冲区的 glTF、USDA）。
 - **完整导航**：全面对齐官方 Yazi 快捷键（`j/k`、`h/l`、`gg/G`、`/`、`?`、`f`、`Space`、`v`、`y`、`x`、`d`）。
 - **交互 Shell**：支持阻塞式（`:`）与非阻塞式（`;`）命令，带完整交互式 PTY 终端支持。
 - **布局主题**：提供 4 款原生布局主题（`Current`、`Aurora Glass`、`Editorial Paper`、`Amber Ledger`），支持通过命令面板即时切换。每个主题是 `themes/<id>.css` 下的独立样式文件，自定义或新增主题见 [DEVELOPMENT.md](DEVELOPMENT.md#native-layout-themes)。
@@ -51,4 +51,4 @@ require("tern"):setup()
 ## 下一步开发计划
 
 - [ ] 接入 Yazi 递归搜索（`s`/`S`）的原生交互弹窗。
-- [ ] 扩展文档与富媒体预览支持（PDF 原生渲染、音视频元数据展示、压缩包内容检查）。
+- [ ] 扩展文档与富媒体预览支持（PDF 多页、音视频元数据展示、二进制 3D 格式）。

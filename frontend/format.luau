@@ -28,7 +28,8 @@ local function preview_kind(fname: string, data: any): string
 	if data.tag == "image" then return data.mime end
 	if data.tag == "archive" then return "archive" end
 	if data.tag == "binary" then return "binary" end
-	if data.tag == "markdown" or data.tag == "mermaid" then return data.tag end
+	if data.tag == "markdown" or data.tag == "mermaid" or data.tag == "pdf" then return data.tag end
+	if data.tag == "model" then return data.fence .. " model" end
 	return data.lang or model.detect_lang(file_ext(fname))
 end
 -- Preserve the existing semantic color policy without selecting any glyphs.

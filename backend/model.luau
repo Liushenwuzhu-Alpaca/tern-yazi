@@ -162,6 +162,23 @@ local function mime_for(ext: string): string?
 	return MIME_TYPES[ext]
 end
 
+-- Text 3D formats Tern's Markdown renders as live model figures, keyed to their fence tag.
+-- XML X3D and binary formats (glb, fbx, 3ds, usdc/usdz) have no fence form.
+local MODEL_FENCES = {
+	wrl = "vrml",
+	vrml = "vrml",
+	x3dv = "x3dv",
+	obj = "obj",
+	stl = "stl",
+	ply = "ply",
+	gltf = "gltf",
+	usda = "usda",
+}
+
+local function model_fence(ext: string): string?
+	return MODEL_FENCES[ext]
+end
+
 local function is_archive(ext: string): boolean
 	return ext == "zip" or ext == "tar" or ext == "gz" or ext == "tgz" or ext == "bz2" or ext == "xz" or ext == "7z" or ext == "rar" or ext == "zst"
 end
@@ -248,6 +265,7 @@ end
 M.file_ext = file_ext
 M.detect_lang = detect_lang
 M.mime_for = mime_for
+M.model_fence = model_fence
 M.is_archive = is_archive
 M.compute_directory = compute_directory
 M.file_is_dir = file_is_dir

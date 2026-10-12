@@ -402,3 +402,29 @@
 .sf-dock[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] :is([data-role="yazi.status-size"], [data-role="yazi.status-position"]) {
     border-left: 1px solid var(--l3);
 }
+
+/* Editorial tabs: running-head text over a hairline; the active tab is underscored in ink. */
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.tab-bar"] {
+    gap: 18px;
+    border-bottom: 1px solid var(--l3);
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] :is([data-role="yazi.tab"], [data-role="yazi.tab-active"]) {
+    padding: 0 0 2px;
+    margin-bottom: -1px;
+    border-radius: 0;
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    color: var(--t2);
+    font-family: serif;
+    font-size: 13px;
+    font-style: italic;
+    font-weight: 400;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.editorial"] [data-role="yazi.tab-active"] {
+    border-bottom-color: var(--ink-pen);
+    color: var(--ink-pen);
+    font-style: normal;
+    font-weight: 600;
+}

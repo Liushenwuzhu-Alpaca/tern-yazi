@@ -145,7 +145,10 @@ local function prepare(state: any, full_url: string): any
 	if mime then return { tag = "image", content = content, mime = mime, ext = ext } end
 	if ext == "mermaid" or ext == "mmd" then return { tag = "mermaid", content = content } end
 	if ext == "md" or ext == "markdown" then return { tag = "markdown", content = content } end
+	-- Binary STL/PLY share the text extensions; NUL bytes keep them out of the fence.
 	if content:find("\0") then return { tag = "binary", content = content } end
+	local fence = model.model_fence(ext)
+	if fence then return { tag = "model", content = content, fence = fence } end
 	return { tag = "code", content = content, lang = model.detect_lang(ext) }
 end
 

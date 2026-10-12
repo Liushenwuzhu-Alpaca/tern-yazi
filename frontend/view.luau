@@ -145,6 +145,19 @@ local function build_rich_preview(data: any, active_name: string, cx: any, offse
 		return ui.md(content)
 	end
 
+	-- 3b. Text 3D models (.wrl, .x3dv, .obj, .stl, .ply, .gltf, .usda) as Tern's live model figure.
+	if data.tag == "model" then
+		-- The fence must outlast any backtick run inside the file.
+		local ticks = "```"
+		for run in content:gmatch("`+") do
+			if #run >= #ticks then ticks = string.rep("`", #run + 1) end
+		end
+		local body = content:sub(-1) == "\n" and content or content .. "\n"
+		return ui.node("col", { role = "yazi.model-preview", gap = "none" }, {
+			ui.md(ticks .. data.fence .. "\n" .. body .. ticks),
+		})
+	end
+
 	-- 4. Code / Text syntax highlighting preview
 	if data.tag == "binary" then
 		return ui.col({
@@ -562,6 +575,7 @@ local function render(state: any, cx: any, yz: YaziState?, prepared: any?, previ
 				local tone = tab.active and "accent" or "muted"
 				local node = clickable(ui.badge(label, tone), "tab_switch:" .. tostring(index - 1))
 				node.p.key = "tab" .. tostring(index)
+				node.p.role = tab.active and "yazi.tab-active" or "yazi.tab"
 				node.p.active = tab.active == true
 				table.insert(tab_nodes, node)
 			end

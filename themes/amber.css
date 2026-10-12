@@ -399,3 +399,27 @@
     background: rgb(from var(--warn) r g b / 8%);
     color: var(--t1);
 }
+
+/* Amber tabs: squared ledger tags in the terminal face; the active tag is lit phosphor. */
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.tab-bar"] {
+    gap: 4px;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] :is([data-role="yazi.tab"], [data-role="yazi.tab-active"]) {
+    padding: 0 8px;
+    border: 1px solid rgb(from var(--warn) r g b / 35%);
+    border-radius: 2px;
+    background: rgb(from var(--warn) r g b / 8%);
+    color: var(--t1);
+    font-family: var(--tv-font, var(--mono));
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 400;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.amber"] [data-role="yazi.tab-active"] {
+    border-color: var(--warn);
+    background: var(--warn);
+    color: var(--card);
+    font-weight: 700;
+}

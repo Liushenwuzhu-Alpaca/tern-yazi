@@ -349,3 +349,24 @@
     background: transparent;
     color: var(--t2);
 }
+
+/* Aurora tabs: frosted capsules like its crumbs; the active one gains a deeper tint. */
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.tab-bar"] {
+    gap: 6px;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] :is([data-role="yazi.tab"], [data-role="yazi.tab-active"]) {
+    padding: 1px 12px;
+    border: 1px solid rgb(from var(--accent) r g b / 22%);
+    background: rgb(from var(--accent) r g b / 5%);
+    color: var(--t2);
+    font-family: var(--sans);
+    font-weight: 500;
+}
+
+.sf-main[data-surface="plugin.tern-yazi.companion"][data-role^="yazi.theme.aurora"] [data-role="yazi.tab-active"] {
+    border-color: rgb(from var(--accent) r g b / 45%);
+    background: rgb(from var(--accent) r g b / 18%);
+    color: var(--accent);
+    font-weight: 600;
+}

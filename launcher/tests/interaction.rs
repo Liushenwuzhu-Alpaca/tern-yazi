@@ -3847,6 +3847,11 @@ fn extended_preview_flow(h: &mut Harness) -> TestResult<()> {
         b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R/Resources<<>>>>endobj\nxref\n0 4\n0000000000 65535 f \n0000000010 00000 n \n0000000053 00000 n \n0000000102 00000 n \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n178\n%%EOF\n".to_vec()
     });
     fs::write(preview_dir.join("sample.pdf"), sample_pdf).map_err(|e| e.to_string())?;
+    fs::write(
+        preview_dir.join("scene.wrl"),
+        "#VRML V2.0 utf8\nShape { appearance Appearance { material Material { diffuseColor 1 0 0 } } geometry Box { size 2 2 2 } }\n",
+    )
+    .map_err(|e| e.to_string())?;
 
     let client = h.launch(preview_dir, true)?;
 
@@ -3866,6 +3871,16 @@ fn extended_preview_flow(h: &mut Harness) -> TestResult<()> {
         |v| nodes(v).len() == 1 && theme_visible(nodes(v)[0]),
     )?;
     h.shot("15-native-pdf-preview")?;
+
+    h.case = "text 3D model preview renders Tern's live model figure";
+    h.click_file(&client, "scene.wrl")?;
+    // A VRML box tessellates to 12 triangles only when the scene really parsed.
+    h.expect_ui(
+        &format!("{PREVIEW} [data-role=\"yazi.model-preview\"] .m3d-facts"),
+        "VRML preview renders a parsed model figure",
+        |v| nodes(v).len() == 1 && theme_visible(nodes(v)[0]) && ui_text(v).contains("12 triangles"),
+    )?;
+    h.shot("16-native-model-preview")?;
 
     let watched = descendants(client.supervisor);
     h.owned.extend(watched.iter().copied());
@@ -3947,7 +3962,7 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
         "tab labels follow real directories",
         |v| ui_text(v).contains("1 files") && ui_text(v).contains("2 child"),
     )?;
-    h.click_node("[data-role=\"yazi.tab-bar\"] .sf-badge", "1 files", false)?;
+    h.click_node("[data-role=\"yazi.tab\"], [data-role=\"yazi.tab-active\"]", "1 files", false)?;
     h.expect_state(first, "mouse switches to tab one", |s| {
         s["cwd"] == text(&first.cwd) && s["tabs"]["idx"] == 1
     })?;
