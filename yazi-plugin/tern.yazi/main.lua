@@ -114,6 +114,23 @@ local function read_folder(base)
 	}
 end
 
+-- The tab's linemode and the text of each current-folder row, from Yazi's own `Linemode`
+-- component so user overrides apply. `none` and `solo` draw nothing; an unknown mode shows
+-- its name, as Yazi does.
+local function read_linemode()
+	local mode = cx.active.pref.linemode
+	if mode == "none" or mode == "solo" then return mode, nil end
+	local files = cx.active.current.files
+	local texts = {}
+	local builder = Linemode[mode]
+	for i = 1, #files do
+		local ok, text = true, " " .. mode
+		if builder then ok, text = pcall(builder, Linemode:new(files[i])) end
+		texts[i] = ok and type(text) == "string" and text or ""
+	end
+	return mode, texts
+end
+
 local function read_parent(base)
 	local p = cx.active.parent
 	if not p or not p.cwd then return nil end
@@ -255,6 +272,9 @@ local function dump_state()
 	end)
 	if not ok_finder then finder = nil end
 
+	local ok_linemode, linemode, linemode_text = pcall(read_linemode)
+	if not ok_linemode then linemode, linemode_text = nil, nil end
+
 	local listing = {
 		cwd = folder.url,
 		search = folder.search,
@@ -262,6 +282,8 @@ local function dump_state()
 		file_dirs = folder.file_dirs,
 		file_icons = folder.file_icons,
 		file_count = folder.file_count,
+		linemode = linemode,
+		linemode_text = linemode_text,
 		parent = parent,
 		preview = preview,
 		selected_urls = selected_paths,
@@ -282,7 +304,14 @@ local function dump_state()
 	local ok_tabs, tabs = pcall(function() return cx.tabs end)
 	if ok_tabs and tabs then
 		local count = #tabs
-		if count > 1 then
+		-- Yazi draws the tab bar from two tabs on; a renamed lone tab shows its name too.
+		-- `tab.name` falls back to the directory name; `tab.pref.name` is the explicit one.
+		local function explicit(t)
+			local ok, name = pcall(function() return t.pref.name end)
+			return ok and type(name) == "string" and name or ""
+		end
+		local lone = count == 1 and explicit(tabs[1]) ~= ""
+		if count > 1 or lone then
 			local list = {}
 			for i = 1, count do
 				local t = tabs[i]
@@ -293,6 +322,8 @@ local function dump_state()
 				end
 				list[i] = {
 					name = t_name,
+					-- The name set by `tab_rename`, empty while the tab follows its directory.
+					custom = t and explicit(t) or "",
 					active = (i == tabs.idx),
 				}
 			end
@@ -435,9 +466,10 @@ local current_cwd = ya.sync(function()
 	return cwd
 end)
 
-local function missing_target(target)
+-- The listed destination's metadata, or nil when the path is free.
+local function existing_target(target)
 	local cha, err = fs.cha(target)
-	assert(not cha, "Destination already exists")
+	if cha then return cha end
 	assert(err and err.kind == "NotFound", tostring(err))
 end
 
@@ -516,12 +548,233 @@ local commit = ya.sync(function(self, req, files)
 end)
 
 local request_actors = {}
-for name in ("cd arrow leave enter back forward reveal yank toggle toggle_all visual_mode escape hidden find_arrow paste unyank link hardlink seek tab_create tab_switch tab_swap tab_close close plugin open"):gmatch("%S+") do
+for name in ("cd arrow leave enter back forward reveal yank toggle toggle_all visual_mode escape hidden find_arrow paste unyank link hardlink seek tab_create tab_switch tab_swap tab_close close plugin open sort linemode follow tab_rename"):gmatch("%S+") do
 	request_actors[name] = true
 end
 -- Plugins the browser's keys run, as Yazi's default keymap does (`z` fzf, `Z` zoxide).
 local request_plugins = { fzf = true, zoxide = true }
 local task_actions = { show = true, close = true, arrow = true, inspect = true, cancel = true }
+
+-- Whether Yazi has selected or visually marked files for a bulk rename to act on.
+local has_selection = ya.sync(function()
+	if #cx.active.selected > 0 then return true end
+	if not cx.active.mode.is_normal then
+		for i = 1, #cx.active.current.files do
+			if cx.active.current.files[i]:is_marked() == 1 then return true end
+		end
+	end
+	return false
+end)
+
+local targets_hovered = ya.sync(function()
+	local hovered = cx.active.current.hovered
+	return hovered and real(hovered.url) or nil
+end)
+
+-- Yazi's mime type per file (`folder/local` for directories), normalized like its own
+-- `mime-local` fetcher. Yazi keeps the result off the Lua API, so ask `file` again.
+local function mimes_of(paths, files)
+	local mimes, listed = {}, {}
+	for i, file in ipairs(files) do
+		if file.cha.is_dir then mimes[i] = "folder/local" else listed[#listed + 1] = i end
+	end
+	if #listed == 0 then return mimes end
+	local args = {}
+	for _, i in ipairs(listed) do args[#args + 1] = paths[i] end
+	local program = os.getenv("YAZI_FILE_ONE") or "file"
+	local output = Command(program):arg({ "-bL", "--mime-type", "--" }):arg(args):stdout(Command.PIPED):output()
+	local lines = {}
+	if output then
+		for line in output.stdout:gmatch("[^\n]+") do lines[#lines + 1] = line end
+	end
+	for n, i in ipairs(listed) do
+		local typ, sub = (lines[n] or ""):match("^(%a[%w%-]*)/([%w%.%+%-]+)%s*$")
+		if typ then
+			typ = typ:gsub("^x%-", "", 1)
+			sub = sub:gsub("^x%-", "", 1)
+			sub = sub:gsub("^vnd%.", "", 1)
+			mimes[i] = typ .. "/" .. sub
+		else
+			mimes[i] = "application/octet-stream"
+		end
+	end
+	return mimes
+end
+
+-- The openers every target accepts, in Yazi's order: rows of { id, description, command }.
+-- Mirrors `Open::match_common`: the first matching `[open]` rule of each target, intersected.
+local function openers_for(paths)
+	local files = {}
+	for i, path in ipairs(paths) do
+		local file, e = fs.file(Url(path))
+		assert(file, tostring(e))
+		files[i] = file
+	end
+	local mimes = mimes_of(paths, files)
+	local common
+	for i, file in ipairs(files) do
+		local names
+		for _, rule in pairs(rt.open:match({ file = file, mime = mimes[i] })) do
+			names = {}
+			for _, name in ipairs(rule["use"]) do names[#names + 1] = name end
+			break
+		end
+		if not names then return {} end
+		if not common then
+			common = names
+		else
+			local kept = {}
+			for _, name in ipairs(common) do
+				for _, other in ipairs(names) do
+					if other == name then kept[#kept + 1] = name break end
+				end
+			end
+			common = kept
+		end
+	end
+	local rows, seen = {}, {}
+	for _, name in ipairs(common or {}) do
+		local rules = rt.opener[name]
+		if rules then
+			for _, rule in pairs(rules:match()) do
+				local key = tostring(rule.run) .. "\0" .. tostring(rule.desc)
+				if not seen[key] then
+					seen[key] = true
+					local desc = rule.desc
+					if desc == nil or desc == "" then desc = tostring(rule.run):match("^%S+") or "" end
+					rows[#rows + 1] = { tostring(rule.id), desc, rule.run }
+				end
+			end
+		end
+	end
+	return rows
+end
+
+local function find_opener(id)
+	for _, rules in pairs(rt.opener) do
+		for _, rule in pairs(rules:match()) do
+			if tostring(rule.id) == id then return rule end
+		end
+	end
+end
+
+local function shell_quote(text)
+	local escaped = text:gsub("'", "'\\''")
+	return "'" .. escaped .. "'"
+end
+
+-- Quoted for the shell and shielded from the second `%` pass the `shell` actor makes.
+local function splat_quote(text)
+	local escaped = shell_quote(text):gsub("%%", "%%%%")
+	return escaped
+end
+
+local function dirname(path)
+	local dir = path:match("^(.*)/[^/]*$")
+	if dir == nil then return "." end
+	return dir == "" and "/" or dir
+end
+
+-- Expands an opener's `run` like Yazi's `Splatter` over `paths`: `%s`/`%S` the files,
+-- `%d`/`%D` their directories (an optional digit picks one), `%h`/`%H` no hovered file.
+-- Other `%` sequences are left for the `shell` actor's own pass.
+local function expand_opener(run, paths)
+	local out, i = {}, 1
+	while i <= #run do
+		local c, n = run:sub(i, i), run:sub(i + 1, i + 1)
+		if c == "%" and n:match("[sSdD]") then
+			local digits = run:match("^%d+", i + 2) or ""
+			local index = tonumber(digits)
+			local items = {}
+			for k, path in ipairs(paths) do
+				if not index or index == k then
+					items[#items + 1] = splat_quote((n == "d" or n == "D") and dirname(path) or path)
+				end
+			end
+			if index and #items == 0 then items[1] = "''" end
+			out[#out + 1] = table.concat(items, " ")
+			i = i + 2 + #digits
+		elseif c == "%" and n:match("[hH]") then
+			out[#out + 1] = "''"
+			i = i + 2
+		elseif c == "%" and n ~= "" then
+			out[#out + 1] = c .. n
+			i = i + 2
+		else
+			out[#out + 1] = c
+			i = i + 1
+		end
+	end
+	return table.concat(out)
+end
+
+-- One command for all targets when `run` spreads (`%s` without a digit), else one each.
+local function opener_commands(run, paths)
+	local spread, i = false, 1
+	while i <= #run do
+		if run:sub(i, i) == "%" then
+			if run:sub(i + 1, i + 1):match("[sSdD]") and not run:match("^%d", i + 2) then spread = true end
+			i = i + 2
+		else
+			i = i + 1
+		end
+	end
+	if spread then return { expand_opener(run, paths) } end
+	local commands = {}
+	for _, path in ipairs(paths) do commands[#commands + 1] = expand_opener(run, { path }) end
+	return commands
+end
+
+-- The rows Yazi's spotter shows for a file (`file.lua` `spot_base`, plus `image.lua`'s
+-- section): { heading } or { label, value }.
+local function spot_rows(path)
+	local url = Url(path)
+	local file, e = fs.file(url)
+	assert(file, tostring(e))
+	local cha = file.cha
+	local mime = mimes_of({ path }, { file })[1]
+	local pair = { file = file, mime = mime }
+	local function names(set)
+		local out = {}
+		for _, v in pairs(set:match(pair)) do out[#out + 1] = v.name end
+		return #out > 0 and table.concat(out, ", ") or "-"
+	end
+	local function first(set)
+		for _, v in pairs(set:match(pair)) do return v.name end
+		return "-"
+	end
+	local function date(time)
+		return time and os.date("%Y-%m-%d %H:%M:%S", math.floor(time)) or "-"
+	end
+	local rows = {
+		{ "Base" },
+		{ "Created:", date(cha.btime) },
+		{ "Modified:", date(cha.mtime) },
+		{ "Mimetype:", mime },
+	}
+	if not cha.is_dir then rows[#rows + 1] = { "Size:", ya.readable_size(cha.len) } end
+	rows[#rows + 1] = { "Permissions:", cha:perm() or "-" }
+	local link = fs.cha(url, false)
+	if link and link.is_link then
+		local out = Command("readlink"):arg({ "--", path }):stdout(Command.PIPED):output()
+		if out then rows[#rows + 1] = { "Link to:", (out.stdout:gsub("\n$", "")) } end
+	end
+	if mime:sub(1, 6) == "image/" then
+		local ok, info = pcall(ya.image_info, url)
+		if ok and info then
+			rows[#rows + 1] = { "Image" }
+			rows[#rows + 1] = { "Format:", tostring(info.format) }
+			rows[#rows + 1] = { "Size:", string.format("%dx%d", info.w, info.h) }
+			rows[#rows + 1] = { "Color:", tostring(info.color) }
+		end
+	end
+	rows[#rows + 1] = { "Plugins" }
+	rows[#rows + 1] = { "Spotter:", first(rt.plugin.spotters) }
+	rows[#rows + 1] = { "Previewer:", first(rt.plugin.previewers) }
+	rows[#rows + 1] = { "Fetchers:", names(rt.plugin.fetchers) }
+	rows[#rows + 1] = { "Preloaders:", names(rt.plugin.preloaders) }
+	return rows
+end
 
 function M:entry(job)
 	local stage = job.args[1]
@@ -536,7 +789,8 @@ function M:entry(job)
 			reply(req, { ok = false, error = "Target selection changed; operation refused" })
 			return
 		end
-		ya.emit("remove", { force = true }) -- Trash only; Tern confirmed these paths.
+		-- Tern confirmed these paths: trash them, or delete them for good when it asked so.
+		ya.emit("remove", { force = true, permanently = req.permanent == true })
 		ya.emit("plugin", { "tern", "settled", mode = "sync" })
 		return
 	elseif stage == "settled" then
@@ -578,6 +832,7 @@ function M:entry(job)
 			reply(req, { ok = true, paths = targets(req.target) })
 		elseif req.op == "trash_commit" then
 			assert(type(req.paths) == "table" and #req.paths > 0, "No targets")
+			assert(req.permanent == nil or type(req.permanent) == "boolean", "--permanent is a boolean flag")
 			table.sort(req.paths)
 			local files = {}
 			for _, path in ipairs(req.paths) do
@@ -662,14 +917,27 @@ function M:entry(job)
 			local clean_name = req.name:gsub("/+$", "")
 			assert(clean_name ~= "", "Creation requires a name, not a directory separator")
 			local target = Url(current_cwd()):join(clean_name)
-			missing_target(target)
+			local existing = existing_target(target)
+			if existing and req.overwrite ~= true then
+				-- Yazi asks `Overwrite file?` here; the browser asks and retries with `overwrite`.
+				reply(req, { ok = false, exists = true, target = tostring(target), error = "Destination already exists" })
+				return
+			end
 			local parent = assert(target.parent, "Cannot create at root")
 			local made, make_err = fs.create("dir_all", parent)
 			assert(made, tostring(make_err))
 			if is_dir then
-				local created, create_err = fs.create("dir", target)
-				assert(created, tostring(create_err))
+				-- Like Yazi, an existing directory is kept as is.
+				if not (existing and existing.is_dir) then
+					local created, create_err = fs.create("dir", target)
+					assert(created, tostring(create_err))
+				end
 			else
+				if existing then
+					assert(not existing.is_dir, "Cannot overwrite a directory with a file")
+					local removed, remove_err = fs.remove("file", target)
+					assert(removed, tostring(remove_err))
+				end
 				local fd, open_err = fs.access():write(true):create_new(true):open(target)
 				assert(fd, tostring(open_err))
 			end
@@ -684,16 +952,57 @@ function M:entry(job)
 			local parent = assert(source.parent, "Cannot rename root")
 			local target = parent:join(req.new_name)
 			if source ~= target then
-				missing_target(target)
-				local result, run_err = Command(rename_helper()):arg("--rename-no-replace")
-					:arg(tostring(source)):arg(tostring(target)):output()
-				assert(result, tostring(run_err))
-				assert(result.status.success, result.stderr ~= "" and result.stderr or "Rename failed")
+				local existing = existing_target(target)
+				if existing and req.overwrite ~= true then
+					reply(req, { ok = false, exists = true, target = tostring(target), error = "Destination already exists" })
+					return
+				end
+				if existing then
+					-- Confirmed overwrite: a plain rename replaces the destination.
+					local renamed, rename_err = fs.rename(source, target)
+					assert(renamed, tostring(rename_err))
+				else
+					local result, run_err = Command(rename_helper()):arg("--rename-no-replace")
+						:arg(tostring(source)):arg(tostring(target)):output()
+					assert(result, tostring(run_err))
+					assert(result.status.success, result.stderr ~= "" and result.stderr or "Rename failed")
+				end
 			end
 			reveal_listed(target)
 			reply(req, { ok = true, target = tostring(target) })
+		elseif req.op == "bulk_rename" then
+			-- Yazi runs the bulk-rename opener (`$EDITOR`) on the terminal it lends to the pane.
+			assert(has_selection(), "Bulk rename needs selected files")
+			reply(req, { ok = true, queued = true })
+			ya.exec("escape", { visual = true })
+			ya.exec("bulk_rename", {})
+		elseif req.op == "open_prepare" then
+			local paths = targets(nil)
+			local rows = {}
+			if #paths > 0 then rows = openers_for(paths) end
+			reply(req, { ok = true, paths = paths, rows = rows })
+		elseif req.op == "open_with" then
+			assert(type(req.paths) == "table" and #req.paths > 0, "No targets")
+			for _, path in ipairs(req.paths) do
+				assert(type(path) == "string" and path ~= "" and not path:find("%z"), "Invalid target")
+			end
+			local rule = find_opener(tostring(req.opener))
+			assert(rule, "The opener is no longer configured")
+			local commands = opener_commands(rule.run, req.paths)
+			reply(req, { ok = true, queued = true })
+			for _, command in ipairs(commands) do
+				ya.exec("shell", { command, block = rule.block == true, orphan = rule.orphan == true })
+			end
+		elseif req.op == "spot" then
+			local hovered = targets_hovered()
+			assert(hovered, "Nothing to inspect")
+			reply(req, { ok = true, paths = { hovered }, rows = spot_rows(hovered) })
 		elseif req.op == "action" then
 			assert(request_actors[req.action], "Unsupported action")
+			if req.action == "tab_rename" then
+				-- Interactive tab renaming would open an input Yazi draws on its hidden terminal.
+				assert(type(req.args[1]) == "string" and not req.args.interactive, "Tab rename needs a name")
+			end
 			if req.action == "plugin" then
 				assert(request_plugins[req.args[1]], "Unsupported plugin")
 				-- fzf and zoxide borrow Yazi's terminal until the user picks; acknowledge first.
