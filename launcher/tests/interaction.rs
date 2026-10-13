@@ -4242,7 +4242,8 @@ fn quit_flow(h: &mut Harness) -> TestResult<()> {
     h.case = "q with a running task asks first; Escape cancels and Enter quits";
     let status = h.path("quit-tasks-status.txt");
     let client = h.launch_with(files.clone(), true, yazi.clone(), "", Some(&status))?;
-    h.shell(&client, "sleep 12", false)?;
+    // Long enough to outlive a slow run: the task must still be running at the second `q`.
+    h.shell(&client, "sleep 90", false)?;
     h.expect_state(&client, "Yazi reports the running task", |s| {
         s["tasks"]["total"] == 1
     })?;
