@@ -6,7 +6,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 // Linux PTY and signal operations stay at the process boundary.
 #[link(name = "util")]
@@ -94,4 +94,40 @@ pub(crate) fn install_signals() {
 /// The last captured termination signal, or 0.
 pub(crate) fn pending_signal() -> i32 {
     SIGNAL.load(Ordering::Relaxed)
+}
+
+static STOP: AtomicBool = AtomicBool::new(false);
+extern "C" fn on_stop(_: libc::c_int) {
+    STOP.store(true, Ordering::Relaxed);
+}
+
+/// Catches the terminal stop signal (`kill -TSTP`) as a suspension request for the main loop
+/// instead of stopping the process under the surface.
+pub(crate) fn install_job_control() {
+    unsafe {
+        libc::signal(libc::SIGTSTP, on_stop as *const () as libc::sighandler_t);
+    }
+}
+
+/// Asks the main loop to suspend, as Ctrl+Z does.
+pub(crate) fn request_stop() {
+    STOP.store(true, Ordering::Relaxed);
+}
+
+/// Whether a suspension was requested since the last call.
+pub(crate) fn take_stop_request() -> bool {
+    STOP.swap(false, Ordering::Relaxed)
+}
+
+/// Stops this process group, as a shell expects of a foreground job, and returns once it
+/// continues. The default disposition applies meanwhile: a handler would not stop anything. A
+/// group the shell has orphaned discards the stop, so this then returns at once.
+pub(crate) fn stop_group() {
+    unsafe {
+        libc::signal(libc::SIGTSTP, libc::SIG_DFL);
+        libc::kill(0, libc::SIGTSTP);
+    }
+    install_job_control();
+    // A request that arrived while stopped is satisfied by having been stopped.
+    STOP.store(false, Ordering::Relaxed);
 }

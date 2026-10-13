@@ -24,8 +24,12 @@ use tern_sdk::{Event, Input, Options, Session, Surface, SurfaceOptions};
 use crate::backend::Backend;
 use crate::inbox::{FileVersion, Inbox, LISTING_CAP, STATE_CAP};
 use crate::supervisor::{self, Launch, Startup, Step};
-use crate::sys::{install_signals, pending_signal};
+use crate::sys::{
+    install_job_control, install_signals, pending_signal, request_stop, stop_group,
+    take_stop_request,
+};
 use actions::Actions;
+use handover::Link;
 use input::{Effect, Level, Msg, Ui};
 use model::{Listing, Snapshot, StateRecord};
 use panesize::PaneSize;
@@ -141,8 +145,10 @@ impl Snapshots {
     }
 }
 
+/// The pane's TSP session is gone only while the browser is suspended.
 struct App {
-    session: Session<Msg>,
+    session: Option<Session<Msg>>,
+    link: Link,
     sf: Surface,
     log: Log,
     ui: Ui,
@@ -161,6 +167,44 @@ struct App {
 }
 
 impl App {
+    /// The live session; absent only while [`suspend`](Self::suspend) runs.
+    fn session(&mut self) -> io::Result<&mut Session<Msg>> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| io::Error::other("the TSP session is closed"))
+    }
+
+    /// Suspends the browser like Yazi's own Ctrl+Z (`signals.rs`: restore the terminal, stop the
+    /// process group): the session closes, which removes the surface and returns the pane's tty to
+    /// the shell, then Yazi's group and this one stop. The shell regains the foreground and
+    /// reports the job; `fg` continues Yazi's group and attaches a new session and surface.
+    fn suspend(&mut self, backend: &Backend) -> io::Result<()> {
+        if let Some(session) = self.session.take() {
+            if let Err(error) = session.close() {
+                self.log.line(format!("session close failed: {error}"));
+            }
+        }
+        // Yazi's tasks pause with it; its own group is not the shell's job.
+        backend.signal(libc::SIGSTOP);
+        stop_group();
+        backend.signal(libc::SIGCONT);
+        let Some((session, link, sf)) = attach(&mut self.log)? else {
+            return Err(io::Error::other(
+                "Tern no longer answers after the suspension",
+            ));
+        };
+        self.cols = session.caps().cols;
+        self.session = Some(session);
+        self.link = link;
+        self.sf = sf;
+        // Blob ids and the frame baseline belonged to the closed session.
+        self.previews.forget();
+        self.drawn_role.clear();
+        self.last_frame = None;
+        self.dirty = true;
+        Ok(())
+    }
+
     fn notify(&mut self, level: Level, text: String) {
         self.log.line(format!("notice {level:?}: {text}"));
         self.notice = Some((level, text, Instant::now()));
@@ -193,6 +237,7 @@ impl App {
                     Err(error) => self.notify(Level::Error, format!("Cannot copy: {error}")),
                 },
                 Effect::Quit => return Some(0),
+                Effect::Suspend => request_stop(),
             }
         }
         self.dirty = true;
@@ -266,7 +311,10 @@ impl App {
             let Some(Blob::Bytes(bytes, mime)) = blob.take() else {
                 return;
             };
-            match self.session.blob(bytes, Some(mime)) {
+            let Some(session) = self.session.as_mut() else {
+                return;
+            };
+            match session.blob(bytes, Some(mime)) {
                 Ok(id) => *blob = Some(Blob::Id(id)),
                 Err(error) => self.log.line(format!("blob failed: {error}")),
             }
@@ -305,7 +353,8 @@ impl App {
             reveal_withheld: relayout,
         };
         let tree = view::view(&frame);
-        self.session.render(self.sf, tree).map_err(sdk)?;
+        let sf = self.sf;
+        self.session()?.render(sf, tree).map_err(sdk)?;
         self.last_frame = Some(Instant::now());
         self.drawn_role = role;
         self.dirty = relayout;
@@ -357,19 +406,20 @@ impl App {
     }
 }
 
-/// Runs Yazi under this pane's surface; without TSP, hands the arguments to the original Yazi.
-pub(crate) fn run(launch: &Launch, real: &OsStr, args: &[OsString]) -> io::Result<i32> {
+/// Connects the pane's TSP session and opens the browser's surface with its stylesheets;
+/// `Ok(None)` where Tern does not answer.
+fn attach(log: &mut Log) -> io::Result<Option<(Session<Msg>, Link, Surface)>> {
     // The session saves these and restores them on close, so a hangup that arrives while the
     // pane goes away still ends in the bounded shutdown rather than the default action.
     install_signals();
     let Some((mut session, link)) =
         handover::connect(Options::new().app("tern-yazi")).map_err(sdk)?
     else {
-        return supervisor::passthrough(real, args);
+        return Ok(None);
     };
     // Ours replace the session's restore-and-die handlers, so a signal ends the loop and the
     // session still restores the tty on close.
-    let caller_umask = supervisor::prepare();
+    install_signals();
     let opened = session.open(
         SurfaceOptions::screen()
             .title("Yazi")
@@ -383,12 +433,24 @@ pub(crate) fn run(launch: &Launch, real: &OsStr, args: &[OsString]) -> io::Resul
             return Err(sdk(error));
         }
     };
-    let mut log = Log::open();
     for (name, css) in theme::SHEETS {
         if let Err(error) = session.stylesheet(sf, name, Some(css)) {
             log.line(format!("stylesheet {name} failed: {error}"));
         }
     }
+    Ok(Some((session, link, sf)))
+}
+
+/// Runs Yazi under this pane's surface; without TSP, hands the arguments to the original Yazi.
+pub(crate) fn run(launch: &Launch, real: &OsStr, args: &[OsString]) -> io::Result<i32> {
+    let mut log = Log::open();
+    let Some((session, link, sf)) = attach(&mut log)? else {
+        return supervisor::passthrough(real, args);
+    };
+    let caller_umask = supervisor::prepare();
+    // A stop request (`kill -TSTP`) suspends the browser like Ctrl+Z instead of stopping the
+    // process under the surface.
+    install_job_control();
     let inbox = match Inbox::new() {
         Ok(inbox) => inbox,
         Err(error) => {
@@ -405,7 +467,8 @@ pub(crate) fn run(launch: &Launch, real: &OsStr, args: &[OsString]) -> io::Resul
     };
     let cols = session.caps().cols;
     let mut app = App {
-        session,
+        session: Some(session),
+        link,
         sf,
         log,
         ui: Ui::new(theme::initial()),
@@ -437,12 +500,21 @@ pub(crate) fn run(launch: &Launch, real: &OsStr, args: &[OsString]) -> io::Resul
             Err(error) => break Err(error),
         }
         if backend.lent.active {
+            let Some(session) = app.session.as_mut() else {
+                break Err(io::Error::other("the TSP session is closed"));
+            };
             if let Err(error) =
-                handover::lend(&mut app.session, &link, app.sf, &mut backend, &mut app.pane)
+                handover::lend(session, &app.link, app.sf, &mut backend, &mut app.pane)
             {
                 break Err(error);
             }
             app.dirty = true;
+            continue;
+        }
+        if take_stop_request() {
+            if let Err(error) = app.suspend(&backend) {
+                break Err(error);
+            }
             continue;
         }
         app.tick(&inbox, &mut backend, ready);
@@ -457,30 +529,41 @@ pub(crate) fn run(launch: &Launch, real: &OsStr, args: &[OsString]) -> io::Resul
                 .clamp(Duration::from_millis(1), TICK),
             _ => TICK,
         };
-        match app.session.next(Some(wait)) {
+        let next = match app.session() {
+            Ok(session) => session.next(Some(wait)).map_err(sdk),
+            Err(error) => Err(error),
+        };
+        match next {
             Ok(Some(input)) => {
                 if let Some(code) = app.input(input) {
                     break Ok(code);
                 }
             }
             Ok(None) => {}
-            Err(error) => break Err(sdk(error)),
+            Err(error) => break Err(error),
         }
-        if !app.session.is_open(app.sf) {
+        let sf = app.sf;
+        if app
+            .session
+            .as_ref()
+            .is_some_and(|session| !session.is_open(sf))
+        {
             break Ok(0);
         }
     };
     let App {
-        mut session,
+        session,
         sf,
         mut log,
         ..
     } = app;
-    if session.is_open(sf) {
-        let _ = session.close_surface(sf, false);
-    }
-    if let Err(error) = session.close() {
-        log.line(format!("session close failed: {error}"));
+    if let Some(mut session) = session {
+        if session.is_open(sf) {
+            let _ = session.close_surface(sf, false);
+        }
+        if let Err(error) = session.close() {
+            log.line(format!("session close failed: {error}"));
+        }
     }
     startup.report(&backend, &result);
     supervisor::shutdown(backend);
