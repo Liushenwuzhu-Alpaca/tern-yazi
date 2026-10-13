@@ -6,8 +6,9 @@ use std::collections::HashSet;
 use serde_json::json;
 use tern_sdk::ui::{self, Node, Span, View};
 
+use super::editor::Editor;
 use super::format::{self, path_segments};
-use super::input::{Editor, Field, FieldEdit, Level, List, Mode, Msg, Ui};
+use super::input::{Field, FieldEdit, Level, List, Mode, Msg, Ui};
 use super::model::{basename, join_path, parent_dir, relative, Folder, Snapshot, TaskManager};
 use super::preview::{Blob, Load, Preview, Stamp};
 use super::theme::{self, Theme, THEMES};
@@ -79,7 +80,9 @@ fn metadata(kind: String, hover: Option<&super::model::Hover>) -> N {
         .prop("wrap", true)
         .children([
             muted(kind),
-            ui::text(format::size(size)).role("yazi.preview-size").into(),
+            ui::text(format::size(size))
+                .role("yazi.preview-size")
+                .into(),
             ui::text(format::mtime(mtime))
                 .role("yazi.preview-mtime")
                 .tone("muted")
@@ -274,7 +277,11 @@ fn tasks_layer(manager: &TaskManager) -> N {
             };
             ui::col()
                 .key(format!("task{index}"))
-                .role(if hovered { "yazi.task.hovered" } else { "yazi.task" })
+                .role(if hovered {
+                    "yazi.task.hovered"
+                } else {
+                    "yazi.task"
+                })
                 .children([spans(vec![title]), progress])
                 .into()
         })
@@ -508,62 +515,81 @@ impl Browser<'_> {
     /// One reserved line, so editors do not shift the file columns.
     fn input_row(&self) -> N {
         let ui = self.frame.ui;
-        let caret = |tone: &str| span(" ▎", tone);
-        let bubble = |text: String, tone: &str| spans(vec![span(text, "strong"), caret(tone)]);
-        let parts: Option<(&str, N, N, &str)> = match &ui.mode {
-            Mode::Command { query, block } => {
+        let parts: Option<(&str, N, &Editor, Field, &str)> = match &ui.mode {
+            Mode::Command { editor, block } => {
                 let sigil = if *block { ':' } else { ';' };
                 Some((
                     "shell",
                     ui::badge(format!("Shell [{sigil}]")).tone("warn").into(),
-                    bubble(format!(" {sigil}{query}"), "warn"),
+                    editor,
+                    Field::Line,
                     "Cancel [Esc]",
                 ))
             }
-            Mode::Find { query, previous } => Some((
+            Mode::Find { editor, previous } => Some((
                 "find",
                 ui::badge(if *previous { "Find [?]" } else { "Find [/]" })
                     .tone("accent")
                     .into(),
-                bubble(format!(" {query}"), "accent"),
+                editor,
+                Field::Line,
                 "Cancel [Esc]",
             )),
-            Mode::Search { query, content } => Some((
+            Mode::Search { editor, content } => Some((
                 "search",
                 ui::badge(if *content { "Search [S]" } else { "Search [s]" })
                     .tone("accent")
                     .into(),
-                bubble(format!(" {query}"), "accent"),
+                editor,
+                Field::Line,
                 "Cancel [Esc]",
             )),
-            Mode::Filter => Some((
+            Mode::Filter(editor) => Some((
                 "filter",
                 ui::badge("Filter [f]").tone("accent").into(),
-                bubble(format!(" {}", ui.filter_query), "accent"),
+                editor,
+                Field::Line,
                 "Clear [Esc]",
             )),
-            Mode::Create(query) => Some((
+            Mode::Create(editor) => Some((
                 "create",
                 ui::badge("Create [a]").tone("accent").into(),
-                bubble(format!(" {query}"), "accent"),
+                editor,
+                Field::Line,
                 "Cancel [Esc]",
             )),
             Mode::Rename { editor, .. } => Some((
                 "rename",
                 ui::badge("Rename [r]").tone("accent").into(),
-                field("rename", Field::Rename, None, editor, None),
+                editor,
+                Field::Rename,
                 "Cancel [Esc]",
             )),
             _ => None,
         };
         let row = match parts {
-            Some((kind, label, bubble, cancel)) => ui::row().children([
-                label.role("yazi.command-label"),
-                bubble.role(format!("yazi.command-bubble.{kind}")),
-                Node::from(ui::badge(cancel).tone("muted"))
-                    .role("yazi.command-cancel")
-                    .on_click(Msg::ClearInput),
-            ]),
+            Some((kind, label, editor, which, cancel)) => {
+                // Keyed, so the native input survives switching between vi modes.
+                let mut children = vec![label.key("label").role("yazi.command-label")];
+                if let Some(mode) = editor.vi_label() {
+                    children.push(
+                        Node::from(ui::badge(mode).tone("muted"))
+                            .key("vi")
+                            .role("yazi.command-vi"),
+                    );
+                }
+                children.push(
+                    field(kind, which, None, editor, None)
+                        .role(format!("yazi.command-bubble.{kind}")),
+                );
+                children.push(
+                    Node::from(ui::badge(cancel).tone("muted"))
+                        .key("cancel")
+                        .role("yazi.command-cancel")
+                        .on_click(Msg::ClearInput),
+                );
+                ui::row().children(children)
+            }
             None => ui::row().child(match self.frame.notice {
                 Some((level, text)) => spans(vec![span(
                     text,
@@ -949,7 +975,7 @@ impl Browser<'_> {
             Mode::Find { .. } => "FIND",
             Mode::Search { .. } => "SEARCH",
             Mode::Tasks => "TASKS",
-            Mode::Filter => "FILTER",
+            Mode::Filter(_) => "FILTER",
             Mode::Create(_) => "CREATE",
             Mode::Rename { .. } => "RENAME",
             _ => match yz.mode.as_str() {
@@ -1034,8 +1060,8 @@ fn field(
             )
         })
         .on_send(move |text| Msg::FieldSend(field, text.to_owned()))
-        .prop("cursor", editor.cursor)
-        .prop("anchor", editor.anchor);
+        .prop("cursor", editor.caret().1)
+        .prop("anchor", editor.caret().0);
     if let Some(role) = role {
         node = node.role(role);
     }

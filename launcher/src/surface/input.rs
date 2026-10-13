@@ -4,22 +4,17 @@
 use serde_json::{json, Map, Value};
 use tern_sdk::keys::Key;
 
+use super::editor::{utf16_len, Edit, Editor};
 use super::model::{basename, join_path, parent_dir, relative, Snapshot};
 use super::theme::{self, THEMES};
-
-/// A text field edited by keys, with UTF-16 caret offsets as Tern's input node expects.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Editor {
-    pub(crate) text: String,
-    pub(crate) cursor: usize,
-    pub(crate) anchor: usize,
-}
 
 /// The fields the view draws as native inputs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Field {
     Path,
     Rename,
+    /// Any other line mode (shell, find, search, filter, create): the one open line.
+    Line,
 }
 
 /// Native editing replaced UTF-16 `[from, to)` of a text Tern saw as `len` units long.
@@ -32,147 +27,6 @@ pub(crate) struct FieldEdit {
     pub(crate) len: usize,
 }
 
-fn utf16_len(text: &str) -> usize {
-    text.chars().map(char::len_utf16).sum()
-}
-
-/// The byte offset of UTF-16 offset `at`, clamped to the end.
-fn byte_at(text: &str, at: usize) -> usize {
-    let mut units = 0;
-    for (byte, c) in text.char_indices() {
-        if units >= at {
-            return byte;
-        }
-        units += c.len_utf16();
-    }
-    text.len()
-}
-
-impl Editor {
-    pub(crate) fn new(text: String, cursor: usize, anchor: usize) -> Self {
-        Self {
-            text,
-            cursor,
-            anchor,
-        }
-    }
-
-    /// Applies a native edit unless it was made against text this editor no longer holds.
-    fn edit(&mut self, edit: &FieldEdit) {
-        if edit.len == utf16_len(&self.text) {
-            self.replace(&edit.text, Some((edit.from, edit.to)));
-            self.cursor = edit.cursor;
-            self.anchor = edit.cursor;
-        }
-    }
-
-    /// Replaces UTF-16 `[from, to)` (default: the selection) and collapses the caret after it.
-    pub(crate) fn replace(&mut self, insert: &str, range: Option<(usize, usize)>) {
-        let (from, to) =
-            range.unwrap_or((self.cursor.min(self.anchor), self.cursor.max(self.anchor)));
-        let (start, end) = (byte_at(&self.text, from), byte_at(&self.text, to.max(from)));
-        self.text.replace_range(start..end, insert);
-        self.cursor = utf16_len(&self.text[..start]) + utf16_len(insert);
-        self.anchor = self.cursor;
-    }
-
-    fn select_all(&mut self) {
-        self.anchor = 0;
-        self.cursor = utf16_len(&self.text);
-    }
-
-    fn erase(&mut self, forward: bool) {
-        if self.cursor != self.anchor {
-            return self.replace("", None);
-        }
-        let at = byte_at(&self.text, self.cursor);
-        let span = if forward {
-            self.text[at..]
-                .chars()
-                .next()
-                .map(|c| (at, at + c.len_utf8()))
-        } else {
-            self.text[..at]
-                .chars()
-                .next_back()
-                .map(|c| (at - c.len_utf8(), at))
-        };
-        if let Some((start, end)) = span {
-            let from = utf16_len(&self.text[..start]);
-            self.replace("", Some((from, from + utf16_len(&self.text[start..end]))));
-        }
-    }
-
-    fn step(&mut self, right: bool, extend: bool) {
-        let at = byte_at(&self.text, self.cursor);
-        let next = if right {
-            self.text[at..]
-                .chars()
-                .next()
-                .map_or(at, |c| at + c.len_utf8())
-        } else {
-            self.text[..at]
-                .chars()
-                .next_back()
-                .map_or(at, |c| at - c.len_utf8())
-        };
-        self.cursor = utf16_len(&self.text[..next]);
-        if !extend {
-            self.anchor = self.cursor;
-        }
-    }
-
-    fn edge(&mut self, end: bool, extend: bool) {
-        self.cursor = if end { utf16_len(&self.text) } else { 0 };
-        if !extend {
-            self.anchor = self.cursor;
-        }
-    }
-
-    /// Applies an editing key; false when the key is not an editing key.
-    fn key(&mut self, key: &Key) -> bool {
-        match key.name.as_str() {
-            "a" if key.ctrl => self.select_all(),
-            "backspace" => self.erase(false),
-            "delete" => self.erase(true),
-            "home" | "end" => self.edge(key.name == "end", key.shift),
-            "left" | "right" => self.step(key.name == "right", key.shift),
-            _ => match typed(key) {
-                Some(text) => self.replace(&text, None),
-                None => return false,
-            },
-        }
-        true
-    }
-}
-
-/// Removes the last character.
-fn erase_last(text: &mut String) {
-    text.pop();
-}
-
-/// The text a key types, if any.
-fn typed(key: &Key) -> Option<String> {
-    if key.name == "paste" {
-        return key.text.clone();
-    }
-    if key.ctrl || key.meta || key.alt {
-        return None;
-    }
-    if let Some(text) = key.text.as_ref().filter(|text| !text.is_empty()) {
-        return Some(text.clone());
-    }
-    if key.name == "space" {
-        return Some(" ".to_owned());
-    }
-    let mut chars = key.name.chars();
-    match (chars.next(), chars.next()) {
-        (Some(c), None) if key.shift => Some(c.to_uppercase().collect()),
-        (Some(c), None) => Some(c.to_string()),
-        _ => None,
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Mode {
     Normal,
@@ -180,22 +34,23 @@ pub(crate) enum Mode {
     /// The `:` (Yazi `shell --block`) or `;` (Yazi background task) shell line. Yazi runs a
     /// blocking shell on the terminal it lends to the pane; a background one is a Yazi task.
     Command {
-        query: String,
+        editor: Editor,
         block: bool,
     },
     Find {
-        query: String,
+        editor: Editor,
         previous: bool,
     },
     /// Yazi's recursive search line: `s` by name via fd, `S` by content via ripgrep.
     Search {
-        query: String,
+        editor: Editor,
         content: bool,
     },
     /// Yazi's task manager (`w`), open in Yazi while this mode lasts.
     Tasks,
-    Filter,
-    Create(String),
+    /// Live filter line; `Ui::filter_query` mirrors its text and outlives it.
+    Filter(Editor),
+    Create(Editor),
     Rename {
         editor: Editor,
         target: String,
@@ -409,7 +264,10 @@ impl Ui {
             self.close_path(&jump);
         }
         // Only pending filter mutations own the local query.
-        if self.mode != Mode::Filter && !filter_pending && self.filter_seq != Some(yz.seq) {
+        if !matches!(self.mode, Mode::Filter(_))
+            && !filter_pending
+            && self.filter_seq != Some(yz.seq)
+        {
             if let Some(filter) = &yz.filter {
                 self.filter_query = filter.clone().unwrap_or_default();
                 self.filter_seq = Some(yz.seq);
@@ -508,6 +366,98 @@ impl Ui {
         request(json!({"op": "filter", "query": ""}))
     }
 
+    /// The editor of the open line mode, whichever it is.
+    fn line_editor(&mut self) -> Option<&mut Editor> {
+        match &mut self.mode {
+            Mode::Path(editor)
+            | Mode::Command { editor, .. }
+            | Mode::Find { editor, .. }
+            | Mode::Search { editor, .. }
+            | Mode::Filter(editor)
+            | Mode::Create(editor)
+            | Mode::Rename { editor, .. } => Some(editor),
+            _ => None,
+        }
+    }
+
+    /// Feeds a key to the open line's editor and acts on what it reports.
+    fn line_key(&mut self, key: &Key, yz: &Snapshot, home: &str) -> Vec<Effect> {
+        let Some(editor) = self.line_editor() else {
+            return Vec::new();
+        };
+        match editor.key(key) {
+            Edit::Unchanged => Vec::new(),
+            Edit::Changed => self.line_changed(),
+            Edit::Cancel => match self.mode {
+                Mode::Find { .. } => vec![self.clear_find()],
+                Mode::Filter(_) => vec![self.clear_filter()],
+                _ => {
+                    self.mode = Mode::Normal;
+                    Vec::new()
+                }
+            },
+            Edit::Submit => self.line_submit(yz, home),
+        }
+    }
+
+    /// The line's text changed: live modes (find, filter) tell Yazi at once.
+    fn line_changed(&mut self) -> Vec<Effect> {
+        match &self.mode {
+            Mode::Find { editor, previous } => {
+                let body = json!({"op": "find", "query": editor.text, "previous": previous});
+                self.active_file = None;
+                vec![request(body)]
+            }
+            Mode::Filter(editor) => {
+                self.filter_query = editor.text.clone();
+                self.active_file = None;
+                vec![request(
+                    json!({"op": "filter", "query": self.filter_query, "done": false}),
+                )]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Enter on the open line: run it and close it (a path waits for Yazi's answer).
+    fn line_submit(&mut self, yz: &Snapshot, home: &str) -> Vec<Effect> {
+        match &self.mode {
+            Mode::Path(_) => return vec![self.submit_path(yz, home)],
+            Mode::Rename { .. } => return self.submit_rename(),
+            _ => {}
+        }
+        let mode = std::mem::replace(&mut self.mode, Mode::Normal);
+        match mode {
+            Mode::Command { editor, block } if !editor.text.is_empty() => {
+                vec![request(json!({"op": "command", "action": "shell",
+                    "args": {"positional": [editor.text], "options": {"block": block}}}))]
+            }
+            Mode::Search { editor, content } if !editor.text.is_empty() => {
+                let via = if content { "rg" } else { "fd" };
+                vec![request(
+                    json!({"op": "search", "query": editor.text, "via": via}),
+                )]
+            }
+            Mode::Find { editor, previous } => {
+                self.active_file = None;
+                vec![request(
+                    json!({"op": "find", "query": editor.text, "previous": previous}),
+                )]
+            }
+            Mode::Filter(editor) => {
+                self.filter_query = editor.text;
+                self.active_file = None;
+                vec![request(
+                    json!({"op": "filter", "query": self.filter_query, "done": true}),
+                )]
+            }
+            Mode::Create(editor) if !editor.text.is_empty() => {
+                vec![request(json!({"op": "create", "name": editor.text}))]
+            }
+            _ => Vec::new(),
+        }
+    }
+
     pub(crate) fn key(&mut self, key: &Key, yz: &Snapshot, home: &str) -> Vec<Effect> {
         let name = key.name.as_str();
         let escape = name == "escape" || (key.ctrl && name == "[");
@@ -548,51 +498,13 @@ impl Ui {
                 }
                 return Vec::new();
             }
-            Mode::Path(editor) => {
-                if escape {
-                    self.mode = Mode::Normal;
-                } else if enter {
-                    return vec![self.submit_path(yz, home)];
-                } else {
-                    editor.key(key);
-                }
-                return Vec::new();
-            }
-            Mode::Command { query, block } => {
-                if escape {
-                    self.mode = Mode::Normal;
-                } else if enter {
-                    let (query, block) = (std::mem::take(query), *block);
-                    self.mode = Mode::Normal;
-                    if query.is_empty() {
-                        return Vec::new();
-                    }
-                    return vec![request(json!({"op": "command", "action": "shell",
-                        "args": {"positional": [query], "options": {"block": block}}}))];
-                } else if name == "backspace" {
-                    erase_last(query);
-                } else if let Some(text) = typed(key) {
-                    query.push_str(&text);
-                }
-                return Vec::new();
-            }
-            Mode::Search { query, content } => {
-                if escape {
-                    self.mode = Mode::Normal;
-                } else if enter {
-                    let (query, via) = (std::mem::take(query), if *content { "rg" } else { "fd" });
-                    self.mode = Mode::Normal;
-                    if query.is_empty() {
-                        return Vec::new();
-                    }
-                    return vec![request(json!({"op": "search", "query": query, "via": via}))];
-                } else if name == "backspace" {
-                    erase_last(query);
-                } else if let Some(text) = typed(key) {
-                    query.push_str(&text);
-                }
-                return Vec::new();
-            }
+            Mode::Path(_)
+            | Mode::Command { .. }
+            | Mode::Search { .. }
+            | Mode::Find { .. }
+            | Mode::Filter(_)
+            | Mode::Create(_)
+            | Mode::Rename { .. } => return self.line_key(key, yz, home),
             Mode::Tasks => {
                 let effect = if escape || name == "w" || (key.ctrl && name == "c") {
                     self.mode = Mode::Normal;
@@ -608,78 +520,6 @@ impl Ui {
                     }
                 };
                 return vec![effect];
-            }
-            Mode::Find { query, previous } => {
-                let previous = *previous;
-                if escape {
-                    return vec![self.clear_find()];
-                }
-                let query = if enter {
-                    let query = std::mem::take(query);
-                    self.mode = Mode::Normal;
-                    query
-                } else {
-                    if name == "backspace" {
-                        erase_last(query);
-                    } else if let Some(text) = typed(key) {
-                        query.push_str(&text);
-                    } else {
-                        return Vec::new();
-                    }
-                    query.clone()
-                };
-                self.active_file = None;
-                return vec![request(
-                    json!({"op": "find", "query": query, "previous": previous}),
-                )];
-            }
-            Mode::Filter => {
-                if escape {
-                    return vec![self.clear_filter()];
-                }
-                if enter {
-                    self.mode = Mode::Normal;
-                    return vec![request(
-                        json!({"op": "filter", "query": self.filter_query, "done": true}),
-                    )];
-                }
-                if name == "backspace" {
-                    erase_last(&mut self.filter_query);
-                } else if let Some(text) = typed(key) {
-                    self.filter_query.push_str(&text);
-                } else {
-                    return Vec::new();
-                }
-                self.active_file = None;
-                return vec![request(
-                    json!({"op": "filter", "query": self.filter_query, "done": false}),
-                )];
-            }
-            Mode::Create(query) => {
-                if escape {
-                    self.mode = Mode::Normal;
-                } else if enter {
-                    let name = std::mem::take(query);
-                    self.mode = Mode::Normal;
-                    if !name.is_empty() {
-                        return vec![request(json!({"op": "create", "name": name}))];
-                    }
-                } else if name == "backspace" {
-                    erase_last(query);
-                } else if let Some(text) = typed(key) {
-                    query.push_str(&text);
-                }
-                return Vec::new();
-            }
-            Mode::Rename { editor, .. } => {
-                if escape {
-                    self.mode = Mode::Normal;
-                } else if enter {
-                    return self.submit_rename();
-                } else {
-                    editor.key(key);
-                }
-                return Vec::new();
             }
             Mode::Normal => {}
         }
@@ -772,7 +612,7 @@ impl Ui {
                 "z" => vec![action("plugin", &["zoxide"], json!({}))],
                 "s" => {
                     self.mode = Mode::Search {
-                        query: String::new(),
+                        editor: Editor::default(),
                         content: true,
                     };
                     Vec::new()
@@ -814,12 +654,14 @@ impl Ui {
             _ if minus => action("link", &[], json!({"relative": true})),
             "d" => Effect::Request(json!({"op": "trash_prepare"}), Then::TrashPrepared),
             "f" => {
-                self.mode = Mode::Filter;
+                let query = self.filter_query.clone();
+                let end = utf16_len(&query);
+                self.mode = Mode::Filter(Editor::new(query, end, end));
                 return Vec::new();
             }
             "/" | "?" => {
                 self.mode = Mode::Find {
-                    query: String::new(),
+                    editor: Editor::default(),
                     previous: name == "?" || key.shift,
                 };
                 return Vec::new();
@@ -830,14 +672,14 @@ impl Ui {
             }
             "s" => {
                 self.mode = Mode::Search {
-                    query: String::new(),
+                    editor: Editor::default(),
                     content: false,
                 };
                 return Vec::new();
             }
             ":" | "colon" | ";" | "semicolon" => {
                 self.mode = Mode::Command {
-                    query: String::new(),
+                    editor: Editor::default(),
                     block: key.shift || matches!(name, ":" | "colon"),
                 };
                 return Vec::new();
@@ -853,7 +695,7 @@ impl Ui {
             "[" | "bracketleft" => action("tab_switch", &["-1"], json!({"relative": true})),
             "]" | "bracketright" => action("tab_switch", &["1"], json!({"relative": true})),
             "a" => {
-                self.mode = Mode::Create(String::new());
+                self.mode = Mode::Create(Editor::default());
                 return Vec::new();
             }
             "r" => {
@@ -893,11 +735,15 @@ impl Ui {
     }
 
     fn editor(&mut self, field: Field) -> Option<&mut Editor> {
-        match (&mut self.mode, field) {
-            (Mode::Path(editor), Field::Path) | (Mode::Rename { editor, .. }, Field::Rename) => {
-                Some(editor)
-            }
-            _ => None,
+        let open = match self.mode {
+            Mode::Path(_) => Field::Path,
+            Mode::Rename { .. } => Field::Rename,
+            _ => Field::Line,
+        };
+        if open == field {
+            self.line_editor()
+        } else {
+            None
         }
     }
 
@@ -914,12 +760,13 @@ impl Ui {
             // Select-all belongs only to entering the editor; after a click, keys append.
             Msg::FieldFocus(field) => {
                 if let Some(editor) = self.editor(field) {
-                    editor.edge(true, false);
+                    editor.focus();
                 }
             }
             Msg::FieldEdit(field, edit) => {
                 if let Some(editor) = self.editor(field) {
                     editor.edit(&edit);
+                    return self.line_changed();
                 }
             }
             Msg::FieldSend(field, text) => {
@@ -927,10 +774,7 @@ impl Ui {
                     return Vec::new();
                 };
                 editor.text = text;
-                return match field {
-                    Field::Path => vec![self.submit_path(yz, home)],
-                    Field::Rename => self.submit_rename(),
-                };
+                return self.line_submit(yz, home);
             }
             Msg::PathEdit => {
                 let cwd = yz.current.cwd.clone();
@@ -951,7 +795,7 @@ impl Ui {
             Msg::PathCd(target) => return vec![self.jump(target)],
             Msg::ClearInput => match &self.mode {
                 Mode::Find { .. } => return vec![self.clear_find()],
-                Mode::Filter => return vec![self.clear_filter()],
+                Mode::Filter(_) => return vec![self.clear_filter()],
                 Mode::Command { .. }
                 | Mode::Search { .. }
                 | Mode::Create(_)
@@ -1081,33 +925,6 @@ mod tests {
     }
 
     #[test]
-    fn editor_edits_in_utf16_units() {
-        let mut editor = Editor::new("a😀b".to_owned(), 3, 3);
-        editor.key(&key("backspace"));
-        assert_eq!((editor.text.as_str(), editor.cursor), ("ab", 1));
-        editor.key(&key("x"));
-        assert_eq!((editor.text.as_str(), editor.cursor), ("axb", 2));
-        editor.key(&Key {
-            shift: true,
-            ..Key::named("home")
-        });
-        assert_eq!((editor.cursor, editor.anchor), (0, 2));
-        editor.key(&key("é"));
-        assert_eq!((editor.text.as_str(), editor.cursor), ("éb", 1));
-        editor.key(&key("delete"));
-        assert_eq!(editor.text, "é");
-        editor.key(&Key {
-            ctrl: true,
-            ..Key::named("a")
-        });
-        editor.key(&key("backspace"));
-        assert_eq!(
-            (editor.text.as_str(), editor.cursor, editor.anchor),
-            ("", 0, 0)
-        );
-    }
-
-    #[test]
     fn rename_starts_before_the_extension_and_submits_the_target() {
         let yz = snapshot();
         let mut ui = Ui::new(0);
@@ -1194,8 +1011,173 @@ mod tests {
             body(&effects),
             &json!({"op": "find", "query": "c", "previous": true})
         );
+        // The first Esc only leaves insert mode; the second cancels the find.
+        assert!(ui.key(&key("escape"), &yz, "").is_empty());
+        assert!(matches!(ui.mode, Mode::Find { .. }));
         let effects = ui.key(&key("escape"), &yz, "");
         assert_eq!(body(&effects)["args"]["options"], json!({"find": true}));
+        assert_eq!(ui.mode, Mode::Normal);
+    }
+
+    /// Opens a line mode with `opener` and types `text` into it.
+    fn typed_line(ui: &mut Ui, yz: &Snapshot, opener: &Key, text: &str) {
+        ui.key(opener, yz, "/home/u");
+        for c in text.chars() {
+            ui.key(&key(&c.to_string()), yz, "/home/u");
+        }
+    }
+
+    #[test]
+    fn every_line_mode_cancels_on_the_second_escape() {
+        let yz = snapshot();
+        for opener in [
+            key(":"),
+            key(";"),
+            key("s"),
+            shifted("s"),
+            key("a"),
+            key("r"),
+            key("f"),
+            key("/"),
+            shifted("?"),
+        ] {
+            let mut ui = Ui::new(0);
+            typed_line(&mut ui, &yz, &opener, "ab");
+            assert_ne!(ui.mode, Mode::Normal, "{opener:?} opens a line");
+            ui.key(&key("escape"), &yz, "/home/u");
+            let editor = ui.line_editor().expect("still a line after one Esc");
+            assert_eq!(editor.vi_label(), Some("NORMAL"), "{opener:?}");
+            ui.key(&key("escape"), &yz, "/home/u");
+            assert_eq!(ui.mode, Mode::Normal, "{opener:?} cancels on Esc Esc");
+        }
+        let mut ui = Ui::new(0);
+        ui.msg(Msg::PathEdit, &yz, "/home/u");
+        ui.key(&key("escape"), &yz, "/home/u");
+        assert!(matches!(ui.mode, Mode::Path(_)));
+        ui.key(&key("escape"), &yz, "/home/u");
+        assert_eq!(ui.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn live_modes_send_every_normal_mode_change() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        typed_line(&mut ui, &yz, &key("f"), "abc");
+        assert!(ui.key(&key("escape"), &yz, "").is_empty());
+        // `x` removes the character under the caret (the last one after Esc).
+        let effects = ui.key(&key("x"), &yz, "");
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "filter", "query": "ab", "done": false})
+        );
+        assert_eq!(ui.filter_query, "ab");
+        // Motions change nothing, so they send nothing.
+        assert!(ui.key(&key("0"), &yz, "").is_empty());
+        let effects = ui.key(&key("x"), &yz, "");
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "filter", "query": "b", "done": false})
+        );
+        // `dd` empties the line; Enter submits it from normal mode.
+        assert!(ui.key(&key("d"), &yz, "").is_empty());
+        let effects = ui.key(&key("d"), &yz, "");
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "filter", "query": "", "done": false})
+        );
+        let effects = ui.key(&key("enter"), &yz, "");
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "filter", "query": "", "done": true})
+        );
+        assert_eq!(ui.mode, Mode::Normal);
+
+        // Esc Esc clears the filter, exactly as a single Esc did before.
+        typed_line(&mut ui, &yz, &key("f"), "q");
+        ui.key(&key("escape"), &yz, "");
+        let effects = ui.key(&key("escape"), &yz, "");
+        assert_eq!(body(&effects), &json!({"op": "filter", "query": ""}));
+        assert_eq!((ui.filter_query.as_str(), &ui.mode), ("", &Mode::Normal));
+
+        typed_line(&mut ui, &yz, &key("/"), "cat");
+        ui.key(&key("escape"), &yz, "");
+        ui.key(&key("b"), &yz, "");
+        let effects = ui.key(&key("D"), &yz, "");
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "find", "query": "", "previous": false})
+        );
+        let effects = ui.key(&key("enter"), &yz, "");
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "find", "query": "", "previous": false})
+        );
+    }
+
+    #[test]
+    fn enter_submits_from_normal_mode() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        typed_line(&mut ui, &yz, &key(":"), "ls");
+        ui.key(&key("escape"), &yz, "");
+        let effects = ui.key(&key("enter"), &yz, "");
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "command", "action": "shell",
+                "args": {"positional": ["ls"], "options": {"block": true}}})
+        );
+        assert_eq!(ui.mode, Mode::Normal);
+
+        // Normal-mode edits land in what is submitted.
+        typed_line(&mut ui, &yz, &key("a"), "xb.txt");
+        ui.key(&key("escape"), &yz, "");
+        ui.key(&key("0"), &yz, "");
+        ui.key(&key("x"), &yz, "");
+        let effects = ui.key(&key("enter"), &yz, "");
+        assert_eq!(body(&effects), &json!({"op": "create", "name": "b.txt"}));
+
+        typed_line(&mut ui, &yz, &shifted("s"), "todo");
+        ui.key(&key("escape"), &yz, "");
+        ui.key(&key("c"), &yz, "");
+        ui.key(&key("c"), &yz, "");
+        for c in "fixme".chars() {
+            ui.key(&key(&c.to_string()), &yz, "");
+        }
+        let effects = ui.key(&key("enter"), &yz, "");
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "search", "query": "fixme", "via": "rg"})
+        );
+    }
+
+    #[test]
+    fn native_line_events_reach_live_modes() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        ui.key(&key("/"), &yz, "");
+        ui.msg(Msg::FieldFocus(Field::Line), &yz, "");
+        let edit = FieldEdit {
+            from: 0,
+            to: 0,
+            text: "n".to_owned(),
+            cursor: 1,
+            len: 0,
+        };
+        // Rename's native field cannot touch a find line.
+        assert!(ui
+            .msg(Msg::FieldEdit(Field::Rename, edit.clone()), &yz, "")
+            .is_empty());
+        let effects = ui.msg(Msg::FieldEdit(Field::Line, edit), &yz, "");
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "find", "query": "n", "previous": false})
+        );
+        let effects = ui.msg(Msg::FieldSend(Field::Line, "no".to_owned()), &yz, "");
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "find", "query": "no", "previous": false})
+        );
+        assert_eq!(ui.mode, Mode::Normal);
     }
 
     #[test]
@@ -1241,7 +1223,7 @@ mod tests {
             assert_eq!(
                 ui.mode,
                 Mode::Command {
-                    query: String::new(),
+                    editor: Editor::default(),
                     block
                 }
             );

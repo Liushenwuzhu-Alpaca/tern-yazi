@@ -530,6 +530,14 @@ impl Harness {
             .map(|_| ())
     }
 
+    /// Empties the open input line: Ctrl+A moves to the start, Ctrl+K kills to the end.
+    fn clear_line(&self, pane: u64) -> TestResult<()> {
+        for chord in ["ctrl+a", "ctrl+k"] {
+            self.cli(&["send", &pane.to_string(), "keys", chord])?;
+        }
+        Ok(())
+    }
+
     /// The window's panes, tabs and layout trees, as the fixture plugin observes them.
     fn layout_state(&self) -> TestResult<Value> {
         self.ctl("plugins", &["run", "plugin.layout-fixture.inspect"])?;
@@ -1720,6 +1728,8 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
                 .is_some_and(|y| (y - idle_y).abs() < 1.0)
         },
     )?;
+    // The first Escape only leaves insert mode; the second cancels the line.
+    h.key("Escape")?;
     h.key("Escape")?;
     h.expect_ui(
         "[data-role=\"yazi.input-row\"]",
@@ -1809,8 +1819,10 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
         },
     )?;
     h.key("Escape")?;
+    h.key("Escape")?;
     h.click_target("[data-role=\"yazi.path-edit\"]")?;
     h.paste(first.owner, "/does/not/exist/tern-yazi")?;
+    h.key("Escape")?;
     h.key("Escape")?;
     h.expect_ui(
         crumbs,
@@ -1902,6 +1914,7 @@ fn interaction_flow(h: &mut Harness) -> TestResult<()> {
     h.expect_state(&first, "rejected file path does not change cwd", |s| {
         s["cwd"] == breadcrumb_root
     })?;
+    h.key("Escape")?;
     h.key("Escape")?;
     h.open_path_editor(&breadcrumb_root)?;
     h.paste(first.owner, &text(&first.cwd))?;
@@ -3474,6 +3487,7 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
     )?;
     // Cancel with Escape
     h.key("Escape")?;
+    h.key("Escape")?;
     h.expect_ui(
         "[data-role=\"yazi.command-bubble.create\"]",
         "Escape dismisses create bar",
@@ -3507,11 +3521,29 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
         "rename prompt bar opens with prefilled name",
         |v| ui_text(v).contains("created-probe.txt"),
     )?;
-    // Cancel with Escape
+    // First Escape leaves insert mode and keeps the line open; `x` then deletes the
+    // character under the caret in normal mode; the second Escape cancels the rename.
     h.key("Escape")?;
+    h.expect_ui(
+        "[data-role=\"yazi.command-vi\"]",
+        "first Escape switches the rename line to normal mode",
+        |v| ui_text(v).contains("NORMAL"),
+    )?;
+    h.key("x")?;
+    h.expect_ui(
+        "[data-role=\"yazi.command-bubble.rename\"]",
+        "normal-mode x deletes the character under the caret",
+        |v| ui_text(v) == "created-prob.txt",
+    )?;
+    h.key("Escape")?;
+    h.expect_ui(
+        "[data-role=\"yazi.command-bubble.rename\"]",
+        "second Escape cancels the rename line",
+        |v| nodes(v).is_empty(),
+    )?;
     // Re-enter rename mode, clear, type new name, and submit
     h.key("r")?;
-    h.cli(&["send", &first.owner.to_string(), "keys", "ctrl+a"])?;
+    h.clear_line(first.owner)?;
     for key in ["q", "d", "j", "k", "y"] {
         h.key(key)?;
     }
@@ -3520,7 +3552,7 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
         "shortcut letters stay inside rename editor",
         |v| ui_text(v) == "qdjky",
     )?;
-    h.cli(&["send", &first.owner.to_string(), "keys", "ctrl+a"])?;
+    h.clear_line(first.owner)?;
     h.paste(first.owner, "renamed-probe.txt")?;
     h.key("Enter")?;
     let renamed_path = first.cwd.join("renamed-probe.txt");
@@ -3581,7 +3613,7 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
         "rename edits the clicked directory",
         |v| ui_text(v) == "nested",
     )?;
-    h.cli(&["send", &first.owner.to_string(), "keys", "ctrl+a"])?;
+    h.clear_line(first.owner)?;
     h.paste(first.owner, "renamed-directory")?;
     h.key("Enter")?;
     h.expect_state(
@@ -3602,7 +3634,7 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
     ] {
         h.key(if op == "create" { "a" } else { "r" })?;
         if op == "rename" {
-            h.cli(&["send", &first.owner.to_string(), "keys", "ctrl+a"])?;
+            h.clear_line(first.owner)?;
         }
         h.paste(first.owner, name)?;
         h.key("Enter")?;

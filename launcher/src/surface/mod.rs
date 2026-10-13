@@ -3,6 +3,7 @@
 //! through the runtime inbox and `ya emit-to`. Closing the surface returns the shell its prompt.
 
 mod actions;
+mod editor;
 mod format;
 mod handover;
 mod input;

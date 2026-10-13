@@ -70,7 +70,8 @@ Remove the launcher with `sh "$REPO/install.sh" --uninstall` (add `--prefix` for
 | [`launcher/src/surface/mod.rs`](launcher/src/surface/mod.rs) | The single-threaded main loop: TSP session, snapshot reload by stamp, effects, render throttling, blob uploads, the diagnostic log |
 | [`launcher/src/surface/model.rs`](launcher/src/surface/model.rs) | Snapshot parsing (state joined with its listing generation) and pure classification helpers |
 | [`launcher/src/surface/actions.rs`](launcher/src/surface/actions.rs) | Serialized `ya emit-to` requests and bounded reply polling |
-| [`launcher/src/surface/input.rs`](launcher/src/surface/input.rs) | Pure input reducer: keys, modes, UTF-16 editors, confirmation, theme picker; emits effects |
+| [`launcher/src/surface/input.rs`](launcher/src/surface/input.rs) | Pure input reducer: keys, modes, line-mode dispatch, confirmation, theme picker; emits effects |
+| [`launcher/src/surface/editor.rs`](launcher/src/surface/editor.rs) | Pure single-line editor with Yazi's vi insert/normal modes and UTF-16 caret offsets; one entry point, `Editor::key`, returns `Edit::{Unchanged, Changed, Cancel, Submit}` |
 | [`launcher/src/surface/handover.rs`](launcher/src/surface/handover.rs) | Lent terminal: suspends the surface and relays the pane's tty to Yazi's PTY while Yazi is away from its alternate screen |
 | [`launcher/src/surface/view.rs`](launcher/src/surface/view.rs) | Pure view: `(state) -> UI tree` with stable roles and keys |
 | [`launcher/src/surface/format.rs`](launcher/src/surface/format.rs) | Sizes, permissions, tones, icons, breadcrumbs |
@@ -225,8 +226,8 @@ Each theme is self-contained in `themes/<id>.css`, scoped under `[data-role^="ya
 | `p`/`P` | `paste` / `paste --force` |
 | `-`/`_`, Ctrl+- | `link` / `link --relative`, `hardlink` |
 | `d` | Prepare and confirm Trash (section 7) |
-| `a` / `r` | Create / rename editor; Enter submits, Esc cancels |
-| `f` | Smart filter editor (`filter_do`, live) |
+| `a` / `r` | Create / rename line; Enter submits, Esc Esc cancels (vi input, below) |
+| `f` | Smart filter line (`filter_do`, live; every text change, normal-mode edits included, is sent) |
 | `/`/`?`, `n`/`N` | Smart find forward/backward, next/previous match |
 | `:` | Yazi `shell --block`, on the lent terminal (section 3) |
 | `;` | Yazi background shell task |
@@ -237,10 +238,17 @@ Each theme is self-contained in `themes/<id>.css`, scoped under `[data-role^="ya
 | `tt`, `1`-`9`, `[`/`]`, `{`/`}` | New tab, switch to tab, relative switch, swap |
 | Ctrl+C | Close the active Yazi tab |
 | `T` | Theme picker (Yazi leaves `T` unbound) |
-| Esc | Yazi `escape`; cancels local editing or confirmation first |
+| Esc | Yazi `escape`; cancels local editing or confirmation first. In an input line the first Esc leaves insert mode and the second cancels (find and filter lines then clear as before) |
 | `q` | Quit Yazi; the shell prompt returns |
 
-Editors accept printable text, Space, paste and Unicode; editing is UTF-16 aware, Backspace removes one code point, and Home/End/arrows move the caret (Shift extends in rename). A failed submission keeps the editor open. Shell input is passed raw to Yazi, which owns macro expansion (`%h`, `%s`, ...) and quoting. Alt/Meta chords are not claimed.
+Input lines (`:`/`;` shell, `/`/`?` find, `s`/`S` search, `f` filter, `a` create, `r` rename, and the breadcrumb path editor) share one `Editor` ([`editor.rs`](launcher/src/surface/editor.rs)) that mirrors Yazi's `[input]` keymap. A line opens in insert mode; the first Esc switches to normal mode and moves the caret one left, as in vim, and the second Esc (or Ctrl+C) cancels. Enter submits from either mode. A failed submission keeps the line open. Text is UTF-16 aware (the offsets Tern's input node expects); Backspace removes one code point.
+
+| Mode | Keys |
+| --- | --- |
+| Insert | printable text, Space, paste, Unicode; Left/Right/Home/End and Ctrl+B/F/A/E (Shift extends); Backspace/Ctrl+H, Delete/Ctrl+D; Ctrl+U kill to start, Ctrl+K kill to end, Ctrl+W/Alt+Backspace kill word back, Alt+D kill word forward; Alt+B/F word moves |
+| Normal | `i`/`a`/`I`/`A` enter insert (at / after / line start / line end); `h`/`l`, `0`, `$`, `^`/`_`, `w`/`W`, `b`/`B`, `e`/`E`; `x`, `d`/`c`/`y` + motion or doubled (`dd`, `cc`, `yy`), `D`, `C`, `s`, `S`; `p`/`P` paste the line's own register (`d`/`c`/`x`/`y` fill it); `v`/`V` visual select; `r` replace one character; `u` undo, Ctrl+R redo; Esc clears a pending operator or visual selection before cancelling |
+
+The input row shows a `NORMAL` / `VISUAL` / `REPLACE` badge (role `yazi.command-vi`) while not in insert mode, and the input node's selection draws the vi caret as a block over the character under it. Shell, find, search, filter and create lines render as the same native `input` node as path and rename, so clicking into them edits natively (`FieldFocus`/`FieldEdit`/`FieldSend` with `Field::Line`); native typing is insert mode by definition. Shell input is passed raw to Yazi, which owns macro expansion (`%h`, `%s`, ...) and quoting. Alt/Meta chords outside the table are not claimed.
 
 ## 7. Previews and exact-target safety
 
@@ -271,7 +279,7 @@ Invariants to preserve:
 
 ### Unit tests
 
-`cargo test --locked --manifest-path launcher/Cargo.toml --bins` covers the pure parts: argument parsing, the snapshot handshake, snapshot parsing, the input reducer, editors, preview classification and themes.
+`cargo test --locked --manifest-path launcher/Cargo.toml --bins` covers the pure parts: argument parsing, the snapshot handshake, snapshot parsing, the input reducer, the vi line editor, preview classification and themes.
 
 ### Interaction suite
 
