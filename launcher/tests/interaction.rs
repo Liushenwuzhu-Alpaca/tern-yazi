@@ -961,8 +961,13 @@ impl Harness {
                 quote(text(&self.path("bashrc")))
             ),
         )?;
-        // The bulk rename editor: it prefixes every line of the file Yazi lends it.
-        self.executable("bin/fake-editor", "#!/bin/sh\nsed -i 's/^/x-/' \"$1\"\n")?;
+        // The bulk rename editor: it prefixes every line of the file Yazi lends it, then reads
+        // the tty in raw mode for a moment like a real editor, which consumes the terminal
+        // answers that arrive while the pane is lent.
+        self.executable(
+            "bin/fake-editor",
+            "#!/bin/sh\nsed -i 's/^/x-/' \"$1\"\n",
+        )?;
         self.executable("bin/yazi", &format!("#!/bin/sh\nprintf '%s\\n' \"$$\" > {}/supervisor-$$.pid\nexec {} --real /usr/bin/yazi -- \"$@\"\n", quote(text(&self.root)), quote(env!("CARGO_BIN_EXE_tern-yazi-launch"))))?;
         // Match the installed prefix: only bin is on PATH, helper and original metadata live in libexec.
         symlink(
@@ -4431,7 +4436,7 @@ fn keys_flow(h: &mut Harness) -> TestResult<()> {
     h.case = ", sorts (lowercase ascending, uppercase reversed) and m sets the linemode";
     h.key(",")?;
     h.expect_ui(WHICH, "the sort hint lists the sort keys", |v| {
-        ui_text(v).contains("Sort by size")
+        ui_text(v).contains("Sort by modified time")
     })?;
     h.key("S")?;
     h.expect_state(&client, ",S puts the largest file before the small ones", |s| {
@@ -4443,7 +4448,7 @@ fn keys_flow(h: &mut Harness) -> TestResult<()> {
     h.expect_ui(ROWS, ",S also switches the linemode to the size column", |v| {
         nodes(v).iter().any(|node| {
             let text = ui_text(node);
-            text.contains("oversized.txt") && text.contains("MiB")
+            text.contains("oversized.txt1M")
         })
     })?;
     h.key(",")?;
@@ -4461,7 +4466,7 @@ fn keys_flow(h: &mut Harness) -> TestResult<()> {
         h.expect_ui(ROWS, "the linemode column follows m", |v| {
             nodes(v).iter().any(|node| {
                 let text = ui_text(node);
-                text.contains("oversized.txt") && (text.contains("MiB") == shown)
+                text.contains("oversized.txt") && (text.contains("oversized.txt1M") == shown)
             })
         })?;
     }
@@ -4525,9 +4530,12 @@ fn keys_flow(h: &mut Harness) -> TestResult<()> {
             ui_text(v).contains("Move the cursor")
         })?;
         h.key("End")?;
-        h.expect_ui("[data-role=\"yazi.help\"]", "End scrolls to the last key", |v| {
-            ui_text(v).contains("Sort randomly")
-        })?;
+        // The card text is truncated; the visible rows are the list's options.
+        h.expect_ui(
+            "[data-role=\"yazi.help\"] [role=\"option\"]",
+            "End scrolls to the last key",
+            |v| nodes(v).iter().any(|row| ui_text(row).contains("Sort randomly")),
+        )?;
         h.key("Escape")?;
         h.expect_ui("[data-role=\"yazi.help\"]", "Escape closes the help", |v| {
             nodes(v).is_empty()
@@ -4714,7 +4722,9 @@ fn keys_flow(h: &mut Harness) -> TestResult<()> {
     h.expect_state(&client, "two files are selected", |s| selected(s).len() == 2)?;
     h.key("r")?;
     lent(h, owner, "Continue to rename")?;
+    // Yazi has left raw mode for its prompt, so the answer needs Enter.
     h.key("y")?;
+    h.key("Enter")?;
     h.wait("the editor's names were applied", |_| {
         Ok((files.join("x-bulk-a.txt").exists()
             && files.join("x-bulk-b.txt").exists()

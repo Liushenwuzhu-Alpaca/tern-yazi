@@ -614,7 +614,7 @@ local function openers_for(paths)
 	local common
 	for i, file in ipairs(files) do
 		local names
-		for _, rule in pairs(rt.open:match({ file = file, mime = mimes[i] })) do
+		for _, rule in pairs(rt.open.rules:match({ file = file, mime = mimes[i] })) do
 			names = {}
 			for _, name in ipairs(rule["use"]) do names[#names + 1] = name end
 			break
@@ -642,7 +642,7 @@ local function openers_for(paths)
 					seen[key] = true
 					local desc = rule.desc
 					if desc == nil or desc == "" then desc = tostring(rule.run):match("^%S+") or "" end
-					rows[#rows + 1] = { tostring(rule.id), desc, rule.run }
+					rows[#rows + 1] = { tostring(rule.id.value), desc, rule.run }
 				end
 			end
 		end
@@ -653,7 +653,7 @@ end
 local function find_opener(id)
 	for _, rules in pairs(rt.opener) do
 		for _, rule in pairs(rules:match()) do
-			if tostring(rule.id) == id then return rule end
+			if tostring(rule.id.value) == id then return rule end
 		end
 	end
 end
