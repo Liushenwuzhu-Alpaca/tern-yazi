@@ -910,6 +910,8 @@ impl Harness {
             "files/copydest",
             "files/cutdest",
             "other",
+            "home/Downloads",
+            "home/.config",
             "fixture",
         ] {
             fs::create_dir_all(self.path(dir)).map_err(|e| e.to_string())?;
@@ -944,6 +946,9 @@ impl Harness {
             ("XDG_RUNTIME_DIR", text(&self.path("runtime"))),
             ("XDG_DATA_HOME", text(&self.path("data"))),
             ("XDG_CACHE_HOME", text(&self.path("cache"))),
+            // The g-prefix jumps (`gh`, `gc`, `gd`) are relative to the home directory.
+            ("HOME", text(&self.path("home"))),
+            ("EDITOR", text(&self.path("bin/fake-editor"))),
         ] {
             bashrc.push_str(&format!("export {key}={}\n", quote(value)));
         }
@@ -956,6 +961,8 @@ impl Harness {
                 quote(text(&self.path("bashrc")))
             ),
         )?;
+        // The bulk rename editor: it prefixes every line of the file Yazi lends it.
+        self.executable("bin/fake-editor", "#!/bin/sh\nsed -i 's/^/x-/' \"$1\"\n")?;
         self.executable("bin/yazi", &format!("#!/bin/sh\nprintf '%s\\n' \"$$\" > {}/supervisor-$$.pid\nexec {} --real /usr/bin/yazi -- \"$@\"\n", quote(text(&self.root)), quote(env!("CARGO_BIN_EXE_tern-yazi-launch"))))?;
         // Match the installed prefix: only bin is on PATH, helper and original metadata live in libexec.
         symlink(
@@ -3653,6 +3660,23 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
         }
         h.paste(first.owner, name)?;
         h.key("Enter")?;
+        if matches!(name, "copy.txt" | "beta.txt") {
+            // An existing destination is Yazi's `Overwrite file?`; cancelling returns to the
+            // line, which Escape twice then closes. Nothing was overwritten.
+            h.expect_ui(
+                "[data-role=\"yazi.overwrite-confirm\"]",
+                "an existing destination asks before overwriting",
+                |v| {
+                    let text = ui_text(v);
+                    text.contains("Overwrite file?")
+                        && text.contains("Will overwrite the following file:")
+                        && text.contains(&format!("/{name}"))
+                },
+            )?;
+            for _ in 0..3 {
+                h.key("Escape")?;
+            }
+        }
         // Notices live in the surface's input row, outside the file lists, so the
         // observable contract is the authoritative no-op: cursor, listing and
         // bytes stay exactly as they were.
@@ -4360,5 +4384,357 @@ fn real_notice_interactions() {
     let mut harness = Harness::new()
         .unwrap_or_else(|error| panic!("Real interaction prerequisites/setup failed: {error}"));
     let result = notice_flow(&mut harness);
+    conclude(&mut harness, result);
+}
+
+const WHICH: &str = "[data-role=\"yazi.which\"]";
+const TAB_BAR: &str = "[data-role=\"yazi.tab-bar\"]";
+
+fn position(state: &Value, name: &str) -> Option<usize> {
+    names(state, "files").iter().position(|file| file == name)
+}
+
+/// The sort, linemode, goto, tab, delete, opener, spot, help, hint, overwrite and bulk rename keys.
+fn keys_flow(h: &mut Harness) -> TestResult<()> {
+    let marker = h.path("opened-with.txt");
+    let config = fs::read_to_string(h.path("yazi/yazi.toml")).map_err(|e| e.to_string())?;
+    h.write_fixture(
+        "yazi/yazi.toml",
+        format!(
+            "{config}\n[opener]\nprobe = [{{ run = \"echo %s > {}\", desc = \"Probe\" }}]\n\n[open]\nprepend_rules = [{{ url = \"*.md\", use = [\"probe\", \"edit\"] }}]\n",
+            text(&marker)
+        ),
+    )?;
+    for (name, data) in [
+        ("over.txt", "OLD\n"),
+        ("ren-src.txt", "SRC\n"),
+        ("over2.txt", "OLD2\n"),
+        ("perm.txt", "PERM\n"),
+        ("bulk-a.txt", "A\n"),
+        ("bulk-b.txt", "B\n"),
+    ] {
+        h.write_fixture(&format!("files/{name}"), data)?;
+    }
+    let client = h.launch(h.path("files"), true)?;
+    let files = client.cwd.clone();
+    let owner = client.owner;
+
+    h.case = "a prefix key shows the keys that can follow it; Escape clears the hint";
+    h.key("g")?;
+    h.expect_ui(WHICH, "g lists its second keys", |v| {
+        let text = ui_text(v);
+        text.contains("Go to the home directory") && text.contains("Jump to a typed path")
+    })?;
+    h.key("Escape")?;
+    h.expect_ui(WHICH, "Escape clears the hint", |v| nodes(v).is_empty())?;
+
+    h.case = ", sorts (lowercase ascending, uppercase reversed) and m sets the linemode";
+    h.key(",")?;
+    h.expect_ui(WHICH, "the sort hint lists the sort keys", |v| {
+        ui_text(v).contains("Sort by size")
+    })?;
+    h.key("S")?;
+    h.expect_state(&client, ",S puts the largest file before the small ones", |s| {
+        matches!(
+            (position(s, "oversized.txt"), position(s, "Alpha.txt")),
+            (Some(big), Some(small)) if big < small
+        )
+    })?;
+    h.expect_ui(ROWS, ",S also switches the linemode to the size column", |v| {
+        nodes(v).iter().any(|node| {
+            let text = ui_text(node);
+            text.contains("oversized.txt") && text.contains("MiB")
+        })
+    })?;
+    h.key(",")?;
+    h.key("s")?;
+    h.expect_state(&client, ",s puts the largest file last", |s| {
+        matches!(
+            (position(s, "oversized.txt"), position(s, "ren-src.txt")),
+            (Some(big), Some(small)) if big > small
+        )
+    })?;
+    for (keys, shown) in [(["m", "n"], false), (["m", "s"], true)] {
+        for key in keys {
+            h.key(key)?;
+        }
+        h.expect_ui(ROWS, "the linemode column follows m", |v| {
+            nodes(v).iter().any(|node| {
+                let text = ui_text(node);
+                text.contains("oversized.txt") && (text.contains("MiB") == shown)
+            })
+        })?;
+    }
+    h.key(",")?;
+    h.key("a")?;
+    h.expect_state(&client, ",a restores the alphabetical order", |s| {
+        matches!(
+            (position(s, "oversized.txt"), position(s, "ren-src.txt")),
+            (Some(big), Some(small)) if big < small
+        )
+    })?;
+    h.key("m")?;
+    h.key("n")?;
+
+    h.case = "gh, gc and gd go to the home directory, ~/.config and ~/Downloads; g Space types a path";
+    for (second, dir) in [("h", "home"), ("c", "home/.config"), ("d", "home/Downloads")] {
+        h.key("g")?;
+        h.key(second)?;
+        let expected = text(&h.path(dir));
+        h.expect_state(&client, &format!("g{second} goes to {expected}"), |s| {
+            s["cwd"] == expected
+        })?;
+    }
+    h.key("g")?;
+    h.key("Space")?;
+    let downloads = text(&h.path("home/Downloads"));
+    h.expect_ui(
+        "[data-role=\"yazi.path-input\"]",
+        "g Space opens the path editor on the current directory",
+        |v| ui_text(v).contains(&downloads),
+    )?;
+    h.clear_line(owner)?;
+    h.paste(owner, &text(&files))?;
+    h.key("Enter")?;
+    h.expect_state(&client, "the typed path is entered", |s| s["cwd"] == text(&files))?;
+
+    h.case = "t r renames the tab and the tab bar shows the name";
+    h.key("t")?;
+    h.key("t")?;
+    h.expect_ui(TAB_BAR, "tt opens a second tab", |v| !nodes(v).is_empty())?;
+    h.key("t")?;
+    h.key("r")?;
+    h.expect_ui(
+        "[data-role=\"yazi.command-bubble.tab-rename\"]",
+        "t r opens the tab name line",
+        |v| nodes(v).len() == 1,
+    )?;
+    h.clear_line(owner)?;
+    h.paste(owner, "work")?;
+    h.key("Enter")?;
+    h.expect_ui(TAB_BAR, "the tab bar shows the new name", |v| {
+        ui_text(v).contains("work")
+    })?;
+    h.cli(&["send", &owner.to_string(), "keys", "ctrl+c"])?;
+    h.expect_ui(TAB_BAR, "the second tab closes", |v| nodes(v).is_empty())?;
+
+    h.case = "~ and F1 show the help generated from the key tables; Escape closes it";
+    for opener in ["~", "F1"] {
+        h.key(opener)?;
+        h.expect_ui("[data-role=\"yazi.help\"]", "the help layer opens", |v| {
+            ui_text(v).contains("Move the cursor")
+        })?;
+        h.key("End")?;
+        h.expect_ui("[data-role=\"yazi.help\"]", "End scrolls to the last key", |v| {
+            ui_text(v).contains("Sort randomly")
+        })?;
+        h.key("Escape")?;
+        h.expect_ui("[data-role=\"yazi.help\"]", "Escape closes the help", |v| {
+            nodes(v).is_empty()
+        })?;
+    }
+
+    h.case = "O lists the openers of the hovered file and runs the picked one";
+    h.click_file(&client, "notes.md")?;
+    h.key("O")?;
+    h.expect_ui("[data-role=\"yazi.open-picker\"]", "O lists the openers", |v| {
+        let text = ui_text(v);
+        text.contains("Open with:") && text.contains("Probe")
+    })?;
+    h.key("Enter")?;
+    h.wait("the picked opener ran on the hovered file", |_| {
+        Ok(fs::read_to_string(&marker)
+            .ok()
+            .filter(|out| out.trim() == text(&files.join("notes.md")))
+            .map(|_| ()))
+    })?;
+    h.expect_ui("[data-role=\"yazi.open-picker\"]", "the picker closes", |v| {
+        nodes(v).is_empty()
+    })?;
+
+    h.case = "Tab spots the hovered file; cc copies the selected cell";
+    let mime = Command::new("file")
+        .args(["-bL", "--mime-type"])
+        .arg(files.join("notes.md"))
+        .output()
+        .map_err(|e| format!("file is required: {e}"))?;
+    let mime = String::from_utf8_lossy(&mime.stdout).trim().replace("/x-", "/");
+    let saved = Command::new("wl-paste")
+        .arg("--no-newline")
+        .output()
+        .map_err(|e| format!("wl-paste is required: {e}"))?;
+    h.key("Tab")?;
+    h.expect_ui("[data-role=\"yazi.spot\"]", "Tab opens the spot table", |v| {
+        let text = ui_text(v);
+        text.contains("Mimetype") && text.contains("Permissions") && text.contains(&mime)
+    })?;
+    let copied = (|| -> TestResult<()> {
+        // The cursor starts on Created; Mimetype is two rows below.
+        h.key("j")?;
+        h.key("j")?;
+        h.key("c")?;
+        h.expect_ui(WHICH, "c shows the cell copy hint", |v| {
+            ui_text(v).contains("Copy the selected cell")
+        })?;
+        h.key("c")?;
+        h.wait(&format!("the clipboard holds {mime}"), |_| {
+            let clip = Command::new("wl-paste")
+                .arg("--no-newline")
+                .output()
+                .map_err(|e| e.to_string())?;
+            Ok((clip.stdout == mime.as_bytes()).then_some(()))
+        })
+    })();
+    let mut restore = Command::new("wl-copy");
+    if saved.status.success() {
+        restore.stdin(Stdio::piped());
+    } else {
+        restore.arg("--clear").stdin(Stdio::null());
+    }
+    let mut restore = restore
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    if let Some(mut stdin) = restore.stdin.take() {
+        stdin.write_all(&saved.stdout).map_err(|e| e.to_string())?;
+    }
+    restore.wait().map_err(|e| e.to_string())?;
+    copied?;
+    h.key("Tab")?;
+    h.expect_ui("[data-role=\"yazi.spot\"]", "Tab closes the spot table", |v| {
+        nodes(v).is_empty()
+    })?;
+
+    h.case = "D confirms before it deletes for good; Escape deletes nothing";
+    h.click_file(&client, "perm.txt")?;
+    h.key("D")?;
+    h.expect_ui(
+        "[data-role=\"yazi.delete-confirm\"]",
+        "D asks for confirmation naming the exact path",
+        |v| {
+            let text = ui_text(v);
+            text.contains("Permanently delete") && text.contains("perm.txt")
+        },
+    )?;
+    h.key("Escape")?;
+    h.expect_ui(
+        "[data-role=\"yazi.delete-confirm\"]",
+        "Escape closes the confirmation",
+        |v| nodes(v).is_empty(),
+    )?;
+    if !files.join("perm.txt").exists() {
+        return Err("Cancelling the permanent delete removed the file".into());
+    }
+    h.key("D")?;
+    h.expect_ui(
+        "[data-role=\"yazi.delete-confirm\"]",
+        "D asks again",
+        |v| !nodes(v).is_empty(),
+    )?;
+    h.key("Enter")?;
+    h.expect_state(&client, "the file is gone from the listing", |s| {
+        position(s, "perm.txt").is_none()
+    })?;
+    let trashed = h.path("data/Trash/files/perm.txt");
+    if files.join("perm.txt").exists() || trashed.exists() {
+        return Err("Permanent delete left the file or moved it to the trash".into());
+    }
+
+    h.case = "a create onto an existing file or directory asks before overwriting";
+    h.key("a")?;
+    h.paste(owner, "over.txt")?;
+    h.key("Enter")?;
+    h.expect_ui(
+        "[data-role=\"yazi.overwrite-confirm\"]",
+        "an existing file asks to overwrite",
+        |v| {
+            let text = ui_text(v);
+            text.contains("Overwrite file?")
+                && text.contains("Will overwrite the following file:")
+                && text.contains(&text_of(&files.join("over.txt")))
+        },
+    )?;
+    h.key("Escape")?;
+    h.expect_ui(
+        "[data-role=\"yazi.command-bubble.create\"]",
+        "cancelling returns to the create line with the typed name",
+        |v| ui_text(v) == "over.txt",
+    )?;
+    h.key("Enter")?;
+    h.expect_ui(
+        "[data-role=\"yazi.overwrite-confirm\"]",
+        "the same name asks again",
+        |v| !nodes(v).is_empty(),
+    )?;
+    h.key("Enter")?;
+    h.wait("confirming truncates the file", |_| {
+        Ok((fs::metadata(files.join("over.txt")).is_ok_and(|m| m.len() == 0)).then_some(()))
+    })?;
+    h.key("a")?;
+    h.paste(owner, "child/")?;
+    h.key("Enter")?;
+    h.expect_ui(
+        "[data-role=\"yazi.overwrite-confirm\"]",
+        "an existing directory asks too",
+        |v| !nodes(v).is_empty(),
+    )?;
+    h.key("Enter")?;
+    h.expect_ui(
+        "[data-role=\"yazi.overwrite-confirm\"]",
+        "confirming closes the layer",
+        |v| nodes(v).is_empty(),
+    )?;
+    if !files.join("child/inside.txt").is_file() {
+        return Err("Overwriting a directory with a directory lost its contents".into());
+    }
+
+    h.case = "a rename onto an existing file asks before overwriting";
+    h.click_file(&client, "ren-src.txt")?;
+    h.key("r")?;
+    h.clear_line(owner)?;
+    h.paste(owner, "over2.txt")?;
+    h.key("Enter")?;
+    h.expect_ui(
+        "[data-role=\"yazi.overwrite-confirm\"]",
+        "the rename asks to overwrite",
+        |v| ui_text(v).contains(&text_of(&files.join("over2.txt"))),
+    )?;
+    h.key("Enter")?;
+    h.wait("the rename replaced the destination", |_| {
+        Ok((fs::read_to_string(files.join("over2.txt")).ok().as_deref() == Some("SRC\n")
+            && !files.join("ren-src.txt").exists())
+        .then_some(()))
+    })?;
+
+    h.case = "r on a selection runs Yazi's bulk rename on the lent terminal";
+    h.click_file(&client, "bulk-a.txt")?;
+    h.key("Space")?;
+    h.key("Space")?;
+    h.expect_state(&client, "two files are selected", |s| selected(s).len() == 2)?;
+    h.key("r")?;
+    lent(h, owner, "Continue to rename")?;
+    h.key("y")?;
+    h.wait("the editor's names were applied", |_| {
+        Ok((files.join("x-bulk-a.txt").exists()
+            && files.join("x-bulk-b.txt").exists()
+            && !files.join("bulk-a.txt").exists())
+        .then_some(()))
+    })?;
+    h.expect_ui(SURFACE_BROWSER, "the surface returns after the bulk rename", |v| {
+        !nodes(v).is_empty()
+    })?;
+    Ok(())
+}
+
+fn text_of(path: &Path) -> String {
+    text(path)
+}
+
+#[test]
+fn real_keys_interactions() {
+    let mut harness = Harness::new()
+        .unwrap_or_else(|error| panic!("Real interaction prerequisites/setup failed: {error}"));
+    let result = keys_flow(&mut harness);
     conclude(&mut harness, result);
 }
