@@ -128,6 +128,17 @@ Yazi's PTY follows the pane's real size. While a program surface is live, Tern f
 
 Yazi leaves its alternate screen whenever it lends its terminal to a subprocess: `shell --block`, `ui.hide()` plugins such as `z` (fzf) and `Z` (zoxide), and task inspection. The backend watches Yazi's output for `ESC [ ? 1049 l`/`h` ([`backend.rs`](launcher/src/backend.rs) `Lent`); in between, [`surface/handover.rs`](launcher/src/surface/handover.rs) suspends the surface (TSP `suspend`), turns off the session's kitty-keys and bracketed-paste modes, writes Yazi's output to the pane and types the pane's input (minus TSP messages) into Yazi's PTY. When Yazi re-enters its alternate screen, the modes and the surface resume. The subprocess's output stays in the pane's scrollback, visible after Yazi quits, as with Yazi itself.
 
+### Suspend (Ctrl+Z)
+
+Yazi's `suspend` restores its terminal, stops its process group and returns to the shell; `fg` resumes and redraws. The launcher reproduces it for the pane. Raw mode disables the tty's own job-control keys, so the key arrives as a request (`Effect::Suspend`, or an external `SIGTSTP`, which `sys.rs` catches as the same request instead of stopping the process under the surface). The main loop then, in `App::suspend`:
+
+1. closes the TSP session: the surface (`keep(false)`) disappears, the input modes are reset and the tty gets back the attributes the shell left it with;
+2. sends `SIGSTOP` to Yazi's private process group, so its tasks pause;
+3. stops its own group with `SIGTSTP` under the default disposition, which the shell reports as a stopped job. A group the shell has orphaned discards the stop, so the browser then comes straight back rather than hanging with nobody to continue it;
+4. on `SIGCONT`, sends `SIGCONT` to Yazi, attaches a fresh session (`attach`: handshake, raw mode, surface, stylesheets), forgets the cached preview (blob ids belong to the old session) and forces a full redraw.
+
+A new session is needed: Tern ends the old one's surface once the shell is back at its prompt, and the old session's `resume` has no effect. `SIGINT`/`SIGTERM`/`SIGHUP` remain the only termination signals; `SIGTSTP`/`SIGCONT` never end the loop. Ctrl+Z during the lent terminal goes to Yazi's subprocess, not to this path.
+
 ### Palette entry and Ctrl+Alt+Y
 
 The optional Tern plugin is only [`window.luau`](window.luau): one palette command, `Yazi: Open File Browser` (`plugin.tern-yazi.open`), with the default chord `ctrl+alt+y`. It splits the focused pane to the right with `{cwd = <that pane's cwd>, command = "yazi"}` (a new tab when nothing is focused). The new pane's `yazi` is the installed wrapper, so the browser draws there like any other launch and the pane closes when Yazi quits.
@@ -237,6 +248,7 @@ Each theme is self-contained in `themes/<id>.css`, scoped under `[data-role^="ya
 | `.` | Toggle hidden files |
 | `tt`, `1`-`9`, `[`/`]`, `{`/`}` | New tab, switch to tab, relative switch, swap |
 | Ctrl+C | Close the active Yazi tab |
+| Ctrl+Z | Yazi `suspend`: the browser and Yazi stop, the shell regains the pane and `fg` brings the browser back (section 3) |
 | `T` | Theme picker (Yazi leaves `T` unbound) |
 | Esc | Yazi `escape`; cancels local editing or confirmation first. In an input line the first Esc leaves insert mode and the second cancels (find and filter lines then clear as before) |
 | `q` | Quit Yazi; the shell prompt returns |
@@ -297,6 +309,7 @@ cargo test --locked --manifest-path launcher/Cargo.toml --test interaction -- --
 | `real_browser_shortcuts` | Yank/cut/paste, tabs, create/rename, links |
 | `real_surface_interactions` | Theme picker and all 8 themes, layout after splits, `q` back to the same shell |
 | `real_window_interactions` | Opens in Tern (`o`, Enter, multi-select, double-click), `W`, `cc`/`cf` clipboard, `:` macros and cwd through Yazi, palette entry and the Ctrl+Alt+Y action |
+| `real_parity_interactions` | Yazi parity: recursive search, lent terminal (`:`, fzf, zoxide, task log), task manager, Ctrl+Z suspend and `fg` (also an external `SIGTSTP`), `q` |
 
 `tern ctl key` does not go through the window keymap (built-in chords such as Ctrl+Shift+T do not fire either), so the Ctrl+Alt+Y case checks the chord in the palette row and runs the bound action by name. Missing prerequisites fail instead of skipping. Successful runs remove their roots; failures keep `failure.txt`, the window log, `surface.log` and screenshots. `TERN_YAZI_KEEP_INTERACTION_ARTIFACTS=1` keeps a successful run; `TERN_YAZI_TEST_WINDOW_HOOK=/path/to/executable` can place the owned window (`<pid> <root> start|stop`).
 

@@ -123,6 +123,8 @@ pub(crate) enum Effect {
     Terminal(String),
     Copy(String),
     Quit,
+    /// Stops the browser and Yazi and returns the shell, until `fg` (Yazi's `suspend`).
+    Suspend,
 }
 
 /// Yazi's answer to one request.
@@ -548,6 +550,7 @@ impl Ui {
                 "a" => return vec![action("toggle_all", &[], json!({"state": "on"}))],
                 "r" => return vec![action("toggle_all", &[], json!({}))],
                 "c" => return vec![action("close", &[], json!({}))],
+                "z" => return vec![Effect::Suspend],
                 "s" => return vec![action("escape", &[], json!({"search": true}))],
                 _ if minus && !key.shift => return vec![action("hardlink", &[], json!({}))],
                 "d" | "u" | "f" | "b" => {}
@@ -1212,6 +1215,11 @@ mod tests {
             json!(["2"])
         );
         assert_eq!(ui.key(&key("q"), &yz, ""), vec![Effect::Quit]);
+        let suspend = Key {
+            ctrl: true,
+            ..Key::named("z")
+        };
+        assert_eq!(ui.key(&suspend, &yz, ""), vec![Effect::Suspend]);
     }
 
     #[test]

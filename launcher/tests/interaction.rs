@@ -4060,6 +4060,75 @@ fn parity_flow(h: &mut Harness) -> TestResult<()> {
         s["cwd"] == root
     })?;
 
+    h.case = "Ctrl+Z stops the browser and Yazi and returns the shell; fg restores a working browser";
+    let state_of = |p: Process| process(p.pid).map(|(_, _, state)| state);
+    h.cli(&["send", &client.owner.to_string(), "keys", "ctrl+z"])?;
+    h.wait("the launcher and Yazi are stopped by Ctrl+Z", |_| {
+        let (launcher, yazi) = (state_of(client.supervisor), state_of(client.backend));
+        if launcher == Some('T') && yazi == Some('T') {
+            Ok(Some(()))
+        } else {
+            Err(format!("launcher state {launcher:?}, Yazi state {yazi:?}"))
+        }
+    })?;
+    h.shell_prompt(client.owner)?;
+    h.wait("the surface is gone and the shell reports the stopped job", |h| {
+        if !nodes(&h.tree(SURFACE_BROWSER)?).is_empty() {
+            return Err("program surface still drawn".into());
+        }
+        let screen = h.capture(client.owner)?;
+        // The job notice is localized; its job-table prefix is not.
+        Ok(screen.contains("[1]+").then_some(()))
+    })?;
+    let alive = h.path("suspend-alive.txt");
+    h.cli(&[
+        "run",
+        &client.owner.to_string(),
+        &format!("printf 'shell usable\\n' > {}", quote(text(&alive))),
+    ])?;
+    h.wait("the shell runs commands while the browser is stopped", |_| {
+        Ok(fs::read_to_string(&alive)
+            .ok()
+            .filter(|s| s == "shell usable\n")
+            .map(|_| ()))
+    })?;
+    h.cli(&["run", &client.owner.to_string(), "fg"])?;
+    h.wait("fg continues the launcher and Yazi", |_| {
+        let (launcher, yazi) = (state_of(client.supervisor), state_of(client.backend));
+        if launcher.is_some_and(|s| s != 'T') && yazi.is_some_and(|s| s != 'T') {
+            Ok(Some(()))
+        } else {
+            Err(format!("launcher state {launcher:?}, Yazi state {yazi:?}"))
+        }
+    })?;
+    h.expect_ui(SURFACE_BROWSER, "the surface returns after fg", |v| {
+        !nodes(v).is_empty()
+    })?;
+    let before = h.snapshot(&client);
+    let last = names(&before, "files").last().cloned().unwrap_or_default();
+    let step = if hover(&before).ends_with(&last) { "k" } else { "j" };
+    let from = hover(&before);
+    h.key(step)?;
+    h.expect_state(&client, "keys reach the continued Yazi after fg", |s| {
+        hover(s) != from
+    })?;
+    // An external stop request suspends the same way instead of stopping the process under the
+    // surface.
+    client.supervisor.signal(libc::SIGTSTP);
+    h.wait("an external SIGTSTP stops the launcher and Yazi", |_| {
+        let (launcher, yazi) = (state_of(client.supervisor), state_of(client.backend));
+        if launcher == Some('T') && yazi == Some('T') {
+            Ok(Some(()))
+        } else {
+            Err(format!("launcher state {launcher:?}, Yazi state {yazi:?}"))
+        }
+    })?;
+    h.shell_prompt(client.owner)?;
+    h.cli(&["run", &client.owner.to_string(), "fg"])?;
+    h.expect_ui(SURFACE_BROWSER, "the surface returns after the second fg", |v| {
+        !nodes(v).is_empty()
+    })?;
+
     h.case = "q quits; the blocking command's output stays in the pane, as with Yazi";
     let watched = descendants(client.supervisor);
     h.owned.extend(watched.iter().copied());
