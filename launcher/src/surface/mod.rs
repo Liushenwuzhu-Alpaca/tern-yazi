@@ -351,7 +351,8 @@ impl App {
     }
 
     fn reply(&mut self, then: input::Then, reply: input::Reply) {
-        if !reply.ok {
+        // An existing destination is a question for the overwrite layer, not a failure.
+        if !reply.ok && !reply.exists {
             if !reply.rejected {
                 self.actions.clear();
                 self.ui.reset();

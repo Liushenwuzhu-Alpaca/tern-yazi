@@ -8,7 +8,7 @@ use tern_sdk::ui::{self, Node, Span, View};
 
 use super::editor::Editor;
 use super::format::{self, path_segments};
-use super::input::{Field, FieldEdit, Level, List, Mode, Msg, Ui};
+use super::input::{help_rows, key_label, Field, FieldEdit, Hint, Level, List, Mode, Msg, Ui};
 use super::model::{basename, join_path, parent_dir, relative, Folder, Snapshot, TaskManager};
 use super::preview::{Blob, Load, Preview, Stamp};
 use super::theme::{self, Theme, THEMES};
@@ -25,6 +25,7 @@ fn list_id(list: List) -> String {
         List::Files => format!("{BROWSER}.columns.current.files_list"),
         List::Child => format!("{BROWSER}.columns.preview.child_list"),
         List::Themes => "layer.theme.region.themes.list".to_owned(),
+        List::Layer => "layer.theme.region.layer.list".to_owned(),
     }
 }
 
@@ -133,6 +134,11 @@ pub(crate) fn view(frame: &Frame) -> View<Msg> {
     let layer = match &frame.ui.mode {
         Mode::Trash(paths) => Some(trash_layer(paths, frame.rows)),
         Mode::Quit { count, titles, .. } => Some(quit_layer(*count, titles)),
+        Mode::Delete(paths) => Some(delete_layer(paths, frame.rows)),
+        Mode::Overwrite { target, .. } => Some(overwrite_layer(target)),
+        Mode::Open { rows, at, .. } => Some(open_layer(rows, *at, frame.rows)),
+        Mode::Spot { rows, at } => Some(spot_layer(rows, *at, frame.rows)),
+        Mode::Help { at } => Some(help_layer(*at, frame.rows)),
         Mode::Theme { at, .. } => Some(theme_layer(*at)),
         Mode::Tasks => Some(tasks_layer(&yz.task_manager)),
         _ => path_layer,
@@ -206,6 +212,39 @@ fn quit_layer(count: u64, titles: &[String]) -> N {
 }
 
 fn trash_layer(paths: &[String], rows: u32) -> N {
+    paths_layer(
+        "trash",
+        "yazi.trash-confirm",
+        "Move these exact paths to Trash? Cancel changes nothing.",
+        "Move to Trash [Enter]",
+        "warn",
+        paths,
+        rows,
+    )
+}
+
+/// Permanent deletion: its own wording and tone, so it cannot pass for the Trash prompt.
+fn delete_layer(paths: &[String], rows: u32) -> N {
+    paths_layer(
+        "delete",
+        "yazi.delete-confirm",
+        "Permanently delete these exact paths? This cannot be undone.",
+        "Delete permanently [Enter]",
+        "error",
+        paths,
+        rows,
+    )
+}
+
+fn paths_layer(
+    key: &str,
+    role: &str,
+    question: &str,
+    confirm: &str,
+    tone: &str,
+    paths: &[String],
+    rows: u32,
+) -> N {
     let items = paths.iter().enumerate().map(|(index, path)| {
         ui::item(serde_json::to_string(path).unwrap_or_default()).key((index + 1).to_string())
     });
@@ -214,11 +253,9 @@ fn trash_layer(paths: &[String], rows: u32) -> N {
         .max_lines(rows.saturating_sub(8).max(4))
         .children(items);
     ui::node("card")
-        .key("trash")
-        .role("yazi.trash-confirm")
-        .child(ui::text(
-            "Move these exact paths to Trash? Cancel changes nothing.",
-        ))
+        .key(key)
+        .role(role)
+        .child(ui::text(question))
         .child(list)
         .child(
             ui::row()
@@ -228,11 +265,148 @@ fn trash_layer(paths: &[String], rows: u32) -> N {
                     ui::node("el")
                         .prop("tag", "button")
                         .key("confirm")
-                        .tone("warn")
-                        .child(ui::text("Move to Trash [Enter]"))
+                        .tone(tone)
+                        .child(ui::text(confirm))
                         .on_click(Msg::TrashConfirm),
                 ),
         )
+}
+
+/// Yazi's `Overwrite file?` confirm for a create or rename onto an existing path.
+fn overwrite_layer(target: &str) -> N {
+    ui::node("card")
+        .key("overwrite")
+        .role("yazi.overwrite-confirm")
+        .prop("head", "Overwrite file?")
+        .child(ui::text("Will overwrite the following file:"))
+        .child(ui::text(vec![span(target, "warning")]).key("target"))
+        .child(
+            ui::row()
+                .key("controls")
+                .child(button(
+                    "cancel",
+                    ui::text("Cancel [Esc]"),
+                    Msg::OverwriteCancel,
+                ))
+                .child(
+                    ui::node("el")
+                        .prop("tag", "button")
+                        .key("confirm")
+                        .tone("warn")
+                        .child(ui::text("Overwrite [Enter]"))
+                        .on_click(Msg::OverwriteConfirm),
+                ),
+        )
+}
+
+/// The selectable rows shared by the opener picker, the spot table and the help layer.
+fn layer_list(items: Vec<ui::Item<Msg>>, at: usize, rows: u32) -> N {
+    let id = list_id(List::Layer);
+    let prefix = format!("{id}.");
+    let (select, activate) = (prefix.clone(), prefix);
+    ui::list()
+        .key("list")
+        .selected(format!("{id}.{at}"))
+        .max_lines(rows.saturating_sub(10).max(4))
+        .children(items)
+        .on_select(move |item| {
+            Msg::Select(
+                List::Layer,
+                item.strip_prefix(&select).unwrap_or(item).to_owned(),
+            )
+        })
+        .on_activate(move |item| {
+            Msg::Activate(
+                List::Layer,
+                item.strip_prefix(&activate).unwrap_or(item).to_owned(),
+            )
+        })
+        .into()
+}
+
+fn layer_card(role: &str, head: &str, list: N, hint: &str) -> N {
+    ui::node("card")
+        .key("layer")
+        .role(role)
+        .prop("head", head)
+        .child(list)
+        .child(muted(hint))
+        .child(button("close", ui::text("Close [Esc]"), Msg::LayerClose))
+}
+
+/// Yazi's `Open with:` pick: one row per opener, with its command.
+fn open_layer(openers: &[Vec<String>], at: usize, rows: u32) -> N {
+    let items = openers.iter().enumerate().map(|(index, row)| {
+        let item = ui::item(row.get(1).cloned().unwrap_or_default()).key(index.to_string());
+        match row.get(2) {
+            Some(run) => item.detail(run.clone()),
+            None => item,
+        }
+    });
+    layer_card(
+        "yazi.open-picker",
+        "Open with:",
+        layer_list(items.collect(), at, rows),
+        "j/k choose · Enter open · Esc cancel",
+    )
+}
+
+/// Yazi's spot table: headings, then label and value rows.
+fn spot_layer(cells: &[Vec<String>], at: usize, rows: u32) -> N {
+    let items = cells.iter().enumerate().map(|(index, row)| {
+        let label = row.first().cloned().unwrap_or_default();
+        match row.get(1) {
+            Some(value) => ui::item(vec![span(format!("  {label}"), "muted")])
+                .key(index.to_string())
+                .value(value.clone()),
+            None => ui::item(vec![span(label, "success")]).key(index.to_string()),
+        }
+    });
+    layer_card(
+        "yazi.spot",
+        "Spot",
+        layer_list(items.collect(), at, rows),
+        "j/k select · cc copy the cell · Tab or Esc close",
+    )
+}
+
+/// Every key, generated from the same tables the reducer dispatches from.
+fn help_layer(at: usize, rows: u32) -> N {
+    let items = help_rows()
+        .into_iter()
+        .enumerate()
+        .map(|(index, (keys, desc))| {
+            ui::item(vec![span(keys, "strong")])
+                .key(index.to_string())
+                .detail(desc)
+        });
+    layer_card(
+        "yazi.help",
+        "Keys",
+        layer_list(items.collect(), at, rows),
+        "j/k scroll · Esc close",
+    )
+}
+
+/// The which-style hint of a pending prefix: the keys that can follow it.
+fn which(hint: &Hint) -> N {
+    let chips = hint.keys.iter().map(|(key, desc)| {
+        N::from(
+            ui::text(vec![
+                span(format!("{} ", key_label(key)), "strong"),
+                span(*desc, "muted"),
+            ])
+            .key(format!("which-{key}")),
+        )
+    });
+    ui::row()
+        .key("which")
+        .role("yazi.which")
+        .prop("gap", "sm")
+        .prop("wrap", true)
+        .child(N::from(ui::badge(hint.prefix).tone("accent")).key("prefix"))
+        .children(chips)
+        .into()
 }
 
 fn theme_layer(at: usize) -> N {
@@ -406,7 +580,7 @@ impl Browser<'_> {
     fn main(&self) -> (N, Option<N>) {
         let focus = focus(self.yz, self.frame.ui);
         let mut rows: Vec<N> = Vec::new();
-        if self.yz.tabs.len() > 1 {
+        if !self.yz.tabs.is_empty() {
             rows.push(self.tabs());
         }
         let (header, path_layer) = self.path_header(focus.cwd);
@@ -608,6 +782,13 @@ impl Browser<'_> {
                 ui::badge("Rename [r]").tone("accent").into(),
                 editor,
                 Field::Rename,
+                "Cancel [Esc]",
+            )),
+            Mode::TabRename(editor) => Some((
+                "tab-rename",
+                ui::badge("Tab name [tr]").tone("accent").into(),
+                editor,
+                Field::Line,
                 "Cancel [Esc]",
             )),
             _ => None,
@@ -968,7 +1149,18 @@ impl Browser<'_> {
             label.push(span(if plain { String::new() } else { glyph }, tone));
             let strong = list == List::Parent && Some(name.as_str()) == selected_name;
             label.push(span(name.clone(), if strong { "strong" } else { "" }));
-            ui::item(label).key(name.clone()).title(url)
+            let mut item = ui::item(label).key(name.clone()).title(url);
+            // The linemode column Yazi draws at the right of each row of the current folder.
+            if list == List::Files {
+                if let Some(text) = folder
+                    .linemode_text
+                    .get(index)
+                    .filter(|text| !text.is_empty())
+                {
+                    item = item.value(text.trim().to_owned());
+                }
+            }
+            item
         });
         let prefix = format!("{id}.");
         let (on_select, on_activate) = (prefix.clone(), prefix);
@@ -977,7 +1169,7 @@ impl Browser<'_> {
                 List::Parent => "parent_list",
                 List::Files => "files_list",
                 List::Child => "child_list",
-                List::Themes => "list",
+                List::Themes | List::Layer => "list",
             })
             .max_lines(lines)
             .children(items)
@@ -1002,7 +1194,11 @@ impl Browser<'_> {
     }
 
     fn dock(&self) -> Vec<N> {
-        let mut rows = vec![self.status()];
+        let mut rows = Vec::new();
+        if let Some(hint) = self.frame.ui.hint() {
+            rows.push(which(&hint));
+        }
+        rows.push(self.status());
         if self.theme.tray {
             if let Some(tray) = selection_tray(&self.yz.selected_urls) {
                 rows.push(tray);
@@ -1023,6 +1219,7 @@ impl Browser<'_> {
             Mode::Filter(_) => "FILTER",
             Mode::Create(_) => "CREATE",
             Mode::Rename { .. } => "RENAME",
+            Mode::TabRename(_) => "TAB",
             _ => match yz.mode.as_str() {
                 "select" => "VIS",
                 "unset" => "UNSET",

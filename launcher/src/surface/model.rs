@@ -18,6 +18,10 @@ pub(crate) struct Folder {
     pub(crate) count: Option<u64>,
     /// The subject of the Yazi search this folder lists, if it is a search.
     pub(crate) search: Option<String>,
+    /// The tab's Yazi linemode (`size`, `mtime`, ...) and the text of each row of `files`
+    /// (empty unless the mode draws a column).
+    pub(crate) linemode: String,
+    pub(crate) linemode_text: Vec<String>,
 }
 
 impl Folder {
@@ -42,6 +46,8 @@ pub(crate) struct Hover {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Tab {
     pub(crate) name: String,
+    /// The name `tab_rename` set; empty while the tab is named after its directory.
+    pub(crate) custom: String,
     pub(crate) active: bool,
 }
 
@@ -235,6 +241,12 @@ fn folder(map: &Map<String, Value>) -> Option<Folder> {
         overrides: Icons::new(),
         count: map.get("file_count").and_then(Value::as_u64),
         search: map.get("search").and_then(Value::as_str).map(str::to_owned),
+        linemode: map
+            .get("linemode")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        linemode_text: strings(map.get("linemode_text")),
     })
 }
 
@@ -293,6 +305,11 @@ impl StateRecord {
                     .iter()
                     .map(|tab| Tab {
                         name: tab.get("name").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        custom: tab
+                            .get("custom")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
                         active: tab.get("active").and_then(Value::as_bool) == Some(true),
                     })
                     .collect()
@@ -556,6 +573,27 @@ mod tests {
         );
         record.as_object_mut().unwrap().remove("notices");
         assert!(parse(&record).is_empty());
+    }
+
+    #[test]
+    fn reads_the_linemode_and_the_custom_tab_name() {
+        let record = json!({
+            "client_id": 12345, "seq": 1, "listing_epoch": "e1", "listing_revision": 2,
+            "tabs": {"idx": 0, "total": 1, "items": [{"name": "work", "custom": "work", "active": true}]},
+        });
+        let record = StateRecord::parse(record.to_string().as_bytes(), "12345").unwrap();
+        let sized = json!({
+            "epoch": "e1", "revision": 2, "cwd": "/tmp/files", "files": ["a.txt", "child"],
+            "linemode": "size", "linemode_text": [" 12 B", " 4 KiB"],
+        });
+        let sized = Listing::parse(sized.to_string().as_bytes()).unwrap();
+        let snapshot = record.join(&sized).unwrap();
+        assert_eq!(snapshot.tabs[0].custom, "work");
+        assert_eq!(snapshot.current.linemode, "size");
+        assert_eq!(snapshot.current.linemode_text, [" 12 B", " 4 KiB"]);
+        // Without the fields the folder has no linemode column.
+        let plain = record.join(&listing()).unwrap();
+        assert!(plain.current.linemode_text.is_empty());
     }
 
     #[test]
