@@ -38,6 +38,18 @@ fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
+fn string_list(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn reply(value: &Value, id: &str) -> Option<Reply> {
     (value.get("id")?.as_str()? == id).then(|| Reply {
         ok: value.get("ok").and_then(Value::as_bool) == Some(true),
@@ -46,16 +58,13 @@ fn reply(value: &Value, id: &str) -> Option<Reply> {
             .get("error")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        paths: value
-            .get("paths")
-            .and_then(Value::as_array)
-            .map(|paths| {
-                paths
-                    .iter()
-                    .filter_map(|p| p.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        paths: string_list(value.get("paths")),
+        tasks: value
+            .get("tasks")
+            .and_then(Value::as_f64)
+            .map_or(0, |tasks| tasks as u64),
+        titles: string_list(value.get("titles")),
+        quitting: value.get("quitting").and_then(Value::as_bool) == Some(true),
     })
 }
 
@@ -111,8 +120,9 @@ impl Actions {
                 .args(["emit-to", &self.cid, "plugin", "tern"])
                 .arg(quote(&job.body.to_string()));
             // An async plugin run is itself a Yazi task, which would shift the task manager's
-            // cursor under `inspect` and `cancel`; these run on Yazi's main thread instead.
-            if job.body["op"] == "tasks" {
+            // cursor under `inspect` and `cancel`, and would count as an unfinished task in
+            // `quit`'s check; these run on Yazi's main thread instead.
+            if job.body["op"] == "tasks" || job.body["op"] == "quit" {
                 command.arg("--mode=sync");
             }
             let stage = match command
@@ -196,6 +206,16 @@ mod tests {
         )
         .unwrap();
         assert!(!rejected.ok && rejected.rejected && rejected.error.as_deref() == Some("no"));
+    }
+
+    #[test]
+    fn quit_replies_carry_task_counts_titles_and_the_quitting_flag() {
+        let busy = json!({"id": "a-1", "ok": true, "tasks": 2, "titles": ["Copy a", 7]});
+        let parsed = reply(&busy, "a-1").unwrap();
+        assert_eq!((parsed.tasks, parsed.quitting), (2, false));
+        assert_eq!(parsed.titles, ["Copy a"]);
+        let done = reply(&json!({"id": "a-1", "ok": true, "quitting": true}), "a-1").unwrap();
+        assert!(done.quitting && done.tasks == 0 && done.titles.is_empty());
     }
 
     #[test]

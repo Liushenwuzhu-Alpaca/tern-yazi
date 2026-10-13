@@ -43,12 +43,21 @@ pub(crate) fn launch_args(mut input: impl Iterator<Item = OsString>) -> io::Resu
 pub(crate) struct Launch {
     pub(crate) real: PathBuf,
     pub(crate) args: Vec<OsString>,
+    /// Yazi was given `--chooser-file`: opening a file chooses it and quits Yazi.
+    pub(crate) chooser: bool,
 }
 
 /// What to do with a launch: supervise it, or hand the arguments to the original Yazi.
 pub(crate) enum Plan {
     Supervise(Launch),
     Passthrough,
+}
+
+/// Whether the Yazi arguments name a chooser file, as `--chooser-file X` or `--chooser-file=X`.
+fn has_chooser_file(args: &[OsString]) -> bool {
+    args.iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "--chooser-file" || arg.as_bytes().starts_with(b"--chooser-file="))
 }
 
 pub(crate) fn plan(real: &OsStr, args: &[OsString]) -> io::Result<Plan> {
@@ -72,6 +81,7 @@ pub(crate) fn plan(real: &OsStr, args: &[OsString]) -> io::Result<Plan> {
     Ok(Plan::Supervise(Launch {
         real,
         args: args.to_vec(),
+        chooser: has_chooser_file(args),
     }))
 }
 
@@ -219,5 +229,19 @@ mod tests {
         ] {
             assert!(parse(&args).is_err());
         }
+    }
+
+    #[test]
+    fn chooser_file_is_detected_in_both_forms_before_the_delimiter() {
+        let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+        assert!(has_chooser_file(&args(&["--chooser-file", "/tmp/c"])));
+        assert!(has_chooser_file(&args(&["/tmp", "--chooser-file=/tmp/c"])));
+        assert!(!has_chooser_file(&args(&["--cwd-file", "/tmp/c"])));
+        assert!(!has_chooser_file(&args(&[
+            "--",
+            "--chooser-file",
+            "/tmp/c"
+        ])));
+        assert!(!has_chooser_file(&[]));
     }
 }

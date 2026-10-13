@@ -102,11 +102,11 @@ shell pane: yazi [args]
 
 The launcher reserves a random positive 30-bit client ID in the runtime inbox (an exclusive `client-CID.lock`, after checking that no `state-` or `listing-` file uses the ID) and a session token. It starts Yazi on a `forkpty` PTY in its own process group with `--client-id CID`, the caller's umask, `TERN_*` pane variables removed, and `TERN_YAZI_BRIDGE` carrying `{helper}`, the path of this binary for the plugin's no-replace rename. Yazi's ANSI output stays on the invisible PTY; the backend drains it and answers basic terminal queries.
 
-Startup waits up to 15 seconds for a valid `state-CID.json` and matching listing with the expected client ID. A missing Yazi plugin, an early Yazi exit or a timeout ends with a bounded diagnostic and exit status 1. Shutdown sends SIGTERM to the process group, allows 1.5 seconds, then SIGKILL; as a subreaper the launcher also reaps orphaned descendants. Inbox teardown removes only this client's files: state, listing, the lock and `reply-CID-TOKEN-*`.
+Startup waits up to 15 seconds for a valid `state-CID.json` and matching listing with the expected client ID. A missing Yazi plugin, an early Yazi exit or a timeout ends with a bounded diagnostic and exit status 1. The surface quits Yazi through Yazi itself (the `quit` request, section 4): Yazi writes `--cwd-file`, honours `--chooser-file` and exits with its own status, which the launcher returns. If Yazi has not exited 3 seconds after an acknowledged quit, or the quit request fails, the launcher falls back to the shutdown below. Shutdown (the pane closing, a signal, that fallback) sends SIGTERM to the process group, allows 1.5 seconds, then SIGKILL; as a subreaper the launcher also reaps orphaned descendants. Inbox teardown removes only this client's files: state, listing, the lock and `reply-CID-TOKEN-*`.
 
 ### Main loop
 
-The surface is a `SurfaceOptions::screen()` program surface on the launcher's own pane. The loop is single-threaded: it waits in `session.next()` for at most 25 ms, reloads the snapshot only when the state file's stamp changes, applies input effects, and renders only when something changed, at least 33 ms apart. Preview reads and window CLI calls run on helper threads and report back over channels; the loop never blocks on them. The tty belongs to the session (raw mode), so diagnostics go to the file named by `TERN_YAZI_LOG`, never to stderr. Notices (former toasts) show in the input row for about 5 seconds. When Yazi exits (`q`, or a crash), the surface closes and the shell prompt returns with Yazi's status. Closing the pane hangs up the session; the launcher then terminates Yazi's group.
+The surface is a `SurfaceOptions::screen()` program surface on the launcher's own pane. The loop is single-threaded: it waits in `session.next()` for at most 25 ms, reloads the snapshot only when the state file's stamp changes, applies input effects, and renders only when something changed, at least 33 ms apart. Preview reads and window CLI calls run on helper threads and report back over channels; the loop never blocks on them. The tty belongs to the session (raw mode), so diagnostics go to the file named by `TERN_YAZI_LOG`, never to stderr. Notices (former toasts) show in the input row for about 5 seconds. Yazi's own notifications (`ya.notify`, task failures, ...) are notices too: the plugin records them from the local `relay-notify-push` event into the snapshot's `notices` ring (8 entries, ids only grow), and the surface shows each id once as `title: content` (error and warn levels get their own tone), for the notification's timeout clamped to 2-10 seconds. At most 3 new notices are taken per snapshot; the rest queue and show in turn. When Yazi exits (`q`, or a crash), the surface closes and the shell prompt returns with Yazi's status. Closing the pane hangs up the session; the launcher then terminates Yazi's group.
 
 Yazi's PTY follows the pane's real size. While a program surface is live, Tern freezes the pane tty's winsize and its `tern inspect` rows, and the surface `Resize` event carries only columns. The one source that still tracks the pane is `tern ctl state`, a developer command the window answers for the pane it runs in: its `panes[]` list each pane's current `cols` and `rows`. A helper thread (`surface/panesize.rs`) polls it every 500 ms (every 5 s while it fails), matches `TERN_PANE`, and the main loop resizes Yazi's PTY and the surface's row count when the pair changes. On a Tern without that command the tty size read at startup is all there is, and Yazi keeps it.
 
@@ -164,7 +164,7 @@ Writers create `<name>.tmp` and rename it. The surface accepts a state file only
 
 ### Snapshot contents
 
-The listing carries `cwd`, `files` (Yazi's filtered/sorted current listing), `file_dirs`, `file_icons`, `file_count`, bounded `parent` and `preview` folders (at most 30 entries each), `selected_urls` (sorted absolute paths) and `marked_urls` (visual marks). The state carries `client_id`, `cursor`, `hovered` (`url`, `dir`, `size`, `mtime`, `permissions`, `selected`), `mode` (`normal`, `select` or `unset`), `filter` (string, `false`, or `null` when unexposed), `tabs`, `tasks` (`total`, `succ`, `fail`, `found`, `processed`) and per-folder icon overrides.
+The listing carries `cwd`, `files` (Yazi's filtered/sorted current listing), `file_dirs`, `file_icons`, `file_count`, bounded `parent` and `preview` folders (at most 30 entries each), `selected_urls` (sorted absolute paths) and `marked_urls` (visual marks). The state carries `client_id`, `cursor`, `hovered` (`url`, `dir`, `size`, `mtime`, `permissions`, `selected`), `mode` (`normal`, `select` or `unset`), `filter` (string, `false`, or `null` when unexposed), `tabs`, `tasks` (`total`, `succ`, `fail`, `found`, `processed`), `notices` (up to 8 recent Yazi notifications, each `id`, `title`, `content`, `level` of `info`/`warn`/`error`, `timeout` in seconds; absent when none) and per-folder icon overrides.
 
 Every real listing also has `file_icons`, keyed by the same entry names. A string is the exact icon text returned by `th.icon:match(file, { hovered = file.is_hovered })` for the active Yazi theme (including `""`); `false` records an actual nil/no-icon result. An absent map/key means unavailable metadata, not disabled icons and not a virtual archive member. Neither false, empty text, nor missing metadata receives a guessed replacement glyph. These maps stay attached to their directory snapshots, so optimistic current/parent/preview navigation resolves metadata by cwd rather than reusing the previous directory's icon map.
 
@@ -184,9 +184,10 @@ The JSON is additionally single-quoted for Yazi's plugin-argument parser, with e
 | --- | --- | --- |
 | `ping` | none | Forces a snapshot and acknowledges |
 | `command` | `action = "shell"`, `args` | Replies `queued`, then runs Yazi's `shell` (`block` as given) |
-| `action` | `action`, `args` | Runs an allowed Yazi actor (`arrow`, `leave`, `enter`, `back`, `forward`, `yank`, `paste`, `link`, `tab_*`, `visual_mode`, `escape`, `hidden`, `find_arrow`, ...) and forces a snapshot; `reveal` maps a real path to its `search://` entry; `plugin` runs only `fzf`/`zoxide`, acknowledging first |
+| `action` | `action`, `args` | Runs an allowed Yazi actor (`arrow`, `leave`, `enter`, `back`, `forward`, `yank`, `paste`, `link`, `tab_*`, `visual_mode`, `escape`, `hidden`, `find_arrow`, `open`, ...) and forces a snapshot; `reveal` maps a real path to its `search://` entry; `plugin` runs only `fzf`/`zoxide`, acknowledging first |
 | `search` | `query`, `via = "fd" \| "rg"` | `search_do`; Yazi streams the results into a `search://` folder |
 | `tasks` | `action`, optional `step` | Acknowledges, then runs `tasks:<action>` (`show`, `close`, `arrow prev\|next`, `inspect`, `cancel`) |
+| `quit` | `no_cwd_file`, `confirmed` | Runs as a synchronous entry, so the request is not itself an ongoing task. Unless `confirmed`, replies `tasks` (and `titles` while Yazi's task manager is open) when `cx.tasks.summary.total > 0` and does nothing else; otherwise replies `quitting` and emits `app:quit` (with `no_cwd_file` for `Q`), which writes the cwd file and exits. `summary.total` is the closest Lua-visible count to the `ongoing.len()` that Yazi's `mgr:quit` checks; it can differ for tasks that have no total yet |
 | `cd` | `target` | Checks the target is a directory, then `cd` |
 | `activate` | `target`, `action = "enter"` | Reveals the exact target, then `enter` |
 | `toggle_advance` | none | `toggle`, then `arrow 1` |
@@ -199,7 +200,7 @@ The JSON is additionally single-quoted for Yazi's plugin-argument parser, with e
 
 ### Replies
 
-Replies contain `id` and `ok`, plus `error` on failure or `paths`, `queued`, `target` as the operation defines. A successful `ya` exit only proves dispatch: the surface polls the reply every 50 ms, up to 200 attempts (about 10 seconds), consumes it, and only then sends the next request. A failure clears the queue and optimistic cursor/cwd and shows the actual error. An `ok` reply acknowledges acceptance, not completion of a shell command, trash job or other task; timeout means the outcome is unknown.
+Replies contain `id` and `ok`, plus `error` on failure or `paths`, `queued`, `target` as the operation defines; a `quit` reply carries `tasks`, `titles` or `quitting`. A successful `ya` exit only proves dispatch: the surface polls the reply every 50 ms, up to 200 attempts (about 10 seconds), consumes it, and only then sends the next request. A failure clears the queue and optimistic cursor/cwd and shows the actual error. An `ok` reply acknowledges acceptance, not completion of a shell command, trash job or other task; timeout means the outcome is unknown.
 
 ## 5. UI
 
@@ -226,8 +227,8 @@ Each theme is self-contained in `themes/<id>.css`, scoped under `[data-role^="ya
 | `gg`, Home / `G`, End | `arrow top` / `arrow bot` |
 | PageDown/PageUp, Ctrl+F/Ctrl+B | `arrow 100%`/`-100%` |
 | Shift+PageDown/PageUp, Ctrl+D/Ctrl+U | `arrow 50%`/`-50%` |
-| Enter | Enter a hovered directory; otherwise open the selection, else the hovered file, in Tern |
-| `o` | Open the selection, else the hovered entry, in Tern |
+| Enter | Enter a hovered directory; otherwise open the selection, else the hovered file, in Tern. With `--chooser-file`, a selection or a hovered file is sent to Yazi's `open` actor instead, which writes the choice and exits |
+| `o` | Open the selection, else the hovered entry, in Tern. With `--chooser-file`, always Yazi's `open` (directories included) |
 | `W` | Terminal below in the shown directory (Yazi leaves `W` unbound) |
 | `cc`/`cd`/`cf`/`cn` | Copy path / directory / name / stem (selection, else hover) |
 | Space | `toggle`, then `arrow 1` |
@@ -247,11 +248,11 @@ Each theme is self-contained in `themes/<id>.css`, scoped under `[data-role^="ya
 | `w` | Yazi task manager: `j`/`k` move, Enter inspects the log on the lent terminal, `x` cancels, Esc/`w` close |
 | `.` | Toggle hidden files |
 | `tt`, `1`-`9`, `[`/`]`, `{`/`}` | New tab, switch to tab, relative switch, swap |
-| Ctrl+C | Close the active Yazi tab |
+| Ctrl+C | With several tabs, close the active Yazi tab; with one, quit like `q` (Yazi's `<C-c>` is `close`) |
 | Ctrl+Z | Yazi `suspend`: the browser and Yazi stop, the shell regains the pane and `fg` brings the browser back (section 3) |
 | `T` | Theme picker (Yazi leaves `T` unbound) |
 | Esc | Yazi `escape`; cancels local editing or confirmation first. In an input line the first Esc leaves insert mode and the second cancels (find and filter lines then clear as before) |
-| `q` | Quit Yazi; the shell prompt returns |
+| `q` / `Q` | Quit Yazi through its own quit (`Q`: without writing `--cwd-file`); the shell prompt returns. With unfinished tasks the surface asks first: Enter or `y` quits, Esc, `n` or Ctrl+C cancels |
 
 Input lines (`:`/`;` shell, `/`/`?` find, `s`/`S` search, `f` filter, `a` create, `r` rename, and the breadcrumb path editor) share one `Editor` ([`editor.rs`](launcher/src/surface/editor.rs)) that mirrors Yazi's `[input]` keymap. A line opens in insert mode; the first Esc switches to normal mode and moves the caret one left, as in vim, and the second Esc (or Ctrl+C) cancels. Enter submits from either mode. A failed submission keeps the line open. Text is UTF-16 aware (the offsets Tern's input node expects); Backspace removes one code point.
 
@@ -308,6 +309,8 @@ cargo test --locked --manifest-path launcher/Cargo.toml --test interaction -- --
 | `real_browser_interactions` | Startup in the shell pane, navigation, breadcrumbs and path editing, selection, filter/find, previews (text, Markdown, SVG, PNG, code, PDF, VRML, archives), glyphs and metadata, shortcuts, `;` background shell, trash, two clients, `q`, pane close, Yazi crash |
 | `real_browser_shortcuts` | Yank/cut/paste, tabs, create/rename, links |
 | `real_surface_interactions` | Theme picker and all 8 themes, layout after splits, `q` back to the same shell |
+| `real_quit_interactions` | `q` writes `--cwd-file` and exits 0, `Q` does not, the task confirmation (Esc cancels, Enter quits), `--chooser-file` with Enter on a file, a selection and a directory |
+| `real_notice_interactions` | A `ya.notify` from a Yazi plugin appears as a surface notice and expires |
 | `real_window_interactions` | Opens in Tern (`o`, Enter, multi-select, double-click), `W`, `cc`/`cf` clipboard, `:` macros and cwd through Yazi, palette entry and the Ctrl+Alt+Y action |
 | `real_parity_interactions` | Yazi parity: recursive search, lent terminal (`:`, fzf, zoxide, task log), task manager, Ctrl+Z suspend and `fg` (also an external `SIGTSTP`), `q` |
 

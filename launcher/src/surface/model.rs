@@ -106,6 +106,48 @@ impl TaskManager {
     }
 }
 
+/// One Yazi notification (`ya.notify`, task failures, ...) the plugin recorded. Ids only grow,
+/// so a consumer shows each id once.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct YaziNotice {
+    pub(crate) id: u64,
+    pub(crate) title: String,
+    pub(crate) content: String,
+    /// `info`, `warn` or `error`, as Yazi names its levels.
+    pub(crate) level: String,
+    /// Seconds Yazi would show it for.
+    pub(crate) timeout: f64,
+}
+
+impl YaziNotice {
+    fn parse_all(value: Option<&Value>) -> Vec<Self> {
+        let Some(Value::Array(items)) = value else {
+            return Vec::new();
+        };
+        items
+            .iter()
+            .filter_map(|item| {
+                let text = |key| {
+                    item.get(key)
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned()
+                };
+                Some(Self {
+                    id: item
+                        .get("id")
+                        .and_then(Value::as_f64)
+                        .filter(|id| *id >= 0.0)? as u64,
+                    title: text("title"),
+                    content: text("content"),
+                    level: text("level"),
+                    timeout: item.get("timeout").and_then(Value::as_f64).unwrap_or(5.0),
+                })
+            })
+            .collect()
+    }
+}
+
 /// One complete, consistent Yazi generation.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Snapshot {
@@ -122,6 +164,8 @@ pub(crate) struct Snapshot {
     pub(crate) mode: String,
     pub(crate) hovered: Option<Hover>,
     pub(crate) task_manager: TaskManager,
+    /// Yazi's recent notifications, oldest first.
+    pub(crate) notices: Vec<YaziNotice>,
 }
 
 /// The dynamic record (`state-CID.json`) before it is joined with its listing.
@@ -270,6 +314,7 @@ impl StateRecord {
             marked_urls: listing.marked_urls.clone(),
             mode: root.get("mode").and_then(Value::as_str).unwrap_or("normal").to_owned(),
             hovered,
+            notices: YaziNotice::parse_all(root.get("notices")),
             task_manager: TaskManager::parse(root.get("task_manager")),
         })
     }
@@ -477,6 +522,40 @@ mod tests {
         assert_eq!(snapshot.is_dir("/tmp", "files"), Some(true));
         assert_eq!(snapshot.is_dir("/elsewhere", "x"), None);
         assert!(snapshot.directory("/tmp").is_some());
+    }
+
+    #[test]
+    fn parses_yazi_notifications_in_order_and_skips_malformed_ones() {
+        let mut record = json!({
+            "client_id": 12345, "listing_epoch": "e1", "listing_revision": 2,
+            "notices": [
+                {"id": 3, "title": "Boom", "content": "it failed", "level": "error", "timeout": 7.5},
+                {"title": "no id", "content": "dropped"},
+                {"id": 4, "content": "plain"},
+            ],
+        });
+        let parse = |record: &Value| {
+            let record = StateRecord::parse(record.to_string().as_bytes(), "12345").unwrap();
+            record.join(&listing()).unwrap().notices
+        };
+        let notices = parse(&record);
+        assert_eq!(notices.len(), 2);
+        assert_eq!(
+            notices[0],
+            YaziNotice {
+                id: 3,
+                title: "Boom".to_owned(),
+                content: "it failed".to_owned(),
+                level: "error".to_owned(),
+                timeout: 7.5,
+            }
+        );
+        assert_eq!(
+            (notices[1].id, notices[1].level.as_str(), notices[1].timeout),
+            (4, "", 5.0)
+        );
+        record.as_object_mut().unwrap().remove("notices");
+        assert!(parse(&record).is_empty());
     }
 
     #[test]

@@ -14,6 +14,7 @@ mod theme;
 mod view;
 mod window;
 
+use std::collections::VecDeque;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
@@ -43,6 +44,12 @@ const TICK: Duration = Duration::from_millis(25);
 /// How long a frame may wait for a preview that is still loading, to avoid an empty flash.
 const PREVIEW_GRACE: Duration = Duration::from_millis(40);
 const NOTICE: Duration = Duration::from_secs(5);
+/// How long Yazi gets to exit after it was told to quit before the launcher stops it.
+const QUIT_WAIT: Duration = Duration::from_secs(3);
+/// Yazi notifications shown at most per snapshot; the rest only reach the log.
+const NOTICE_BATCH: usize = 3;
+/// Bounds of how long a Yazi notification stays, whatever timeout it asked for.
+const NOTICE_SPAN: (f64, f64) = (2.0, 10.0);
 
 /// Diagnostics go to `TERN_YAZI_LOG` when set: the tty belongs to the surface.
 struct Log(Option<File>);
@@ -159,6 +166,14 @@ struct App {
     window: Window,
     pane: PaneSize,
     notice: Option<(Level, String, Instant)>,
+    /// How long `notice` stays.
+    notice_for: Duration,
+    /// Yazi notifications waiting for the notice slot.
+    backlog: VecDeque<(Level, String, Duration)>,
+    /// The newest Yazi notification id already queued; Yazi's ids only grow.
+    seen_notice: Option<u64>,
+    /// Set once Yazi was told to quit: when to stop it if it has not exited.
+    quit_deadline: Option<Instant>,
     home: String,
     cols: u32,
     rows: u16,
@@ -209,7 +224,57 @@ impl App {
     fn notify(&mut self, level: Level, text: String) {
         self.log.line(format!("notice {level:?}: {text}"));
         self.notice = Some((level, text, Instant::now()));
+        self.notice_for = NOTICE;
         self.dirty = true;
+    }
+
+    /// Queues the Yazi notifications not seen yet: Yazi draws them on its hidden terminal.
+    fn absorb_notices(&mut self) {
+        let Some(yz) = &self.snapshots.current else {
+            return;
+        };
+        let seen = self.seen_notice;
+        let fresh: Vec<_> = yz
+            .notices
+            .iter()
+            .filter(|notice| seen.is_none_or(|seen| notice.id > seen))
+            .cloned()
+            .collect();
+        let Some(newest) = fresh.iter().map(|notice| notice.id).max() else {
+            return;
+        };
+        self.seen_notice = Some(newest);
+        let skipped = fresh.len().saturating_sub(NOTICE_BATCH);
+        for (index, notice) in fresh.into_iter().enumerate() {
+            let level = match notice.level.as_str() {
+                "error" => Level::Error,
+                "warn" => Level::Warn,
+                _ => Level::Info,
+            };
+            let text = if notice.title.is_empty() {
+                notice.content.clone()
+            } else {
+                format!("{}: {}", notice.title, notice.content)
+            };
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            self.log.line(format!("yazi notice {level:?}: {text}"));
+            if index >= skipped {
+                let span = notice.timeout.clamp(NOTICE_SPAN.0, NOTICE_SPAN.1);
+                self.backlog
+                    .push_back((level, text, Duration::from_secs_f64(span)));
+            }
+        }
+    }
+
+    /// Moves the next waiting Yazi notification into the empty notice slot.
+    fn next_notice(&mut self) {
+        if self.notice.is_none() {
+            if let Some((level, text, span)) = self.backlog.pop_front() {
+                self.notice = Some((level, text, Instant::now()));
+                self.notice_for = span;
+                self.dirty = true;
+            }
+        }
     }
 
     /// Applies reducer effects; `Some(code)` ends the session.
@@ -237,7 +302,10 @@ impl App {
                     }
                     Err(error) => self.notify(Level::Error, format!("Cannot copy: {error}")),
                 },
-                Effect::Quit => return Some(0),
+                Effect::Quitting => {
+                    self.quit_deadline
+                        .get_or_insert_with(|| Instant::now() + QUIT_WAIT);
+                }
                 Effect::Suspend => request_stop(),
             }
         }
@@ -293,6 +361,11 @@ impl App {
                 .clone()
                 .unwrap_or_else(|| "No acknowledgement".to_owned());
             self.notify(Level::Error, format!("Yazi request failed: {detail}"));
+            if matches!(then, input::Then::Quit { .. }) {
+                // Without a working quit request the old stop path still ends the session.
+                self.log.line("quit request failed; stopping Yazi");
+                self.quit_deadline = Some(Instant::now());
+            }
         }
         let effects = self.ui.reply(then, &reply);
         self.apply(effects);
@@ -371,6 +444,7 @@ impl App {
             if let Some(yz) = &self.snapshots.current {
                 self.ui.sync(yz, self.actions.pending_filter());
             }
+            self.absorb_notices();
             self.dirty = true;
         }
         if let Some((rows, cols)) = self.pane.current(pane_size()) {
@@ -399,11 +473,12 @@ impl App {
         if self
             .notice
             .as_ref()
-            .is_some_and(|(_, _, at)| at.elapsed() >= NOTICE)
+            .is_some_and(|(_, _, at)| at.elapsed() >= self.notice_for)
         {
             self.notice = None;
             self.dirty = true;
         }
+        self.next_notice();
     }
 }
 
@@ -467,18 +542,24 @@ pub(crate) fn run(launch: &Launch, real: &OsStr, args: &[OsString]) -> io::Resul
         }
     };
     let cols = session.caps().cols;
+    let mut ui = Ui::new(theme::initial());
+    ui.chooser = launch.chooser;
     let mut app = App {
         session: Some(session),
         link,
         sf,
         log,
-        ui: Ui::new(theme::initial()),
+        ui,
         actions: Actions::new(&inbox.cid, &inbox.token),
         snapshots: Snapshots::new(&inbox.cid),
         previews: Previews::new(),
         window: Window::new(env::var("TERN_PANE").unwrap_or_default()),
         pane: PaneSize::new(&env::var("TERN_PANE").unwrap_or_default()),
         notice: None,
+        notice_for: NOTICE,
+        backlog: VecDeque::new(),
+        seen_notice: None,
+        quit_deadline: None,
         home: env::var("HOME").unwrap_or_default(),
         cols,
         rows: pane_size().map_or(24, |(rows, _)| rows),
@@ -519,6 +600,10 @@ pub(crate) fn run(launch: &Launch, real: &OsStr, args: &[OsString]) -> io::Resul
             continue;
         }
         app.tick(&inbox, &mut backend, ready);
+        if app.quit_deadline.is_some_and(|at| Instant::now() >= at) {
+            app.log.line("Yazi did not exit after quit; stopping it");
+            break Ok(0);
+        }
         if app.dirty {
             if let Err(error) = app.render() {
                 break Err(error);

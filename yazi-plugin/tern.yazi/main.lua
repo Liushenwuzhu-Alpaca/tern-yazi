@@ -178,6 +178,11 @@ local function read_tasks()
 	}
 end
 
+-- Yazi's recent notifications (`ya.notify`, task failures, ...), captured from the local
+-- `relay-notify-push` event. Ids only grow; the launcher shows each id once.
+local NOTICE_KEEP = 8
+local notices, notice_seq = {}, 0
+
 -- State inbox writer: atomic state and listing snapshots for the launcher.
 local state_seq = 0
 local last_dump_key = nil
@@ -314,6 +319,7 @@ local function dump_state()
 		tasks = tasks_data,
 		task_manager = ok_p and task_data.manager or nil,
 		tabs = tabs_data,
+		notices = #notices > 0 and notices or nil,
 	}
 	local ok_encoded, key = pcall(ya.json_encode, payload)
 	if not ok_encoded or not key or key == last_dump_key then return end
@@ -510,7 +516,7 @@ local commit = ya.sync(function(self, req, files)
 end)
 
 local request_actors = {}
-for name in ("cd arrow leave enter back forward reveal yank toggle toggle_all visual_mode escape hidden find_arrow paste unyank link hardlink seek tab_create tab_switch tab_swap tab_close close plugin"):gmatch("%S+") do
+for name in ("cd arrow leave enter back forward reveal yank toggle toggle_all visual_mode escape hidden find_arrow paste unyank link hardlink seek tab_create tab_switch tab_swap tab_close close plugin open"):gmatch("%S+") do
 	request_actors[name] = true
 end
 -- Plugins the browser's keys run, as Yazi's default keymap does (`z` fzf, `Z` zoxide).
@@ -611,6 +617,30 @@ function M:entry(job)
 			ya.exec("find_do", { req.query, smart = true, previous = req.previous == true })
 			snapshot()
 			reply(req, { ok = true })
+		elseif req.op == "quit" then
+			-- Yazi's `mgr:quit` asks for confirmation through a popup, which Yazi draws on its
+			-- hidden terminal. The launcher asks here instead: unfinished tasks are reported back
+			-- and nothing quits until `confirmed`; otherwise `app:quit` (Yazi's popup-free quit,
+			-- which writes --cwd-file unless `no_cwd_file`) runs directly. Yazi's own check is
+			-- `ongoing.len()`; `summary.total` is the closest Lua-visible count: it matches
+			-- `ongoing` except for zero-total tasks that have not failed. Titles exist only
+			-- while the task manager is open (Yazi fills `snaps` then). The launcher runs this
+			-- as a sync entry so the request is not itself an ongoing task.
+			assert(req.no_cwd_file == nil or type(req.no_cwd_file) == "boolean", "no_cwd_file is a boolean flag")
+			local left, titles = 0, {}
+			if not req.confirmed then
+				left = cx.tasks.summary.total
+				for i, snap in ipairs(cx.tasks.snaps) do
+					if i > 10 then break end
+					titles[i] = snap.title
+				end
+			end
+			if left > 0 then
+				reply(req, { ok = true, tasks = left, titles = titles })
+			else
+				reply(req, { ok = true, quitting = true })
+				ya.emit("app:quit", { no_cwd_file = req.no_cwd_file == true })
+			end
 		elseif req.op == "tasks" then
 			-- Yazi's task manager actions (`w` opens it; `tasks:inspect` borrows the terminal).
 			-- The launcher runs these as sync entries: an async run is itself a task and would
@@ -684,11 +714,31 @@ function M:entry(job)
 	if not ok then reply(req, { ok = false, rejected = true, error = tostring(err) }) end
 end
 
+-- Yazi draws notifications on its hidden terminal. The local `relay-notify-push` handler
+-- sees every one before Yazi keeps it; returning the body unchanged leaves Yazi's own
+-- handling intact (nil would cancel the notification).
+local function record_notice(body)
+	pcall(function()
+		notice_seq = notice_seq + 1
+		notices[#notices + 1] = {
+			id = notice_seq,
+			title = tostring(body.title or ""),
+			content = tostring(body.content or ""),
+			level = tostring(body.level or "info"),
+			timeout = tonumber(body.timeout) or 5,
+		}
+		if #notices > NOTICE_KEEP then table.remove(notices, 1) end
+		dump_state()
+	end)
+	return body
+end
+
 function M:setup()
 	pcall(os.execute, "mkdir -p " .. state_dir())
 	-- Builtin local event bodies carry only { tab }; snapshot `cx` instead.
 	ps.sub("hover", dump_state)
 	ps.sub("cd", dump_state)
+	ps.sub("relay-notify-push", record_notice)
 	ps.sub("tab", dump_state)
 	-- No pubsub event fires for selection changes without a hover move or for task
 	-- progress on 26.9, but status children redraw together with the built-in progress

@@ -57,6 +57,13 @@ pub(crate) enum Mode {
     },
     /// Exact paths Yazi prepared for Trash, awaiting confirmation.
     Trash(Vec<String>),
+    /// Yazi has unfinished tasks and asks (`quit_title`/`quit_body`) whether to quit anyway.
+    /// `titles` are known only while Yazi's task manager is open; `count` always is.
+    Quit {
+        no_cwd: bool,
+        count: u64,
+        titles: Vec<String>,
+    },
     /// The theme picker; `original` is restored on cancel.
     Theme {
         at: usize,
@@ -87,6 +94,8 @@ pub(crate) enum Msg {
     TabSwitch(usize),
     TrashConfirm,
     TrashCancel,
+    QuitConfirm,
+    QuitCancel,
     Select(List, String),
     Activate(List, String),
 }
@@ -104,11 +113,16 @@ pub(crate) enum Then {
     Jump(Jump),
     TrashPrepared,
     TrashQueued,
+    /// Yazi's answer to a quit request: unfinished tasks to confirm, or it is quitting.
+    Quit {
+        no_cwd: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Level {
     Info,
+    Warn,
     Error,
 }
 
@@ -122,7 +136,8 @@ pub(crate) enum Effect {
     Open(Vec<String>),
     Terminal(String),
     Copy(String),
-    Quit,
+    /// Yazi was told to quit; the surface waits for its exit.
+    Quitting,
     /// Stops the browser and Yazi and returns the shell, until `fg` (Yazi's `suspend`).
     Suspend,
 }
@@ -134,6 +149,11 @@ pub(crate) struct Reply {
     pub(crate) rejected: bool,
     pub(crate) error: Option<String>,
     pub(crate) paths: Vec<String>,
+    /// Unfinished Yazi tasks a quit request found, with their titles when known.
+    pub(crate) tasks: u64,
+    pub(crate) titles: Vec<String>,
+    /// Yazi accepted the quit and is exiting.
+    pub(crate) quitting: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,6 +172,8 @@ pub(crate) struct Ui {
     pub(crate) optimistic_cwd: Option<String>,
     pub(crate) path_menu: bool,
     pub(crate) theme: usize,
+    /// Launched with `--chooser-file`: Enter and `o` choose files through Yazi's `open`.
+    pub(crate) chooser: bool,
     path_jump: Option<Jump>,
     pending: Option<Pending>,
     source: Option<(String, Option<String>)>,
@@ -237,6 +259,7 @@ impl Ui {
             path_menu: false,
             theme,
             path_jump: None,
+            chooser: false,
             pending: None,
             source: None,
             filter_seq: None,
@@ -315,6 +338,18 @@ impl Ui {
                 Level::Info,
                 "Trash queued in Yazi; completion is reported by Yazi tasks".to_owned(),
             )),
+            Then::Quit { no_cwd } if reply.ok => {
+                if reply.quitting {
+                    effects.push(Effect::Quitting);
+                } else if reply.tasks > 0 {
+                    self.mode = Mode::Quit {
+                        no_cwd,
+                        count: reply.tasks,
+                        titles: reply.titles.clone(),
+                    };
+                }
+            }
+            Then::Quit { .. } => {}
             Then::TrashPrepared | Then::TrashQueued => {}
         }
         effects
@@ -354,6 +389,26 @@ impl Ui {
         vec![Effect::Request(
             json!({"op": "trash_commit", "paths": paths}),
             Then::TrashQueued,
+        )]
+    }
+
+    /// Yazi's `quit` (`q`) or `quit --no-cwd-file` (`Q`): Yazi answers with unfinished tasks to
+    /// confirm, or quits itself.
+    fn quit(&self, no_cwd: bool) -> Effect {
+        Effect::Request(
+            json!({"op": "quit", "no_cwd_file": no_cwd}),
+            Then::Quit { no_cwd },
+        )
+    }
+
+    fn quit_decision(&mut self, no_cwd: bool, confirm: bool) -> Vec<Effect> {
+        self.mode = Mode::Normal;
+        if !confirm {
+            return Vec::new();
+        }
+        vec![Effect::Request(
+            json!({"op": "quit", "no_cwd_file": no_cwd, "confirmed": true}),
+            Then::Quit { no_cwd },
         )]
     }
 
@@ -467,6 +522,16 @@ impl Ui {
         let plain = !key.shift && !key.ctrl && !key.alt && !key.meta;
         let pending = self.pending.take();
         match &mut self.mode {
+            Mode::Quit { no_cwd, .. } => {
+                let no_cwd = *no_cwd;
+                let cancel = escape || (key.ctrl && name == "c") || (plain && name == "n");
+                let confirm = enter || (plain && name == "y");
+                return if cancel || confirm {
+                    self.quit_decision(no_cwd, confirm)
+                } else {
+                    Vec::new()
+                };
+            }
             Mode::Trash(_) => {
                 return if escape || enter {
                     self.trash_decision(enter)
@@ -549,6 +614,8 @@ impl Ui {
             match name {
                 "a" => return vec![action("toggle_all", &[], json!({"state": "on"}))],
                 "r" => return vec![action("toggle_all", &[], json!({}))],
+                // Yazi's `<C-c>` is `close`: a tab, or on the last tab the same quit as `q`.
+                "c" if yz.tabs.len() <= 1 => return vec![self.quit(false)],
                 "c" => return vec![action("close", &[], json!({}))],
                 "z" => return vec![Effect::Suspend],
                 "s" => return vec![action("escape", &[], json!({"search": true}))],
@@ -613,6 +680,7 @@ impl Ui {
                 "j" => vec![action("seek", &["5"], json!({}))],
                 "k" => vec![action("seek", &["-5"], json!({}))],
                 "z" => vec![action("plugin", &["zoxide"], json!({}))],
+                "q" => vec![self.quit(true)],
                 "s" => {
                     self.mode = Mode::Search {
                         editor: Editor::default(),
@@ -641,6 +709,18 @@ impl Ui {
             // Enter on a directory enters it; otherwise Enter and `o` open the selection, or
             // the hovered entry, in Tern.
             _ if enter || name == "o" => match &yz.hovered {
+                // With --chooser-file Yazi's `open` writes the choice and exits; a directory
+                // without a selection still enters on Enter.
+                _ if self.chooser
+                    && !(enter
+                        && yz.selected_urls.is_empty()
+                        && yz
+                            .hovered
+                            .as_ref()
+                            .is_some_and(|hover| hover.dir == Some(true))) =>
+                {
+                    action("open", &[], json!({}))
+                }
                 _ if !yz.selected_urls.is_empty() => Effect::Open(yz.selected_urls.clone()),
                 Some(hover) if enter && hover.dir == Some(true) => action("enter", &[], json!({})),
                 Some(hover) => Effect::Open(vec![hover.url.clone()]),
@@ -718,7 +798,7 @@ impl Ui {
                 return Vec::new();
             }
             "." | "period" => action("hidden", &[], json!({"state": "toggle"})),
-            "q" => Effect::Quit,
+            "q" => self.quit(false),
             _ => return Vec::new(),
         };
         vec![effect]
@@ -751,6 +831,14 @@ impl Ui {
     }
 
     pub(crate) fn msg(&mut self, msg: Msg, yz: &Snapshot, home: &str) -> Vec<Effect> {
+        if matches!(self.mode, Mode::Quit { .. }) {
+            let no_cwd = matches!(self.mode, Mode::Quit { no_cwd: true, .. });
+            return match msg {
+                Msg::QuitConfirm => self.quit_decision(no_cwd, true),
+                Msg::QuitCancel => self.quit_decision(no_cwd, false),
+                _ => Vec::new(),
+            };
+        }
         if matches!(self.mode, Mode::Trash(_)) {
             return match msg {
                 Msg::TrashConfirm => self.trash_decision(true),
@@ -828,7 +916,11 @@ impl Ui {
             }
             Msg::Select(list, name) => return self.list_event(list, &name, false, yz),
             Msg::Activate(list, name) => return self.list_event(list, &name, true, yz),
-            Msg::PathSubmit | Msg::TrashConfirm | Msg::TrashCancel => {}
+            Msg::PathSubmit
+            | Msg::TrashConfirm
+            | Msg::TrashCancel
+            | Msg::QuitConfirm
+            | Msg::QuitCancel => {}
         }
         Vec::new()
     }
@@ -869,6 +961,11 @@ impl Ui {
                         json!({"op": "activate", "target": target, "action": "enter"}),
                     )]
                 }
+                // With --chooser-file a double-click on a file chooses it through Yazi.
+                _ if self.chooser => vec![
+                    action("reveal", &[&target], json!({"no_dummy": true})),
+                    action("open", &[], json!({})),
+                ],
                 _ => vec![Effect::Open(vec![target])],
             };
         }
@@ -882,7 +979,7 @@ impl Ui {
 
 #[cfg(test)]
 mod tests {
-    use super::super::model::{Folder, Hover};
+    use super::super::model::{Folder, Hover, Tab};
     use super::*;
 
     fn key(name: &str) -> Key {
@@ -1214,12 +1311,163 @@ mod tests {
             body(&ui.key(&key("3"), &yz, ""))["args"]["positional"],
             json!(["2"])
         );
-        assert_eq!(ui.key(&key("q"), &yz, ""), vec![Effect::Quit]);
+        // `q` goes through Yazi (its task check), not straight to a stop.
+        assert_eq!(
+            ui.key(&key("q"), &yz, ""),
+            vec![Effect::Request(
+                json!({"op": "quit", "no_cwd_file": false}),
+                Then::Quit { no_cwd: false }
+            )]
+        );
         let suspend = Key {
             ctrl: true,
             ..Key::named("z")
         };
         assert_eq!(ui.key(&suspend, &yz, ""), vec![Effect::Suspend]);
+    }
+
+    fn quit_reply(tasks: u64, quitting: bool) -> Reply {
+        Reply {
+            ok: true,
+            tasks,
+            titles: vec!["Copy a".to_owned()],
+            quitting,
+            ..Reply::default()
+        }
+    }
+
+    #[test]
+    fn quit_keys_carry_the_cwd_file_flag() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        let upper = ui.key(&shifted("q"), &yz, "");
+        assert_eq!(body(&upper), &json!({"op": "quit", "no_cwd_file": true}));
+        let ctrl_c = ui.key(
+            &Key {
+                ctrl: true,
+                ..Key::named("c")
+            },
+            &yz,
+            "",
+        );
+        assert_eq!(body(&ctrl_c), &json!({"op": "quit", "no_cwd_file": false}));
+        // With several tabs Ctrl+C closes the active tab, as Yazi's `close` does.
+        let mut tabbed = snapshot();
+        tabbed.tabs = vec![Tab::default(), Tab::default()];
+        let ctrl_c = ui.key(
+            &Key {
+                ctrl: true,
+                ..Key::named("c")
+            },
+            &tabbed,
+            "",
+        );
+        assert_eq!(body(&ctrl_c)["action"], "close");
+    }
+
+    #[test]
+    fn quit_without_tasks_waits_for_yazi_to_exit() {
+        let mut ui = Ui::new(0);
+        let effects = ui.reply(Then::Quit { no_cwd: false }, &quit_reply(0, true));
+        assert_eq!(effects, vec![Effect::Quitting]);
+        assert_eq!(ui.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn quit_with_tasks_confirms_cancels_and_forwards_the_flag() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        let effects = ui.reply(Then::Quit { no_cwd: true }, &quit_reply(2, false));
+        assert!(effects.is_empty());
+        assert_eq!(
+            ui.mode,
+            Mode::Quit {
+                no_cwd: true,
+                count: 2,
+                titles: vec!["Copy a".to_owned()]
+            }
+        );
+        // Other keys change nothing; Esc, `n` and Ctrl+C cancel without a request.
+        assert!(ui.key(&key("j"), &yz, "").is_empty());
+        assert!(matches!(ui.mode, Mode::Quit { .. }));
+        for cancel in [
+            key("escape"),
+            key("n"),
+            Key {
+                ctrl: true,
+                ..Key::named("c")
+            },
+        ] {
+            ui.mode = Mode::Quit {
+                no_cwd: true,
+                count: 2,
+                titles: vec![],
+            };
+            assert!(ui.key(&cancel, &yz, "").is_empty());
+            assert_eq!(ui.mode, Mode::Normal);
+        }
+        // Enter and `y` confirm: the same request, confirmed, with the flag kept.
+        for confirm in [key("enter"), key("y")] {
+            ui.mode = Mode::Quit {
+                no_cwd: true,
+                count: 2,
+                titles: vec![],
+            };
+            let effects = ui.key(&confirm, &yz, "");
+            assert_eq!(
+                body(&effects),
+                &json!({"op": "quit", "no_cwd_file": true, "confirmed": true})
+            );
+            assert_eq!(ui.mode, Mode::Normal);
+        }
+        // Clicking the layer's buttons decides the same way.
+        ui.mode = Mode::Quit {
+            no_cwd: false,
+            count: 1,
+            titles: vec![],
+        };
+        assert!(ui.msg(Msg::QuitCancel, &yz, "").is_empty());
+        assert_eq!(ui.mode, Mode::Normal);
+        ui.mode = Mode::Quit {
+            no_cwd: false,
+            count: 1,
+            titles: vec![],
+        };
+        let effects = ui.msg(Msg::QuitConfirm, &yz, "");
+        assert_eq!(body(&effects)["confirmed"], true);
+        // A confirmed quit is acknowledged as quitting.
+        let effects = ui.reply(Then::Quit { no_cwd: false }, &quit_reply(0, true));
+        assert_eq!(effects, vec![Effect::Quitting]);
+    }
+
+    #[test]
+    fn chooser_enter_and_o_open_through_yazi_except_to_enter_directories() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        // Without --chooser-file a file opens in Tern.
+        assert!(matches!(
+            ui.key(&key("enter"), &yz, "")[..],
+            [Effect::Open(_)]
+        ));
+        ui.chooser = true;
+        for name in ["enter", "o"] {
+            let effects = ui.key(&key(name), &yz, "");
+            assert_eq!(
+                body(&effects),
+                &json!({"op": "action", "action": "open", "args": {"positional": [], "options": {}}})
+            );
+        }
+        // A selection is chosen as a whole, even from a directory.
+        let mut dir = snapshot();
+        dir.hovered = Some(Hover {
+            url: "/tmp/files/child".to_owned(),
+            dir: Some(true),
+            ..Hover::default()
+        });
+        assert_eq!(body(&ui.key(&key("enter"), &dir, ""))["action"], "enter");
+        assert_eq!(body(&ui.key(&key("o"), &dir, ""))["action"], "open");
+        dir.selected_urls = vec!["/tmp/files/notes.md".to_owned()];
+        assert_eq!(body(&ui.key(&key("enter"), &dir, ""))["action"], "open");
     }
 
     #[test]

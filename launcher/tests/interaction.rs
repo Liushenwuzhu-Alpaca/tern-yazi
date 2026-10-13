@@ -1174,6 +1174,18 @@ end })
         new_tab: bool,
         config: PathBuf,
     ) -> TestResult<Client> {
+        self.launch_with(cwd, new_tab, config, "", None)
+    }
+
+    /// Launches Yazi with extra, already quoted arguments; `status` receives Yazi's exit status.
+    fn launch_with(
+        &mut self,
+        cwd: PathBuf,
+        new_tab: bool,
+        config: PathBuf,
+        extra: &str,
+        status: Option<&Path>,
+    ) -> TestResult<Client> {
         let owner = if new_tab {
             self.shell_tab(&cwd)?
         } else {
@@ -1211,10 +1223,13 @@ end })
             .map(|entry| entry.file_name())
             .collect();
         let line = format!(
-            "cd {} && YAZI_CONFIG_HOME={} yazi {}",
+            "cd {} && YAZI_CONFIG_HOME={} yazi {extra} {}{}",
             quote(text(&cwd)),
             quote(text(&config)),
-            quote(text(&cwd))
+            quote(text(&cwd)),
+            status
+                .map(|path| format!("; printf '%s\\n' \"$?\" > {}", quote(text(path))))
+                .unwrap_or_default()
         );
         self.paste(owner, &line)?;
         self.key("Enter")?;
@@ -4147,5 +4162,203 @@ fn real_parity_interactions() {
     let mut harness = Harness::new()
         .unwrap_or_else(|error| panic!("Real interaction prerequisites/setup failed: {error}"));
     let result = parity_flow(&mut harness);
+    conclude(&mut harness, result);
+}
+
+/// Waits for Yazi's exit to reach the shell and returns the status it printed.
+fn exited(
+    h: &mut Harness,
+    client: &Client,
+    watched: &BTreeSet<Process>,
+    status: &Path,
+) -> TestResult<String> {
+    h.removed(client, watched)?;
+    h.wait("the shell receives Yazi's exit status", |_| {
+        Ok(fs::read_to_string(status)
+            .ok()
+            .filter(|s| s.ends_with('\n'))
+            .map(|s| s.trim().to_owned()))
+    })
+}
+
+/// Quit and chooser lifecycle: `q`/`Q` go through Yazi's own quit, which writes `--cwd-file`
+/// and asks for confirmation while tasks run; `--chooser-file` turns Enter into a choice.
+fn quit_flow(h: &mut Harness) -> TestResult<()> {
+    let files = h.path("files");
+    let yazi = h.path("yazi");
+    let child = text(&files.join("child"));
+
+    h.case = "q quits through Yazi, which writes --cwd-file and exits 0";
+    let cwd_file = h.path("quit-cwd.txt");
+    let status = h.path("quit-status.txt");
+    let client = h.launch_with(
+        files.clone(),
+        true,
+        yazi.clone(),
+        &format!("--cwd-file {}", quote(text(&cwd_file))),
+        Some(&status),
+    )?;
+    h.key("Enter")?;
+    h.expect_state(&client, "Enter enters the first directory", |s| {
+        s["cwd"] == child
+    })?;
+    let watched = descendants(client.supervisor);
+    h.owned.extend(watched.iter().copied());
+    h.key("q")?;
+    let code = exited(h, &client, &watched, &status)?;
+    if code != "0" {
+        return Err(format!("Yazi exited {code} after q"));
+    }
+    let written = fs::read_to_string(&cwd_file).map_err(|e| format!("no cwd-file: {e}"))?;
+    if written.trim() != child {
+        return Err(format!("cwd-file holds {written:?}, expected {child}"));
+    }
+
+    h.case = "Q quits without writing --cwd-file";
+    let cwd_file = h.path("quit-nocwd.txt");
+    let status = h.path("quit-nocwd-status.txt");
+    let client = h.launch_with(
+        files.clone(),
+        true,
+        yazi.clone(),
+        &format!("--cwd-file {}", quote(text(&cwd_file))),
+        Some(&status),
+    )?;
+    h.key("Enter")?;
+    h.expect_state(&client, "Enter enters the first directory", |s| {
+        s["cwd"] == child
+    })?;
+    let watched = descendants(client.supervisor);
+    h.owned.extend(watched.iter().copied());
+    h.key("Q")?;
+    let code = exited(h, &client, &watched, &status)?;
+    if code != "0" || cwd_file.exists() {
+        return Err(format!(
+            "Q exited {code}; cwd-file exists: {}",
+            cwd_file.exists()
+        ));
+    }
+
+    h.case = "q with a running task asks first; Escape cancels and Enter quits";
+    let status = h.path("quit-tasks-status.txt");
+    let client = h.launch_with(files.clone(), true, yazi.clone(), "", Some(&status))?;
+    h.shell(&client, "sleep 12", false)?;
+    h.expect_state(&client, "Yazi reports the running task", |s| {
+        s["tasks"]["total"] == 1
+    })?;
+    let watched = descendants(client.supervisor);
+    h.owned.extend(watched.iter().copied());
+    const CONFIRM: &str = "[data-role=\"yazi.quit-confirm\"]";
+    h.key("q")?;
+    h.expect_ui(CONFIRM, "q shows the quit confirmation", |v| {
+        let text = ui_text(v);
+        text.contains("Quit?") && text.contains("unfinished")
+    })?;
+    h.shot("quit-confirmation")?;
+    h.key("Escape")?;
+    h.expect_ui(CONFIRM, "Escape closes the confirmation", |v| {
+        nodes(v).is_empty()
+    })?;
+    h.key("j")?;
+    let second = text(&files.join("copydest"));
+    h.expect_state(&client, "the browser still moves after cancelling", |s| {
+        hover(s) == second
+    })?;
+    h.key("q")?;
+    h.expect_ui(CONFIRM, "q asks again", |v| !nodes(v).is_empty())?;
+    h.key("Enter")?;
+    let code = exited(h, &client, &watched, &status)?;
+    if code != "0" {
+        return Err(format!("Confirmed quit exited {code}"));
+    }
+
+    h.case = "Enter on a file writes it to --chooser-file and exits; Enter on a directory enters";
+    let chosen = h.path("chosen.txt");
+    let status = h.path("chosen-status.txt");
+    let client = h.launch_with(
+        files.clone(),
+        true,
+        yazi.clone(),
+        &format!("--chooser-file {}", quote(text(&chosen))),
+        Some(&status),
+    )?;
+    h.key("Enter")?;
+    h.expect_state(&client, "Enter still enters a directory", |s| {
+        s["cwd"] == child
+    })?;
+    let watched = descendants(client.supervisor);
+    h.owned.extend(watched.iter().copied());
+    h.key("Enter")?;
+    let code = exited(h, &client, &watched, &status)?;
+    let picked = fs::read_to_string(&chosen).map_err(|e| format!("no chooser file: {e}"))?;
+    if code != "0" || picked.trim() != format!("{child}/inside.txt") {
+        return Err(format!("Chooser exited {code} with {picked:?}"));
+    }
+
+    h.case = "a selection is chosen even while a directory is hovered";
+    let chosen = h.path("chosen-selection.txt");
+    let status = h.path("chosen-selection-status.txt");
+    let client = h.launch_with(
+        files.clone(),
+        true,
+        yazi.clone(),
+        &format!("--chooser-file {}", quote(text(&chosen))),
+        Some(&status),
+    )?;
+    h.key("Space")?;
+    h.expect_state(&client, "Space selects the hovered directory", |s| {
+        selected(s) == BTreeSet::from([child.clone()])
+    })?;
+    let watched = descendants(client.supervisor);
+    h.owned.extend(watched.iter().copied());
+    h.key("Enter")?;
+    let code = exited(h, &client, &watched, &status)?;
+    let picked = fs::read_to_string(&chosen).map_err(|e| format!("no chooser file: {e}"))?;
+    if code != "0" || picked.trim() != child {
+        return Err(format!("Chooser exited {code} with {picked:?}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn real_quit_interactions() {
+    let mut harness = Harness::new()
+        .unwrap_or_else(|error| panic!("Real interaction prerequisites/setup failed: {error}"));
+    let result = quit_flow(&mut harness);
+    conclude(&mut harness, result);
+}
+
+/// Yazi notifications reach the surface as notices.
+fn notice_flow(h: &mut Harness) -> TestResult<()> {
+    h.case = "a Yazi notification is shown as a surface notice";
+    let plugin = h.path("yazi/plugins/notify.yazi");
+    fs::create_dir_all(&plugin).map_err(|e| e.to_string())?;
+    h.write_fixture(
+        "yazi/plugins/notify.yazi/main.lua",
+        "return { entry = function()\n  ya.notify { title = \"Fixture notice\", content = \"hello from the plugin\", timeout = 8, level = \"warn\" }\nend }\n",
+    )?;
+    let client = h.launch(h.path("files"), true)?;
+    h.shell(&client, "ya emit plugin notify", false)?;
+    h.expect_ui(
+        "[data-role=\"yazi.notice\"]",
+        "the notification text is drawn in the surface",
+        |v| ui_text(v).contains("Fixture notice: hello from the plugin"),
+    )?;
+    h.shot("yazi-notice")?;
+    // The notice is timed: it expires on its own.
+    h.expect_ui("[data-role=\"yazi.notice\"]", "the notice expires", |v| {
+        !ui_text(v).contains("Fixture notice")
+    })?;
+    let watched = descendants(client.supervisor);
+    h.owned.extend(watched.iter().copied());
+    h.key("q")?;
+    h.removed(&client, &watched)
+}
+
+#[test]
+fn real_notice_interactions() {
+    let mut harness = Harness::new()
+        .unwrap_or_else(|error| panic!("Real interaction prerequisites/setup failed: {error}"));
+    let result = notice_flow(&mut harness);
     conclude(&mut harness, result);
 }

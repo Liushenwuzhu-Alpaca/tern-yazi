@@ -132,6 +132,7 @@ pub(crate) fn view(frame: &Frame) -> View<Msg> {
         .dock(region(&role, "dock", browser.dock()));
     let layer = match &frame.ui.mode {
         Mode::Trash(paths) => Some(trash_layer(paths, frame.rows)),
+        Mode::Quit { count, titles, .. } => Some(quit_layer(*count, titles)),
         Mode::Theme { at, .. } => Some(theme_layer(*at)),
         Mode::Tasks => Some(tasks_layer(&yz.task_manager)),
         _ => path_layer,
@@ -158,6 +159,50 @@ fn startup(waiting: &Waiting) -> N {
         ],
     )
     .into()
+}
+
+/// Yazi's quit confirmation (`quit_title`, `quit_body` of its default config): shown by the
+/// surface because Yazi's own popup would be drawn on its hidden terminal. Yazi lists up to ten
+/// task titles, then "... and N more"; titles exist only while its task manager is open.
+fn quit_layer(count: u64, titles: &[String]) -> N {
+    let mut lines: Vec<String> = titles.iter().take(10).cloned().collect();
+    if lines.is_empty() {
+        lines.push(format!(
+            "{count} unfinished task{}",
+            if count == 1 { "" } else { "s" }
+        ));
+    } else if count as usize > lines.len() {
+        lines.push(format!("... and {} more", count as usize - lines.len()));
+    }
+    let items = lines.iter().enumerate().map(|(index, line)| {
+        ui::item(serde_json::to_string(line).unwrap_or_default()).key((index + 1).to_string())
+    });
+    ui::node("card")
+        .key("quit")
+        .role("yazi.quit-confirm")
+        .child(ui::text("Quit?"))
+        .child(ui::text(
+            "There are unfinished tasks, quit anyway? (Open task manager with 'w')",
+        ))
+        .child(
+            ui::list()
+                .key("tasks")
+                .max_lines(lines.len() as u32)
+                .children(items),
+        )
+        .child(
+            ui::row()
+                .key("controls")
+                .child(button("cancel", ui::text("Cancel [Esc]"), Msg::QuitCancel))
+                .child(
+                    ui::node("el")
+                        .prop("tag", "button")
+                        .key("confirm")
+                        .tone("warn")
+                        .child(ui::text("Quit [Enter]"))
+                        .on_click(Msg::QuitConfirm),
+                ),
+        )
 }
 
 fn trash_layer(paths: &[String], rows: u32) -> N {
@@ -593,10 +638,10 @@ impl Browser<'_> {
             None => ui::row().child(match self.frame.notice {
                 Some((level, text)) => spans(vec![span(
                     text,
-                    if level == Level::Error {
-                        "error"
-                    } else {
-                        "muted"
+                    match level {
+                        Level::Error => "error",
+                        Level::Warn => "warn",
+                        Level::Info => "muted",
                     },
                 )])
                 .role("yazi.notice"),
