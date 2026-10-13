@@ -309,6 +309,16 @@ impl Backend {
         }
     }
 
+    /// Whether Yazi's terminal is in line mode (canonical input), as while a subprocess prompts.
+    pub(crate) fn cooked(&self) -> bool {
+        let mut attrs = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // The master end reports the slave's settings.
+        if unsafe { libc::tcgetattr(self.master.as_raw_fd(), attrs.as_mut_ptr()) } != 0 {
+            return false;
+        }
+        unsafe { attrs.assume_init() }.c_lflag & libc::ICANON != 0
+    }
+
     /// Types `bytes` into Yazi's terminal, waiting out a full PTY input queue.
     pub(crate) fn type_in(&self, mut bytes: &[u8]) -> io::Result<()> {
         let fd = self.master.as_raw_fd();

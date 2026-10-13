@@ -241,8 +241,14 @@ fn relay(backend: &mut Backend, pane: &mut PaneSize, link: &Link) -> io::Result<
             Err(error) => break Err(error),
         }
         if !keys.is_empty() {
+            let answers = owed && keys[0] == 0x1b && backend.cooked();
             owed &= !da1_reply(&keys);
-            backend.type_in(&keys)?;
+            // Yazi leaves raw mode right after the burst when a task of its own (bulk rename)
+            // takes the terminal back, without waiting for the answers. Typed into the line
+            // discipline they would become the input of the task's prompt.
+            if !answers {
+                backend.type_in(&keys)?;
+            }
         }
     };
     filter.finish(&mut link.held.borrow_mut());

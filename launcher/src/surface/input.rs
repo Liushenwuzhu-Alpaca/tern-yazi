@@ -64,6 +64,32 @@ pub(crate) enum Mode {
         count: u64,
         titles: Vec<String>,
     },
+    /// The tab rename line.
+    TabRename(Editor),
+    /// Exact paths Yazi prepared, awaiting confirmation to delete them for good.
+    Delete(Vec<String>),
+    /// `Overwrite file?`: `retry` is the request to resend with `overwrite`, `back` the input
+    /// the user returns to on cancel.
+    Overwrite {
+        retry: Value,
+        target: String,
+        back: Box<Mode>,
+    },
+    /// The picker of openers for `paths`; each row is `[id, description, command]`.
+    Open {
+        paths: Vec<String>,
+        rows: Vec<Vec<String>>,
+        at: usize,
+    },
+    /// Yazi's spot table for the hovered file: `[heading]` or `[label, value]` rows.
+    Spot {
+        rows: Vec<Vec<String>>,
+        at: usize,
+    },
+    /// The key help; `at` scrolls it.
+    Help {
+        at: usize,
+    },
     /// The theme picker; `original` is restored on cancel.
     Theme {
         at: usize,
@@ -77,6 +103,8 @@ pub(crate) enum List {
     Files,
     Child,
     Themes,
+    /// Rows of the opener picker, the spot table and the help layer (index ids).
+    Layer,
 }
 
 /// What the view's handlers send back.
@@ -96,6 +124,9 @@ pub(crate) enum Msg {
     TrashCancel,
     QuitConfirm,
     QuitCancel,
+    OverwriteConfirm,
+    OverwriteCancel,
+    LayerClose,
     Select(List, String),
     Activate(List, String),
 }
@@ -116,6 +147,16 @@ pub(crate) enum Then {
     /// Yazi's answer to a quit request: unfinished tasks to confirm, or it is quitting.
     Quit {
         no_cwd: bool,
+    },
+    DeletePrepared,
+    DeleteQueued,
+    OpenPrepared,
+    Spotted,
+    /// A create or rename that may meet an existing destination: `back` is the input to
+    /// restore, `body` the request to retry with `overwrite`.
+    Overwritable {
+        back: Box<Mode>,
+        body: Value,
     },
 }
 
@@ -154,6 +195,11 @@ pub(crate) struct Reply {
     pub(crate) titles: Vec<String>,
     /// Yazi accepted the quit and is exiting.
     pub(crate) quitting: bool,
+    /// Yazi's `exists`: the create or rename destination is taken (answered, not failed).
+    pub(crate) exists: bool,
+    pub(crate) target: Option<String>,
+    /// Rows of strings: openers (`[id, description, command]`) or spot cells.
+    pub(crate) rows: Vec<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,6 +207,253 @@ enum Pending {
     G,
     T,
     C,
+    M,
+    Comma,
+}
+
+impl Pending {
+    fn opened_by(name: &str) -> Option<Self> {
+        match name {
+            "g" => Some(Self::G),
+            "t" => Some(Self::T),
+            "c" => Some(Self::C),
+            "m" => Some(Self::M),
+            "," | "comma" => Some(Self::Comma),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::G => "g",
+            Self::T => "t",
+            Self::C => "c",
+            Self::M => "m",
+            Self::Comma => ",",
+        }
+    }
+}
+
+/// What the second key of a prefix does.
+#[derive(Clone, Copy, Debug)]
+enum Act {
+    Top,
+    /// A directory relative to the home directory (`""` is home itself).
+    Cd(&'static str),
+    PathEdit,
+    Follow,
+    TabCreate,
+    TabRename,
+    Copy(&'static str),
+    Sort {
+        by: &'static str,
+        reverse: bool,
+        linemode: Option<&'static str>,
+    },
+    Linemode(&'static str),
+}
+
+/// One second key of a prefix. The table is the single source of truth: it dispatches the
+/// key, fills the which-style hint under a pending prefix and the help layer.
+struct Chord {
+    prefix: Pending,
+    key: &'static str,
+    desc: &'static str,
+    act: Act,
+}
+
+const fn chord(prefix: Pending, key: &'static str, desc: &'static str, act: Act) -> Chord {
+    Chord {
+        prefix,
+        key,
+        desc,
+        act,
+    }
+}
+
+/// Yazi's default `,` sort keys: lowercase ascending, uppercase reversed. Time and size
+/// sorts also switch the linemode, as the default keymap does.
+const fn sort(
+    key: &'static str,
+    desc: &'static str,
+    by: &'static str,
+    reverse: bool,
+    linemode: Option<&'static str>,
+) -> Chord {
+    chord(
+        Pending::Comma,
+        key,
+        desc,
+        Act::Sort {
+            by,
+            reverse,
+            linemode,
+        },
+    )
+}
+
+const fn linemode(key: &'static str, desc: &'static str, mode: &'static str) -> Chord {
+    chord(Pending::M, key, desc, Act::Linemode(mode))
+}
+
+const CHORDS: &[Chord] = &[
+    chord(Pending::G, "g", "Go to the top", Act::Top),
+    chord(Pending::G, "h", "Go to the home directory", Act::Cd("")),
+    chord(Pending::G, "c", "Go to ~/.config", Act::Cd(".config")),
+    chord(Pending::G, "d", "Go to ~/Downloads", Act::Cd("Downloads")),
+    chord(Pending::G, "space", "Jump to a typed path", Act::PathEdit),
+    chord(Pending::G, "f", "Follow the hovered symlink", Act::Follow),
+    chord(
+        Pending::T,
+        "t",
+        "Create a tab in this directory",
+        Act::TabCreate,
+    ),
+    chord(Pending::T, "r", "Rename the current tab", Act::TabRename),
+    chord(Pending::C, "c", "Copy the file path", Act::Copy("c")),
+    chord(Pending::C, "d", "Copy the directory path", Act::Copy("d")),
+    chord(Pending::C, "f", "Copy the file name", Act::Copy("f")),
+    chord(
+        Pending::C,
+        "n",
+        "Copy the name without extension",
+        Act::Copy("n"),
+    ),
+    linemode("s", "Linemode: size", "size"),
+    linemode("p", "Linemode: permissions", "permissions"),
+    linemode("b", "Linemode: creation time", "btime"),
+    linemode("m", "Linemode: modified time", "mtime"),
+    linemode("o", "Linemode: owner", "owner"),
+    linemode("n", "Linemode: none", "none"),
+    sort("m", "Sort by modified time", "mtime", false, Some("mtime")),
+    sort(
+        "M",
+        "Sort by modified time, reversed",
+        "mtime",
+        true,
+        Some("mtime"),
+    ),
+    sort("b", "Sort by creation time", "btime", false, Some("btime")),
+    sort(
+        "B",
+        "Sort by creation time, reversed",
+        "btime",
+        true,
+        Some("btime"),
+    ),
+    sort("e", "Sort by extension", "extension", false, None),
+    sort("E", "Sort by extension, reversed", "extension", true, None),
+    sort("a", "Sort alphabetically", "alphabetical", false, None),
+    sort(
+        "A",
+        "Sort alphabetically, reversed",
+        "alphabetical",
+        true,
+        None,
+    ),
+    sort("n", "Sort naturally", "natural", false, None),
+    sort("N", "Sort naturally, reversed", "natural", true, None),
+    sort("s", "Sort by size", "size", false, Some("size")),
+    sort("S", "Sort by size, reversed", "size", true, Some("size")),
+    sort("r", "Sort randomly", "random", false, None),
+];
+
+/// The keys that act alone, as the help layer lists them (prefixed keys come from `CHORDS`).
+const KEYS: &[(&str, &str)] = &[
+    ("j k  Down Up", "Move the cursor"),
+    ("h  Left", "Go to the parent directory"),
+    ("l  Right", "Enter the hovered directory"),
+    ("G  End", "Go to the bottom"),
+    ("Home", "Go to the top"),
+    ("Ctrl-u Ctrl-d", "Move half a page"),
+    ("Ctrl-b Ctrl-f  PgUp PgDn", "Move a page"),
+    ("H  L", "Go back / forward in history"),
+    ("J  K", "Seek the preview down / up"),
+    ("1-9  [ ]", "Switch tab"),
+    ("{ }  Shift-[ Shift-]", "Swap the tab with its neighbour"),
+    ("Enter  o", "Open in Tern, or enter a directory"),
+    ("O  Shift-Enter", "Pick an opener and open with it"),
+    ("Tab", "Spot the hovered file"),
+    ("Space", "Toggle the selection and move down"),
+    ("v  V", "Visual mode / leave visual mode"),
+    ("Ctrl-a  Ctrl-r", "Select all / invert the selection"),
+    ("y  x  X Y", "Yank / cut / cancel the yank"),
+    ("p  P", "Paste / paste over existing files"),
+    (
+        "-  _  Ctrl--",
+        "Symlink / relative symlink / hardlink the yank",
+    ),
+    ("d", "Trash the selection"),
+    ("D", "Delete the selection permanently"),
+    ("a", "Create a file, or a directory with a trailing /"),
+    ("r", "Rename the hovered file; bulk rename the selection"),
+    ("f", "Filter the directory"),
+    ("/  ?", "Find forward / backward"),
+    ("n  N", "Next / previous find match"),
+    ("s  S", "Search by name / by content"),
+    (":  ;", "Run a shell command blocking / in the background"),
+    (".", "Toggle hidden files"),
+    ("w", "Show Yazi's tasks"),
+    ("W", "Open a terminal here"),
+    ("z  Z", "fzf / zoxide jump"),
+    ("T", "Pick a layout theme"),
+    ("Esc", "Cancel, clear the selection and the search"),
+    ("Ctrl-c", "Close the tab"),
+    ("Ctrl-z", "Suspend the browser and Yazi"),
+    ("q", "Quit"),
+    ("~  F1", "This help"),
+];
+
+/// What the help layer lists: the single keys, then every prefixed key.
+pub(crate) fn help_rows() -> Vec<(String, &'static str)> {
+    KEYS.iter()
+        .map(|(keys, desc)| ((*keys).to_owned(), *desc))
+        .chain(CHORDS.iter().map(|chord| {
+            (
+                format!("{} {}", chord.prefix.label(), key_label(chord.key)),
+                chord.desc,
+            )
+        }))
+        .collect()
+}
+
+/// A chord key as the hint and the help show it.
+pub(crate) fn key_label(key: &str) -> &str {
+    if key == "space" {
+        "Space"
+    } else {
+        key
+    }
+}
+
+/// The which-style hint: the open prefix and the keys that can follow.
+pub(crate) struct Hint {
+    pub(crate) prefix: &'static str,
+    pub(crate) keys: Vec<(&'static str, &'static str)>,
+}
+
+/// The key as the second key of a prefix: letters keep their case, Space is `space`.
+fn chord_key(key: &Key) -> String {
+    let name = key.name.as_str();
+    let mut chars = name.chars();
+    match (chars.next(), chars.next()) {
+        (Some(letter), None) if letter.is_ascii_alphabetic() => {
+            if key.shift || letter.is_ascii_uppercase() {
+                letter.to_ascii_uppercase().to_string()
+            } else {
+                letter.to_string()
+            }
+        }
+        (Some(' '), None) => "space".to_owned(),
+        _ => name.to_owned(),
+    }
+}
+
+fn chord_for(prefix: Pending, key: &Key) -> Option<&'static Chord> {
+    let typed = chord_key(key);
+    CHORDS
+        .iter()
+        .find(|chord| chord.prefix == prefix && chord.key == typed)
 }
 
 pub(crate) struct Ui {
@@ -350,7 +643,68 @@ impl Ui {
                 }
             }
             Then::Quit { .. } => {}
-            Then::TrashPrepared | Then::TrashQueued => {}
+            Then::DeletePrepared if reply.ok => {
+                if reply.paths.is_empty() {
+                    effects.push(Effect::Notice(Level::Info, "Nothing to delete".to_owned()));
+                } else {
+                    self.mode = Mode::Delete(reply.paths.clone());
+                }
+            }
+            Then::DeleteQueued if reply.ok => effects.push(Effect::Notice(
+                Level::Info,
+                "Permanent delete queued in Yazi; completion is reported by Yazi tasks".to_owned(),
+            )),
+            Then::OpenPrepared if reply.ok && self.mode == Mode::Normal => {
+                let rows: Vec<Vec<String>> = reply
+                    .rows
+                    .iter()
+                    .filter(|row| row.len() >= 2)
+                    .cloned()
+                    .collect();
+                if reply.paths.is_empty() {
+                    effects.push(Effect::Notice(Level::Info, "Nothing to open".to_owned()));
+                } else if rows.is_empty() {
+                    effects.push(Effect::Notice(
+                        Level::Info,
+                        "No application is configured for the selection".to_owned(),
+                    ));
+                } else {
+                    self.mode = Mode::Open {
+                        paths: reply.paths.clone(),
+                        rows,
+                        at: 0,
+                    };
+                }
+            }
+            Then::Spotted if reply.ok && self.mode == Mode::Normal => {
+                let at = reply
+                    .rows
+                    .iter()
+                    .position(|row| row.len() >= 2)
+                    .unwrap_or(0);
+                self.mode = Mode::Spot {
+                    rows: reply.rows.clone(),
+                    at,
+                };
+            }
+            Then::Overwritable { back, body } if reply.exists && self.mode == Mode::Normal => {
+                self.mode = Mode::Overwrite {
+                    retry: body,
+                    target: reply.target.clone().unwrap_or_default(),
+                    back,
+                };
+            }
+            Then::Overwritable { .. } if reply.exists => effects.push(Effect::Notice(
+                Level::Error,
+                "Destination already exists".to_owned(),
+            )),
+            Then::TrashPrepared
+            | Then::TrashQueued
+            | Then::DeletePrepared
+            | Then::DeleteQueued
+            | Then::OpenPrepared
+            | Then::Spotted
+            | Then::Overwritable { .. } => {}
         }
         effects
     }
@@ -380,15 +734,128 @@ impl Ui {
     }
 
     fn trash_decision(&mut self, confirm: bool) -> Vec<Effect> {
-        let Mode::Trash(paths) = std::mem::replace(&mut self.mode, Mode::Normal) else {
-            return Vec::new();
+        let (paths, permanent) = match std::mem::replace(&mut self.mode, Mode::Normal) {
+            Mode::Trash(paths) => (paths, false),
+            Mode::Delete(paths) => (paths, true),
+            other => {
+                self.mode = other;
+                return Vec::new();
+            }
         };
         if !confirm {
             return Vec::new();
         }
-        vec![Effect::Request(
-            json!({"op": "trash_commit", "paths": paths}),
-            Then::TrashQueued,
+        let mut body = json!({"op": "trash_commit", "paths": paths});
+        let then = if permanent {
+            body["permanent"] = json!(true);
+            Then::DeleteQueued
+        } else {
+            Then::TrashQueued
+        };
+        vec![Effect::Request(body, then)]
+    }
+
+    fn open_path(&mut self, yz: &Snapshot) {
+        let cwd = yz.current.cwd.clone();
+        let end = utf16_len(&cwd);
+        self.mode = Mode::Path(Editor::new(cwd, end, 0));
+        self.path_menu = false;
+    }
+
+    /// The second key of a prefix: its table entry decides what happens.
+    fn chord(&mut self, act: Act, yz: &Snapshot, home: &str) -> Vec<Effect> {
+        match act {
+            Act::Top => vec![action("arrow", &["top"], json!({}))],
+            Act::Cd(relative) => {
+                if home.is_empty() {
+                    return vec![Effect::Notice(
+                        Level::Error,
+                        "Home directory is unknown".to_owned(),
+                    )];
+                }
+                let target = if relative.is_empty() {
+                    home.to_owned()
+                } else {
+                    join_path(home, relative)
+                };
+                vec![self.jump(target)]
+            }
+            Act::PathEdit => {
+                self.open_path(yz);
+                Vec::new()
+            }
+            Act::Follow => vec![action("follow", &[], json!({}))],
+            Act::TabCreate => vec![action("tab_create", &[], json!({"current": true}))],
+            Act::TabRename => {
+                let name = yz
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.active)
+                    .map(|tab| tab.custom.clone())
+                    .unwrap_or_default();
+                let end = utf16_len(&name);
+                self.mode = Mode::TabRename(Editor::new(name, end, end));
+                Vec::new()
+            }
+            Act::Copy(what) => copy_paths(what, yz).map(Effect::Copy).into_iter().collect(),
+            Act::Sort {
+                by,
+                reverse,
+                linemode,
+            } => {
+                let mut effects = vec![action("sort", &[by], json!({"reverse": reverse}))];
+                effects.extend(linemode.map(|mode| action("linemode", &[mode], json!({}))));
+                effects
+            }
+            Act::Linemode(mode) => vec![action("linemode", &[mode], json!({}))],
+        }
+    }
+
+    /// Enter or Esc on the overwrite confirm: retry with `overwrite`, or back to the input.
+    fn overwrite_decision(&mut self, confirm: bool) -> Vec<Effect> {
+        let Mode::Overwrite { retry, back, .. } = std::mem::replace(&mut self.mode, Mode::Normal)
+        else {
+            return Vec::new();
+        };
+        if confirm {
+            let mut body = retry;
+            body["overwrite"] = json!(true);
+            vec![request(body)]
+        } else {
+            self.mode = *back;
+            Vec::new()
+        }
+    }
+
+    fn open_key(&mut self, key: &Key, escape: bool, enter: bool) -> Vec<Effect> {
+        let name = key.name.as_str();
+        if escape || name == "q" || (key.ctrl && name == "c") {
+            self.mode = Mode::Normal;
+            return Vec::new();
+        }
+        if enter {
+            return self.open_pick();
+        }
+        if let Mode::Open { rows, at, .. } = &mut self.mode {
+            match name {
+                "j" | "down" => *at = (*at + 1).min(rows.len().saturating_sub(1)),
+                "k" | "up" => *at = at.saturating_sub(1),
+                _ => {}
+            }
+        }
+        Vec::new()
+    }
+
+    /// Runs the picked opener on the exact paths the picker was opened for.
+    fn open_pick(&mut self) -> Vec<Effect> {
+        let Mode::Open { paths, rows, at } = std::mem::replace(&mut self.mode, Mode::Normal) else {
+            return Vec::new();
+        };
+        let Some(opener) = rows.get(at).and_then(|row| row.first()) else {
+            return Vec::new();
+        };
+        vec![request(
+            json!({"op": "open_with", "paths": paths, "opener": opener}),
         )]
     }
 
@@ -412,6 +879,99 @@ impl Ui {
         )]
     }
 
+    fn spot_key(&mut self, key: &Key, pending: Option<Pending>, escape: bool) -> Vec<Effect> {
+        let name = key.name.as_str();
+        let plain = !key.shift && !key.ctrl && !key.alt && !key.meta;
+        if escape || name == "tab" || name == "q" || (key.ctrl && name == "c") {
+            self.mode = Mode::Normal;
+            return Vec::new();
+        }
+        let Mode::Spot { rows, at } = &mut self.mode else {
+            return Vec::new();
+        };
+        match name {
+            "j" | "down" => *at = (*at + 1).min(rows.len().saturating_sub(1)),
+            "k" | "up" => *at = at.saturating_sub(1),
+            // `cc` copies the selected cell, like Yazi's `spot:copy cell`.
+            "c" if plain => {
+                if pending == Some(Pending::C) {
+                    let cell = rows.get(*at).and_then(|row| row.get(1)).cloned();
+                    return cell.map(Effect::Copy).into_iter().collect();
+                }
+                self.pending = Some(Pending::C);
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn help_key(&mut self, key: &Key, escape: bool) -> Vec<Effect> {
+        let name = key.name.as_str();
+        if escape || matches!(name, "q" | "~" | "tilde" | "f1") || (key.ctrl && name == "c") {
+            self.mode = Mode::Normal;
+            return Vec::new();
+        }
+        let last = help_rows().len().saturating_sub(1);
+        if let Mode::Help { at } = &mut self.mode {
+            match name {
+                "j" | "down" => *at = (*at + 1).min(last),
+                "k" | "up" => *at = at.saturating_sub(1),
+                "page_down" => *at = (*at + 10).min(last),
+                "page_up" => *at = at.saturating_sub(10),
+                "home" => *at = 0,
+                "end" => *at = last,
+                "g" if key.shift => *at = last,
+                "g" => *at = 0,
+                _ => {}
+            }
+        }
+        Vec::new()
+    }
+
+    /// Pointer messages for the layers that own the whole screen.
+    fn layer_msg(&mut self, msg: Msg) -> Vec<Effect> {
+        match msg {
+            Msg::OverwriteConfirm => self.overwrite_decision(true),
+            Msg::OverwriteCancel => self.overwrite_decision(false),
+            Msg::LayerClose => {
+                if !matches!(self.mode, Mode::Overwrite { .. }) {
+                    self.mode = Mode::Normal;
+                }
+                Vec::new()
+            }
+            Msg::Select(List::Layer, id) | Msg::Activate(List::Layer, id) => {
+                let Ok(index) = id.parse::<usize>() else {
+                    return Vec::new();
+                };
+                if let Mode::Open { at, .. } | Mode::Spot { at, .. } | Mode::Help { at } =
+                    &mut self.mode
+                {
+                    *at = index;
+                }
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The which-style hint of the open key prefix: the keys that can follow it.
+    pub(crate) fn hint(&self) -> Option<Hint> {
+        let prefix = self.pending?;
+        let keys = if matches!(self.mode, Mode::Spot { .. }) {
+            vec![("c", "Copy the selected cell")]
+        } else {
+            CHORDS
+                .iter()
+                .filter(|chord| chord.prefix == prefix)
+                .map(|chord| (chord.key, chord.desc))
+                .collect()
+        };
+        Some(Hint {
+            prefix: prefix.label(),
+            keys,
+        })
+    }
+
     fn clear_find(&mut self) -> Effect {
         self.mode = Mode::Normal;
         action("escape", &[], json!({"find": true}))
@@ -432,6 +992,7 @@ impl Ui {
             | Mode::Search { editor, .. }
             | Mode::Filter(editor)
             | Mode::Create(editor)
+            | Mode::TabRename(editor)
             | Mode::Rename { editor, .. } => Some(editor),
             _ => None,
         }
@@ -509,8 +1070,17 @@ impl Ui {
                 )]
             }
             Mode::Create(editor) if !editor.text.is_empty() => {
-                vec![request(json!({"op": "create", "name": editor.text}))]
+                let body = json!({"op": "create", "name": editor.text});
+                let back = Mode::Create(editor);
+                vec![Effect::Request(
+                    body.clone(),
+                    Then::Overwritable {
+                        back: Box::new(back),
+                        body,
+                    },
+                )]
             }
+            Mode::TabRename(editor) => vec![action("tab_rename", &[&editor.text], json!({}))],
             _ => Vec::new(),
         }
     }
@@ -532,13 +1102,23 @@ impl Ui {
                     Vec::new()
                 };
             }
-            Mode::Trash(_) => {
+            Mode::Trash(_) | Mode::Delete(_) => {
                 return if escape || enter {
                     self.trash_decision(enter)
                 } else {
                     Vec::new()
                 };
             }
+            Mode::Overwrite { .. } => {
+                return if escape || enter || matches!(name, "y" | "n") {
+                    self.overwrite_decision(enter || name == "y")
+                } else {
+                    Vec::new()
+                };
+            }
+            Mode::Open { .. } => return self.open_key(key, escape, enter),
+            Mode::Spot { .. } => return self.spot_key(key, pending, escape),
+            Mode::Help { .. } => return self.help_key(key, escape),
             Mode::Theme { at, original } => {
                 let (at, original) = (*at, *original);
                 if escape {
@@ -571,6 +1151,7 @@ impl Ui {
             | Mode::Find { .. }
             | Mode::Filter(_)
             | Mode::Create(_)
+            | Mode::TabRename(_)
             | Mode::Rename { .. } => return self.line_key(key, yz, home),
             Mode::Tasks => {
                 let effect = if escape || name == "w" || (key.ctrl && name == "c") {
@@ -590,9 +1171,10 @@ impl Ui {
             }
             Mode::Normal => {}
         }
-        self.normal_key(key, yz, pending, escape, enter, plain)
+        self.normal_key(key, yz, pending, escape, enter, plain, home)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn normal_key(
         &mut self,
         key: &Key,
@@ -601,6 +1183,7 @@ impl Ui {
         escape: bool,
         enter: bool,
         plain: bool,
+        home: &str,
     ) -> Vec<Effect> {
         let name = key.name.as_str();
         if key.alt || key.meta {
@@ -639,35 +1222,24 @@ impl Ui {
         if key.ctrl {
             return Vec::new();
         }
+        // The second key of a prefix (`g`, `t`, `c`, `m` or `,`) runs before any key of its own.
+        if let Some(chord) = pending.and_then(|prefix| chord_for(prefix, key)) {
+            return self.chord(chord.act, yz, home);
+        }
         if name == "end" || (name == "g" && upper) {
             return vec![action("arrow", &["bot"], json!({}))];
         }
         if name == "home" {
             return vec![action("arrow", &["top"], json!({}))];
         }
-        if name == "g" && plain {
-            if pending == Some(Pending::G) {
-                return vec![action("arrow", &["top"], json!({}))];
+        if plain {
+            if let Some(prefix) = Pending::opened_by(name) {
+                self.pending = Some(prefix);
+                return Vec::new();
             }
-            self.pending = Some(Pending::G);
-            return Vec::new();
         }
-        if name == "t" && plain {
-            if pending == Some(Pending::T) {
-                return vec![action("tab_create", &[], json!({"current": true}))];
-            }
-            self.pending = Some(Pending::T);
-            return Vec::new();
-        }
-        if name == "n" && pending != Some(Pending::C) {
+        if name == "n" {
             return vec![action("find_arrow", &[], json!({"previous": upper}))];
-        }
-        if plain && pending == Some(Pending::C) && matches!(name, "c" | "d" | "f" | "n") {
-            return copy_paths(name, yz).map(Effect::Copy).into_iter().collect();
-        }
-        if name == "c" && plain {
-            self.pending = Some(Pending::C);
-            return Vec::new();
         }
         let letter = name.len() == 1 && name.as_bytes()[0].is_ascii_alphabetic();
         if upper && letter {
@@ -681,6 +1253,15 @@ impl Ui {
                 "k" => vec![action("seek", &["-5"], json!({}))],
                 "z" => vec![action("plugin", &["zoxide"], json!({}))],
                 "q" => vec![self.quit(true)],
+                // `D` deletes for good, after the same prepare and confirm as Trash.
+                "d" => vec![Effect::Request(
+                    json!({"op": "trash_prepare"}),
+                    Then::DeletePrepared,
+                )],
+                "o" => vec![Effect::Request(
+                    json!({"op": "open_prepare"}),
+                    Then::OpenPrepared,
+                )],
                 "s" => {
                     self.mode = Mode::Search {
                         editor: Editor::default(),
@@ -706,6 +1287,9 @@ impl Ui {
             "k" | "up" => action("arrow", &["-1"], json!({})),
             "h" | "left" => action("leave", &[], json!({})),
             "l" | "right" => action("enter", &[], json!({})),
+            _ if enter && key.shift => {
+                Effect::Request(json!({"op": "open_prepare"}), Then::OpenPrepared)
+            }
             // Enter on a directory enters it; otherwise Enter and `o` open the selection, or
             // the hovered entry, in Tern.
             _ if enter || name == "o" => match &yz.hovered {
@@ -782,22 +1366,47 @@ impl Ui {
                 return Vec::new();
             }
             "r" => {
-                if let Some(hover) = &yz.hovered {
-                    let name = basename(&hover.url).to_owned();
+                // Like Yazi, `r` renames the selection in bulk, in the editor Yazi lends the pane.
+                if !yz.selected_urls.is_empty() || !yz.marked_urls.is_empty() {
+                    return vec![request(json!({"op": "bulk_rename"}))];
+                }
+                // The file the browser shows as active: a click's reveal is still on its way
+                // to the snapshot, but Yazi will have hovered it by the time the rename runs.
+                let cwd = self.cwd(yz).to_owned();
+                let entry = match self.active_file.as_deref() {
+                    Some(name)
+                        if yz
+                            .directory(&cwd)
+                            .is_some_and(|f| f.files.iter().any(|n| n == name)) =>
+                    {
+                        Some((join_path(&cwd, name), yz.is_dir(&cwd, name)))
+                    }
+                    _ => yz
+                        .hovered
+                        .as_ref()
+                        .map(|hover| (hover.url.clone(), hover.dir)),
+                };
+                if let Some((url, dir)) = entry {
+                    let name = basename(&url).to_owned();
                     // The caret lands before a file's extension, like Yazi's own rename.
                     let stem = match name.rfind('.') {
-                        Some(dot) if dot > 0 && hover.dir != Some(true) => dot,
+                        Some(dot) if dot > 0 && dir != Some(true) => dot,
                         _ => name.len(),
                     };
                     let caret = utf16_len(&name[..stem]);
                     self.mode = Mode::Rename {
                         editor: Editor::new(name, caret, caret),
-                        target: hover.url.clone(),
+                        target: url,
                     };
                 }
                 return Vec::new();
             }
             "." | "period" => action("hidden", &[], json!({"state": "toggle"})),
+            "~" | "tilde" | "f1" => {
+                self.mode = Mode::Help { at: 0 };
+                return Vec::new();
+            }
+            "tab" => Effect::Request(json!({"op": "spot"}), Then::Spotted),
             "q" => self.quit(false),
             _ => return Vec::new(),
         };
@@ -812,8 +1421,15 @@ impl Ui {
         if editor.text.is_empty() {
             return Vec::new();
         }
-        vec![request(
-            json!({"op": "rename", "target": target, "new_name": editor.text}),
+        let body = json!({"op": "rename", "target": target, "new_name": editor.text});
+        // An existing destination is Yazi's `Overwrite file?`; the answer arrives as `exists`.
+        let back = Mode::Rename { editor, target };
+        vec![Effect::Request(
+            body.clone(),
+            Then::Overwritable {
+                back: Box::new(back),
+                body,
+            },
         )]
     }
 
@@ -839,12 +1455,18 @@ impl Ui {
                 _ => Vec::new(),
             };
         }
-        if matches!(self.mode, Mode::Trash(_)) {
+        if matches!(self.mode, Mode::Trash(_) | Mode::Delete(_)) {
             return match msg {
                 Msg::TrashConfirm => self.trash_decision(true),
                 Msg::TrashCancel => self.trash_decision(false),
                 _ => Vec::new(),
             };
+        }
+        if matches!(
+            self.mode,
+            Mode::Overwrite { .. } | Mode::Open { .. } | Mode::Spot { .. } | Mode::Help { .. }
+        ) {
+            return self.layer_msg(msg);
         }
         self.pending = None;
         match msg {
@@ -868,10 +1490,7 @@ impl Ui {
                 return self.line_submit(yz, home);
             }
             Msg::PathEdit => {
-                let cwd = yz.current.cwd.clone();
-                let end = utf16_len(&cwd);
-                self.mode = Mode::Path(Editor::new(cwd, end, 0));
-                self.path_menu = false;
+                self.open_path(yz);
             }
             Msg::PathCancel => {
                 if matches!(self.mode, Mode::Path(_)) {
@@ -890,7 +1509,8 @@ impl Ui {
                 Mode::Command { .. }
                 | Mode::Search { .. }
                 | Mode::Create(_)
-                | Mode::Rename { .. } => self.mode = Mode::Normal,
+                | Mode::Rename { .. }
+                | Mode::TabRename(_) => self.mode = Mode::Normal,
                 Mode::Tasks => {
                     self.mode = Mode::Normal;
                     return vec![tasks("close", None)];
@@ -920,7 +1540,10 @@ impl Ui {
             | Msg::TrashConfirm
             | Msg::TrashCancel
             | Msg::QuitConfirm
-            | Msg::QuitCancel => {}
+            | Msg::QuitCancel
+            | Msg::OverwriteConfirm
+            | Msg::OverwriteCancel
+            | Msg::LayerClose => {}
         }
         Vec::new()
     }
@@ -939,7 +1562,7 @@ impl Ui {
                         .map(|hover| relative(&cwd, &hover.url).to_owned())
                 })
                 .map(|active| join_path(&cwd, &active)),
-            List::Themes => None,
+            List::Themes | List::Layer => None,
         };
         let Some(base) = base else {
             return Vec::new();
@@ -1022,6 +1645,21 @@ mod tests {
             [Effect::Request(body, _)] => body,
             other => panic!("expected one request, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rename_follows_the_active_file_the_snapshot_has_not_caught_up_to() {
+        // A click reveals `child` optimistically while the snapshot still hovers notes.md.
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        ui.active_file = Some("child".to_owned());
+        assert!(ui.key(&key("r"), &yz, "/home/u").is_empty());
+        let Mode::Rename { editor, target } = &ui.mode else {
+            panic!("rename mode expected");
+        };
+        assert_eq!(target, "/tmp/files/child");
+        assert_eq!(editor.text, "child");
+        assert_eq!(editor.cursor, 5);
     }
 
     #[test]
@@ -1502,7 +2140,7 @@ mod tests {
         let note = vec!["/tmp/files/notes.md".to_owned()];
         assert_eq!(ui.key(&key("o"), &yz, ""), vec![Effect::Open(note.clone())]);
         assert_eq!(ui.key(&key("enter"), &yz, ""), vec![Effect::Open(note)]);
-        assert!(ui.key(&shifted("o"), &yz, "").is_empty());
+        assert!(is_request(&ui.key(&shifted("o"), &yz, ""), "open_prepare"));
         yz.hovered = Some(Hover {
             url: "/tmp/files/child".to_owned(),
             dir: Some(true),
@@ -1678,5 +2316,402 @@ mod tests {
         yz.filter = Some(None);
         ui.sync(&yz, false);
         assert_eq!(ui.filter_query, "");
+    }
+
+    fn is_request(effects: &[Effect], op: &str) -> bool {
+        matches!(effects, [Effect::Request(body, _)] if body["op"] == op)
+    }
+
+    /// The continuation of the single request in `effects`.
+    fn then_of(effects: Vec<Effect>) -> Then {
+        match effects.into_iter().next() {
+            Some(Effect::Request(_, then)) => then,
+            other => panic!("request expected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shift_o_and_shift_enter_ask_for_the_openers() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        let shift_enter = Key {
+            shift: true,
+            ..Key::named("enter")
+        };
+        for opener in [shifted("o"), shift_enter] {
+            assert_eq!(
+                ui.key(&opener, &yz, ""),
+                vec![Effect::Request(
+                    json!({"op": "open_prepare"}),
+                    Then::OpenPrepared
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn the_opener_picker_runs_the_picked_opener_on_the_frozen_paths() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        let reply = Reply {
+            ok: true,
+            paths: vec!["/tmp/files/notes.md".to_owned()],
+            rows: vec![
+                vec!["edit".to_owned(), "Edit".to_owned(), "vi %s".to_owned()],
+                vec![
+                    "open".to_owned(),
+                    "Open".to_owned(),
+                    "xdg-open %s".to_owned(),
+                ],
+            ],
+            ..Reply::default()
+        };
+        ui.reply(Then::OpenPrepared, &reply);
+        assert!(matches!(ui.mode, Mode::Open { at: 0, .. }));
+        ui.key(&key("j"), &yz, "");
+        let effects = ui.key(&key("enter"), &yz, "");
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "open_with", "paths": ["/tmp/files/notes.md"], "opener": "open"})
+        );
+        ui.reply(Then::OpenPrepared, &reply);
+        assert!(ui.key(&key("escape"), &yz, "").is_empty());
+        assert_eq!(ui.mode, Mode::Normal);
+        // An answer without openers opens nothing.
+        let effects = ui.reply(
+            Then::OpenPrepared,
+            &Reply {
+                ok: true,
+                paths: vec!["/tmp/files/notes.md".to_owned()],
+                ..Reply::default()
+            },
+        );
+        assert_eq!(ui.mode, Mode::Normal);
+        assert!(matches!(effects.as_slice(), [Effect::Notice(..)]));
+    }
+
+    #[test]
+    fn permanent_delete_confirms_before_it_commits() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        assert_eq!(
+            ui.key(&shifted("d"), &yz, ""),
+            vec![Effect::Request(
+                json!({"op": "trash_prepare"}),
+                Then::DeletePrepared
+            )]
+        );
+        let paths = vec!["/tmp/files/notes.md".to_owned()];
+        ui.reply(
+            Then::DeletePrepared,
+            &Reply {
+                ok: true,
+                paths: paths.clone(),
+                ..Reply::default()
+            },
+        );
+        assert_eq!(ui.mode, Mode::Delete(paths.clone()));
+        // Cancel changes nothing.
+        assert!(ui.key(&key("escape"), &yz, "").is_empty());
+        assert_eq!(ui.mode, Mode::Normal);
+        ui.mode = Mode::Delete(paths.clone());
+        assert_eq!(
+            ui.key(&key("enter"), &yz, ""),
+            vec![Effect::Request(
+                json!({"op": "trash_commit", "paths": paths, "permanent": true}),
+                Then::DeleteQueued
+            )]
+        );
+        assert_eq!(ui.mode, Mode::Normal);
+        // Trash keeps its own body, without the flag.
+        ui.mode = Mode::Trash(paths.clone());
+        let effects = ui.key(&key("enter"), &yz, "");
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "trash_commit", "paths": paths})
+        );
+    }
+
+    #[test]
+    fn sort_prefix_keys_sort_and_switch_the_linemode() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        let sort_body = |by: &str, reverse: bool| {
+            json!({"op": "action", "action": "sort",
+                "args": {"positional": [by], "options": {"reverse": reverse}}})
+        };
+        let linemode_body = |mode: &str| {
+            json!({"op": "action", "action": "linemode",
+                "args": {"positional": [mode], "options": {}}})
+        };
+        let bodies = |effects: &[Effect]| -> Vec<Value> {
+            effects
+                .iter()
+                .map(|effect| match effect {
+                    Effect::Request(body, _) => body.clone(),
+                    other => panic!("request expected, got {other:?}"),
+                })
+                .collect()
+        };
+        let cases = [
+            ("m", "mtime", Some("mtime")),
+            ("b", "btime", Some("btime")),
+            ("e", "extension", None),
+            ("a", "alphabetical", None),
+            ("n", "natural", None),
+            ("s", "size", Some("size")),
+            ("r", "random", None),
+        ];
+        for (letter, by, linemode) in cases {
+            let mut variants = vec![(key(letter), false)];
+            if letter != "r" {
+                variants.push((shifted(letter), true));
+            }
+            for (second, reverse) in variants {
+                assert!(ui.key(&key(","), &yz, "").is_empty());
+                let effects = ui.key(&second, &yz, "");
+                let mut expected = vec![sort_body(by, reverse)];
+                expected.extend(linemode.map(linemode_body));
+                assert_eq!(bodies(&effects), expected, ",{letter} reverse={reverse}");
+            }
+        }
+        assert_eq!(ui.pending, None);
+    }
+
+    #[test]
+    fn m_prefix_sets_the_linemode() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        for (letter, mode) in [
+            ("s", "size"),
+            ("p", "permissions"),
+            ("b", "btime"),
+            ("m", "mtime"),
+            ("o", "owner"),
+            ("n", "none"),
+        ] {
+            assert!(ui.key(&key("m"), &yz, "").is_empty());
+            let effects = ui.key(&key(letter), &yz, "");
+            assert_eq!(
+                body(&effects),
+                &json!({"op": "action", "action": "linemode",
+                    "args": {"positional": [mode], "options": {}}})
+            );
+        }
+    }
+
+    #[test]
+    fn g_prefix_goes_home_to_config_downloads_path_and_follow() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        for (second, target) in [
+            ("h", "/home/u"),
+            ("c", "/home/u/.config"),
+            ("d", "/home/u/Downloads"),
+        ] {
+            ui.key(&key("g"), &yz, "/home/u");
+            let effects = ui.key(&key(second), &yz, "/home/u");
+            let Effect::Request(sent, _) = &effects[0] else {
+                panic!("request expected for g{second}");
+            };
+            assert_eq!(sent["op"], "cd", "g{second}");
+            assert_eq!(sent["target"], json!(target), "g{second}");
+        }
+        ui.key(&key("g"), &yz, "/home/u");
+        assert!(ui.key(&key("space"), &yz, "/home/u").is_empty());
+        assert!(matches!(&ui.mode, Mode::Path(editor) if editor.text == "/tmp/files"));
+        ui.mode = Mode::Normal;
+        ui.key(&key("g"), &yz, "/home/u");
+        let effects = ui.key(&key("f"), &yz, "/home/u");
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "action", "action": "follow",
+                "args": {"positional": [], "options": {}}})
+        );
+        // Without a home directory the keys say so instead of jumping.
+        ui.key(&key("g"), &yz, "");
+        let effects = ui.key(&key("h"), &yz, "");
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Notice(Level::Error, _)]
+        ));
+    }
+
+    #[test]
+    fn tab_rename_prefills_the_custom_name_and_submits_it() {
+        let mut yz = snapshot();
+        yz.tabs = vec![super::super::model::Tab {
+            name: "files".to_owned(),
+            custom: "work".to_owned(),
+            active: true,
+        }];
+        let mut ui = Ui::new(0);
+        ui.key(&key("t"), &yz, "");
+        assert!(ui.key(&key("r"), &yz, "").is_empty());
+        let Mode::TabRename(editor) = &ui.mode else {
+            panic!("tab rename mode expected");
+        };
+        assert_eq!(editor.text, "work");
+        ui.key(&key("2"), &yz, "");
+        let effects = ui.key(&key("enter"), &yz, "");
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "action", "action": "tab_rename",
+                "args": {"positional": ["work2"], "options": {}}})
+        );
+        assert_eq!(ui.mode, Mode::Normal);
+        // `tt` still creates a tab in the current directory.
+        ui.key(&key("t"), &yz, "");
+        let effects = ui.key(&key("t"), &yz, "");
+        assert_eq!(body(&effects)["action"], "tab_create");
+    }
+
+    #[test]
+    fn prefixes_show_a_hint_from_the_same_table_as_the_help() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        assert!(ui.hint().is_none());
+        for prefix in ["g", "c", ",", "m", "t"] {
+            ui.key(&key(prefix), &yz, "/home/u");
+            let hint = ui.hint().expect("hint under a prefix");
+            assert_eq!(hint.prefix, prefix);
+            assert!(!hint.keys.is_empty());
+            let help = help_rows();
+            for (second, desc) in &hint.keys {
+                assert!(
+                    help.iter().any(|(keys, text)| text == desc
+                        && keys == &format!("{prefix} {}", key_label(second))),
+                    "{prefix} {second} missing from help"
+                );
+            }
+            // Esc clears the hint.
+            ui.key(&key("escape"), &yz, "/home/u");
+            assert!(ui.hint().is_none());
+        }
+        ui.key(&key(","), &yz, "");
+        assert_eq!(ui.hint().map(|hint| hint.keys.len()), Some(13));
+        // A key outside the table ends the prefix.
+        ui.key(&key("z"), &yz, "");
+        assert!(ui.hint().is_none());
+    }
+
+    #[test]
+    fn help_opens_scrolls_and_closes() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        for opener in [key("~"), key("f1")] {
+            ui.key(&opener, &yz, "");
+            assert_eq!(ui.mode, Mode::Help { at: 0 });
+            ui.key(&key("j"), &yz, "");
+            assert_eq!(ui.mode, Mode::Help { at: 1 });
+            ui.key(&key("escape"), &yz, "");
+            assert_eq!(ui.mode, Mode::Normal);
+        }
+    }
+
+    #[test]
+    fn spot_copies_the_selected_cell_and_closes() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        assert_eq!(
+            ui.key(&key("tab"), &yz, ""),
+            vec![Effect::Request(json!({"op": "spot"}), Then::Spotted)]
+        );
+        let rows = vec![
+            vec!["Base".to_owned()],
+            vec!["Size".to_owned(), "12 B".to_owned()],
+            vec!["Mimetype".to_owned(), "text/markdown".to_owned()],
+        ];
+        ui.reply(
+            Then::Spotted,
+            &Reply {
+                ok: true,
+                rows: rows.clone(),
+                ..Reply::default()
+            },
+        );
+        // The cursor starts on the first value row.
+        assert_eq!(ui.mode, Mode::Spot { rows, at: 1 });
+        ui.key(&key("j"), &yz, "");
+        assert!(ui.key(&key("c"), &yz, "").is_empty());
+        assert!(ui.hint().is_some());
+        assert_eq!(
+            ui.key(&key("c"), &yz, ""),
+            vec![Effect::Copy("text/markdown".to_owned())]
+        );
+        ui.key(&key("tab"), &yz, "");
+        assert_eq!(ui.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn r_with_a_selection_is_yazi_bulk_rename() {
+        let mut yz = snapshot();
+        let mut ui = Ui::new(0);
+        yz.selected_urls = vec!["/tmp/files/notes.md".to_owned()];
+        assert!(is_request(&ui.key(&key("r"), &yz, ""), "bulk_rename"));
+        assert_eq!(ui.mode, Mode::Normal);
+        yz.selected_urls.clear();
+        yz.marked_urls.insert("/tmp/files/child".to_owned());
+        assert!(is_request(&ui.key(&key("r"), &yz, ""), "bulk_rename"));
+        yz.marked_urls.clear();
+        ui.key(&key("r"), &yz, "");
+        assert!(matches!(ui.mode, Mode::Rename { .. }));
+    }
+
+    #[test]
+    fn an_existing_destination_asks_to_overwrite_and_cancel_returns_to_the_input() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        ui.key(&key("r"), &yz, "");
+        ui.key(&key("2"), &yz, "");
+        let effects = ui.key(&key("enter"), &yz, "");
+        let sent = body(&effects).clone();
+        let exists = Reply {
+            exists: true,
+            target: Some("/tmp/files/notes2.md".to_owned()),
+            error: Some("Destination already exists".to_owned()),
+            ..Reply::default()
+        };
+        assert!(ui.reply(then_of(effects), &exists).is_empty());
+        let Mode::Overwrite { target, .. } = &ui.mode else {
+            panic!("overwrite confirm expected");
+        };
+        assert_eq!(target, "/tmp/files/notes2.md");
+        // Cancel returns to the rename input with the typed name.
+        ui.key(&key("escape"), &yz, "");
+        let Mode::Rename { editor, .. } = &ui.mode else {
+            panic!("rename input expected");
+        };
+        assert_eq!(editor.text, "notes2.md");
+        // Confirm resends the same request with the explicit overwrite flag.
+        let effects = ui.key(&key("enter"), &yz, "");
+        ui.reply(then_of(effects), &exists);
+        let effects = ui.key(&key("y"), &yz, "");
+        let mut expected = sent;
+        expected["overwrite"] = json!(true);
+        assert_eq!(body(&effects), &expected);
+        assert_eq!(ui.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn create_asks_to_overwrite_too() {
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        ui.key(&key("a"), &yz, "");
+        for letter in ["x", "y"] {
+            ui.key(&key(letter), &yz, "");
+        }
+        let effects = ui.key(&key("enter"), &yz, "");
+        ui.reply(
+            then_of(effects),
+            &Reply {
+                exists: true,
+                target: Some("/tmp/files/xy".to_owned()),
+                ..Reply::default()
+            },
+        );
+        assert!(matches!(ui.mode, Mode::Overwrite { .. }));
+        ui.key(&key("n"), &yz, "");
+        assert!(matches!(&ui.mode, Mode::Create(editor) if editor.text == "xy"));
     }
 }

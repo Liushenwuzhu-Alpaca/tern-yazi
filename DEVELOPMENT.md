@@ -126,7 +126,7 @@ Yazi's PTY follows the pane's real size. While a program surface is live, Tern f
 
 ### Lent terminal
 
-Yazi leaves its alternate screen whenever it lends its terminal to a subprocess: `shell --block`, `ui.hide()` plugins such as `z` (fzf) and `Z` (zoxide), and task inspection. The backend watches Yazi's output for `ESC [ ? 1049 l`/`h` ([`backend.rs`](launcher/src/backend.rs) `Lent`); in between, [`surface/handover.rs`](launcher/src/surface/handover.rs) suspends the surface (TSP `suspend`), turns off the session's kitty-keys and bracketed-paste modes, writes Yazi's output to the pane and types the pane's input (minus TSP messages) into Yazi's PTY. When Yazi re-enters its alternate screen, the modes and the surface resume. The subprocess's output stays in the pane's scrollback, visible after Yazi quits, as with Yazi itself.
+Yazi leaves its alternate screen whenever it lends its terminal to a subprocess: `shell --block`, `ui.hide()` plugins such as `z` (fzf) and `Z` (zoxide), and task inspection. The backend watches Yazi's output for `ESC [ ? 1049 l`/`h` ([`backend.rs`](launcher/src/backend.rs) `Lent`); in between, [`surface/handover.rs`](launcher/src/surface/handover.rs) suspends the surface (TSP `suspend`), turns off the session's kitty-keys and bracketed-paste modes, writes Yazi's output to the pane and types the pane's input (minus TSP messages) into Yazi's PTY. When Yazi re-enters its alternate screen, the modes and the surface resume. The subprocess's output stays in the pane's scrollback, visible after Yazi quits, as with Yazi itself. Bulk rename resumes Yazi's terminal (query burst) and leaves it again within milliseconds, without waiting for the answers; if the pane's answers arrive after Yazi's PTY is back in line mode, they would become the input of "Continue to rename? (y/N)" and decline it, so the relay drops answer chunks that arrive while the burst is owed and the PTY is in canonical mode (`Backend::cooked`).
 
 ### Suspend (Ctrl+Z)
 
@@ -193,10 +193,15 @@ The JSON is additionally single-quoted for Yazi's plugin-argument parser, with e
 | `toggle_advance` | none | `toggle`, then `arrow 1` |
 | `filter` | `query`, `done` | `filter_do` with `smart = true` |
 | `find` | `query`, `previous` | `find_do` with `smart = true` |
-| `create` | `name` | Creates a file, or a directory for a trailing `/`, refusing existing targets, then reveals it |
-| `rename` | `target`, `new_name` | Renames through the helper's `--rename-no-replace`, then reveals the result |
+| `create` | `name`, optional `overwrite` | Creates a file, or a directory for a trailing `/`; an existing target replies `exists` unless `overwrite` is true (a file replaces a file, never a directory), then reveals it |
+| `rename` | `target`, `new_name`, optional `overwrite` | Renames through the helper's `--rename-no-replace` (`fs.rename` when overwriting); an existing target replies `exists` unless `overwrite`; reveals the result |
 | `trash_prepare` | none | Returns the exact target paths without mutation |
-| `trash_commit` | `paths` | Runs the guarded trash pipeline (section 7) |
+| `trash_commit` | `paths`, optional `permanent` | Runs the guarded trash pipeline (section 7); `permanent` removes with `remove --force --permanently` after the same selection guard |
+| `sort` / `linemode` / `follow` / `tab_rename` | (via `action`) | Allowed Yazi actors, popup-free in 26.9.1: `sort` with a `reverse` flag, `linemode`, `follow` (calls only `reveal`), `tab_rename` with a positional name (never `interactive`) |
+| `bulk_rename` | none | Requires a selection, leaves visual mode, then Yazi's `bulk_rename`; the editor and Yazi's "Continue to rename? (y/N)" run on the lent terminal |
+| `open_prepare` | `paths` | Returns the openers every target accepts as `[id, description, command]` rows (mirrors Yazi's `Open::match_common`) |
+| `open_with` | `paths`, `opener` | Expands the opener command over the frozen paths and runs it through `shell` |
+| `spot` | none | Returns the hovered path with info rows (`{heading}` or `{label, value}`) |
 
 ### Replies
 
@@ -238,7 +243,15 @@ Each theme is self-contained in `themes/<id>.css`, scoped under `[data-role^="ya
 | `p`/`P` | `paste` / `paste --force` |
 | `-`/`_`, Ctrl+- | `link` / `link --relative`, `hardlink` |
 | `d` | Prepare and confirm Trash (section 7) |
-| `a` / `r` | Create / rename line; Enter submits, Esc Esc cancels (vi input, below) |
+| `a` / `r` | Create / rename line; Enter submits, Esc Esc cancels (vi input, below). A name that already exists asks to overwrite (confirm layer; Esc returns to the line). `r` with a selection runs Yazi's bulk rename on the lent terminal |
+| `D` | Confirm and permanently delete the selection, else the hovered entry (`trash_prepare`, then `trash_commit` with `permanent`) |
+| `O` / Shift+Enter | Opener picker for the selection, else the hovered file (`open_prepare`, then `open_with`); `j`/`k` move, Enter runs, Esc cancels |
+| Tab | Spot layer with the hovered entry's details (`spot`); `cc` copies the selected cell, Esc/Tab/q closes |
+| `,` + key | Sort: `m`/`M` modified, `b`/`B` created, `e`/`E` extension, `a`/`A` alphabetical, `n`/`N` natural, `s`/`S` size, `r` random (uppercase reverses); `,m`, `,b`, `,s` and their reverses also switch the linemode |
+| `m` + key | Linemode `s` size, `p` permissions, `b` btime, `m` mtime, `o` owner, `n` none |
+| `g` + key | `gg` top, `gh` home, `gc` `~/.config`, `gd` `~/Downloads`, `g Space` a path line, `gf` follow the hovered symlink |
+| `t r` | Rename the active tab (vi line prefilled with its custom name) |
+| `~` / F1 | Help layer listing every key (`j`/`k` and PageUp/PageDown scroll, `End`/`Home`, Esc closes) |
 | `f` | Smart filter line (`filter_do`, live; every text change, normal-mode edits included, is sent) |
 | `/`/`?`, `n`/`N` | Smart find forward/backward, next/previous match |
 | `:` | Yazi `shell --block`, on the lent terminal (section 3) |
@@ -253,6 +266,8 @@ Each theme is self-contained in `themes/<id>.css`, scoped under `[data-role^="ya
 | `T` | Theme picker (Yazi leaves `T` unbound) |
 | Esc | Yazi `escape`; cancels local editing or confirmation first. In an input line the first Esc leaves insert mode and the second cancels (find and filter lines then clear as before) |
 | `q` / `Q` | Quit Yazi through its own quit (`Q`: without writing `--cwd-file`); the shell prompt returns. With unfinished tasks the surface asks first: Enter or `y` quits, Esc, `n` or Ctrl+C cancels |
+
+A pending prefix (`g`, `,`, `m`, `t`, `c`, `d`, `y`, ...) shows its continuations in the dock (role `yazi.which`); the hints and the help layer come from one table in `input.rs`.
 
 Input lines (`:`/`;` shell, `/`/`?` find, `s`/`S` search, `f` filter, `a` create, `r` rename, and the breadcrumb path editor) share one `Editor` ([`editor.rs`](launcher/src/surface/editor.rs)) that mirrors Yazi's `[input]` keymap. A line opens in insert mode; the first Esc switches to normal mode and moves the caret one left, as in vim, and the second Esc (or Ctrl+C) cancels. Enter submits from either mode. A failed submission keeps the line open. Text is UTF-16 aware (the offsets Tern's input node expects); Backspace removes one code point.
 
@@ -313,6 +328,7 @@ cargo test --locked --manifest-path launcher/Cargo.toml --test interaction -- --
 | `real_notice_interactions` | A `ya.notify` from a Yazi plugin appears as a surface notice and expires |
 | `real_window_interactions` | Opens in Tern (`o`, Enter, multi-select, double-click), `W`, `cc`/`cf` clipboard, `:` macros and cwd through Yazi, palette entry and the Ctrl+Alt+Y action |
 | `real_parity_interactions` | Yazi parity: recursive search, lent terminal (`:`, fzf, zoxide, task log), task manager, Ctrl+Z suspend and `fg` (also an external `SIGTSTP`), `q` |
+| `real_keys_interactions` | The remaining default keys: `,` sort and `m` linemode prefixes with the linemode column, `gh`/`gc`/`gd`/`g Space`/`gf`, `t r` tab rename, `D` permanent delete, `O` opener picker, Tab spot, `~` help, prefix hints, `r` on a selection (bulk rename on the lent terminal) |
 
 `tern ctl key` does not go through the window keymap (built-in chords such as Ctrl+Shift+T do not fire either), so the Ctrl+Alt+Y case checks the chord in the palette row and runs the bound action by name. Missing prerequisites fail instead of skipping. Successful runs remove their roots; failures keep `failure.txt`, the window log, `surface.log` and screenshots. `TERN_YAZI_KEEP_INTERACTION_ARTIFACTS=1` keeps a successful run; `TERN_YAZI_TEST_WINDOW_HOOK=/path/to/executable` can place the owned window (`<pid> <root> start|stop`).
 

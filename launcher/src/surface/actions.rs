@@ -65,6 +65,27 @@ fn reply(value: &Value, id: &str) -> Option<Reply> {
             .map_or(0, |tasks| tasks as u64),
         titles: string_list(value.get("titles")),
         quitting: value.get("quitting").and_then(Value::as_bool) == Some(true),
+        exists: value.get("exists").and_then(Value::as_bool) == Some(true),
+        target: value
+            .get("target")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        rows: value
+            .get("rows")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        row.as_array().map(|cells| {
+                            cells
+                                .iter()
+                                .filter_map(|cell| cell.as_str().map(str::to_owned))
+                                .collect()
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
