@@ -350,3 +350,52 @@ sh -n tests/interaction.sh install.sh
 - Preserve stable roles, keys and list IDs; stylesheets and tests select on them.
 - Add a unit test for pure logic and an interaction case for observable behavior. Do not claim asynchronous completion from an acknowledgement.
 - Use English comments and documentation. Add no dependency or persistent user configuration change without agreement; keep one-off scripts and fixtures outside the checkout.
+
+## 10. Design decision: bridge, not a Yazi fork
+
+Evaluated against Yazi `v26.9.1` sources (upstream tag) and the installed 26.9.1 binary in October 2026. The launcher stays a zero-patch bridge: unmodified Yazi on an invisible PTY, the plugin as its only API, and a Tern surface the launcher owns.
+
+### What Yazi provides and what the launcher owns
+
+| Yazi (through the plugin) | Launcher |
+| --- | --- |
+| Listing, watching, sorting (honours `yazi.toml`), hidden toggle, `filter_do`/`find_do`, load stage | Every visible surface: columns, path bar, tabs, status, layers |
+| Cursor, selection, visual marks, tabs, back/forward history | Key handling, editors, confirmation layers |
+| Task engine: yank/paste, links, `remove`, progress, cancel, task manager and inspection | Previews (always Tern's, never Yazi previewers) |
+| `search_do` via fd/rg, `fzf`/`zoxide` plugins, `shell`, `fs.calc_size` | Open in Tern, terminal split, clipboard |
+| `cwd-file` on quit | Create (plugin `fs.create`) and no-replace rename (the managed helper) |
+
+### Why not a fork
+
+- **No retained UI tree.** Lua components (`yazi-plugin/preset/components/*.lua`) return flat `ui.*` lists with absolute cell `Rect`s. `yazi-fm/src/renderer.rs` reduces them to `Renderable` and rasterizes them into one ratatui `Buffer` at once. Rust overlays draw from `core.*` state straight into the same buffer (`yazi-fm/src/root.rs`): preview, spot, pick, input, confirm, help, cmp, which, notify and tasks. Upstream has no headless mode or renderer seam; `--remote-events` only reports DDS events.
+- **Tern cannot host a cell grid.** TSP has no cell canvas. A buffer can only arrive as `ansi`/`rows` text nodes, with palette tokens instead of exact colours. That is a degraded embedded terminal, not native nodes.
+- **A native fork is a rewrite inside Yazi.** Overlays could be mapped from `core.*` state. The main view would still be rebuilt in Rust from core state, because absolute-rect Lua output does not map to Tern layout; that is today's `view.rs` moved in-process. Lua component customizations by third-party plugins would still be lost.
+- **Terminal ownership is spread out.** Yazi writes to the tty from about 15 places (estimate, not audited): title, OSC 52, emulator probes, image adapters, bulk rename, task inspection, `wait_for_key`, and the `TTY` handle exposed to plugins. `tern_sdk::Session` is `!Send`, so it needs its own thread bridged into Yazi's global event channel.
+- **The crates a fork would patch churn most:**
+
+| Path | `v26.5.6..v26.9.1` (4 months) | `v26.9.1..main` (6 weeks) |
+| --- | --- | --- |
+| `yazi-fm/src` | 36 commits, +565/-450 | 7 commits, +127/-127 |
+| `yazi-term` | 29 commits, +2673/-220 | 6 commits, +115/-124 |
+| `yazi-tty` | 19 commits, +1151/-315 | 4 commits, +34/-36 |
+| `yazi-tui` | new crate, +383 | 2 commits, +10/-10 |
+| `yazi-binding` | 31 commits, +1454/-2658 | 12 commits, +1080/-292 |
+
+About a quarter of the launcher (themes, formatting, window actions, pane size, previews, much of `view.rs`) would carry over to a fork. The bridge, the snapshot model and the key reducer would not.
+
+### Limits that come with the bridge
+
+- Yazi popups (`ya.input`, `ya.confirm`, `ya.which`, pick, notify) draw on the invisible terminal. The surface must render its own equivalent for every action it exposes, and must not forward an action that opens one.
+- Plugin customizations of Yazi's Lua components (status bar children, linemodes, borders) are not rendered.
+- Yazi's own mouse handling is unused; pointer input arrives as surface events on nodes.
+- Large folders reach the surface as a 120-entry window around the cursor (`view.rs`), and parent/preview columns as their first 30 entries (`read_entries` in `main.lua`). The native scrollbar covers only that window.
+
+### Yazi keymap through the plugin
+
+Since `v26.8.15` (`feat: keymap Lua bindings`, #4021) Lua sees Yazi's merged keymap: `km.mgr.rules:match()` iterates defaults plus the user's `prepend_keymap`/`append_keymap`, user entries first. Verified on the installed 26.9.1 (117 `mgr` rules):
+
+- `on` is a key sequence of `{type, value?, ctrl, alt, shift, super}`, e.g. `{type = "Char", value = "g"}` or `{type = "Escape"}`.
+- `run` is a list of `Action`s; `action.cmd.name` is the actor and `action.cmd.args` a table with positional (`[1]`, `[2]`) and named options. For example, `shell --block --confirm -- echo hi` gives `{"echo hi", block = true, confirm = true}`, and `sort natural --reverse` gives `{"natural", reverse = "yes"}`.
+- `desc` is the description shown by Yazi's which/help.
+
+The bridge can export this instead of hard-coding Yazi's defaults in `input.rs`. Keys matched against it map to surface layers for actions that open Yazi UI (create, rename, interactive shell, search, filter, find, `cd --interactive`, `tab_rename`, remove, quit, open, help, spot, tasks). They are forwarded to Yazi only for actions on an explicit allowlist (today's `request_actors`). An action joins the allowlist only after it has been checked never to open a popup: `bulk_rename`, paste conflicts and `shell --confirm` all do. A plugin that calls `ya.input`/`ya.confirm` itself still stays invisible.
