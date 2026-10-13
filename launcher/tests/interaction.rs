@@ -3413,6 +3413,15 @@ fn shortcut_flow(h: &mut Harness, first: &Client) -> TestResult<()> {
     // Test unyank ('Y'): yank copy.txt, then unyank ('Y'), verify yank is cleared.
     let unyank_dir = first.cwd.join("unyankdest");
     fs::create_dir_all(&unyank_dir).map_err(|e| e.to_string())?;
+    // The new directory shifts the rows; click only after the listing shows it,
+    // or the click lands on the row that used to be at copy.txt's position.
+    let unyank_row = row_selector(ROWS, "unyankdest");
+    h.wait("unyankdest row is listed before clicking", |h| {
+        Ok(nodes(&h.tree(&unyank_row)?)
+            .iter()
+            .any(|node| theme_visible(node))
+            .then_some(()))
+    })?;
     h.click_file(first, "copy.txt")?;
     h.key("y")?;
     h.key("Y")?;

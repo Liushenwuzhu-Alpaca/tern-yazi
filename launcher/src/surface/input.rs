@@ -566,11 +566,10 @@ impl Ui {
 
     /// Reconciles optimistic state with a newly published snapshot.
     pub(crate) fn sync(&mut self, yz: &Snapshot, filter_pending: bool) {
+        // A pending prefix survives directory changes, as in Yazi: `gc` then a quick `gd`
+        // types `g` before the first jump's snapshot lands.
         let hovered = yz.hovered.as_ref().map(|hover| hover.url.clone());
         let source = (yz.current.cwd.clone(), hovered);
-        if self.source.as_ref().map(|s| &s.0) != Some(&source.0) {
-            self.pending = None;
-        }
         if self.source.as_ref() != Some(&source) {
             self.active_file = None;
             self.optimistic_cwd = None;
@@ -2535,6 +2534,21 @@ mod tests {
             effects.as_slice(),
             [Effect::Notice(Level::Error, _)]
         ));
+    }
+
+    #[test]
+    fn prefix_survives_the_previous_jump_landing() {
+        let mut yz = snapshot();
+        let mut ui = Ui::new(0);
+        ui.sync(&yz, false);
+        ui.key(&key("g"), &yz, "/home/u");
+        yz.current.cwd = "/home/u/.config".to_owned();
+        ui.sync(&yz, false);
+        let effects = ui.key(&key("d"), &yz, "/home/u");
+        assert_eq!(
+            body(&effects),
+            &json!({"op": "cd", "target": "/home/u/Downloads"})
+        );
     }
 
     #[test]
