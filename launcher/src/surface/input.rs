@@ -1370,23 +1370,39 @@ impl Ui {
                 if !yz.selected_urls.is_empty() || !yz.marked_urls.is_empty() {
                     return vec![request(json!({"op": "bulk_rename"}))];
                 }
-                if let Some(hover) = &yz.hovered {
-                    let name = basename(&hover.url).to_owned();
+                // The file the browser shows as active: a click's reveal is still on its way
+                // to the snapshot, but Yazi will have hovered it by the time the rename runs.
+                let cwd = self.cwd(yz).to_owned();
+                let entry = match self.active_file.as_deref() {
+                    Some(name)
+                        if yz
+                            .directory(&cwd)
+                            .is_some_and(|f| f.files.iter().any(|n| n == name)) =>
+                    {
+                        Some((join_path(&cwd, name), yz.is_dir(&cwd, name)))
+                    }
+                    _ => yz
+                        .hovered
+                        .as_ref()
+                        .map(|hover| (hover.url.clone(), hover.dir)),
+                };
+                if let Some((url, dir)) = entry {
+                    let name = basename(&url).to_owned();
                     // The caret lands before a file's extension, like Yazi's own rename.
                     let stem = match name.rfind('.') {
-                        Some(dot) if dot > 0 && hover.dir != Some(true) => dot,
+                        Some(dot) if dot > 0 && dir != Some(true) => dot,
                         _ => name.len(),
                     };
                     let caret = utf16_len(&name[..stem]);
                     self.mode = Mode::Rename {
                         editor: Editor::new(name, caret, caret),
-                        target: hover.url.clone(),
+                        target: url,
                     };
                 }
                 return Vec::new();
             }
             "." | "period" => action("hidden", &[], json!({"state": "toggle"})),
-                        "~" | "tilde" | "f1" => {
+            "~" | "tilde" | "f1" => {
                 self.mode = Mode::Help { at: 0 };
                 return Vec::new();
             }
@@ -1629,6 +1645,21 @@ mod tests {
             [Effect::Request(body, _)] => body,
             other => panic!("expected one request, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rename_follows_the_active_file_the_snapshot_has_not_caught_up_to() {
+        // A click reveals `child` optimistically while the snapshot still hovers notes.md.
+        let yz = snapshot();
+        let mut ui = Ui::new(0);
+        ui.active_file = Some("child".to_owned());
+        assert!(ui.key(&key("r"), &yz, "/home/u").is_empty());
+        let Mode::Rename { editor, target } = &ui.mode else {
+            panic!("rename mode expected");
+        };
+        assert_eq!(target, "/tmp/files/child");
+        assert_eq!(editor.text, "child");
+        assert_eq!(editor.cursor, 5);
     }
 
     #[test]

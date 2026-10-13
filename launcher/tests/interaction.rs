@@ -4693,6 +4693,11 @@ fn keys_flow(h: &mut Harness) -> TestResult<()> {
         "confirming closes the layer",
         |v| nodes(v).is_empty(),
     )?;
+    // The confirmed create reveals the directory when Yazi finishes; wait for that, or the
+    // reveal would move the hover under the next case's click.
+    h.expect_state(&client, "the existing directory is revealed", |s| {
+        hover(s) == text(&files.join("child"))
+    })?;
     if !files.join("child/inside.txt").is_file() {
         return Err("Overwriting a directory with a directory lost its contents".into());
     }
@@ -4700,6 +4705,12 @@ fn keys_flow(h: &mut Harness) -> TestResult<()> {
     h.case = "a rename onto an existing file asks before overwriting";
     h.click_file(&client, "ren-src.txt")?;
     h.key("r")?;
+    // The line renames the hovered file the surface last saw; make sure that is the one.
+    h.expect_ui(
+        "[data-role=\"yazi.command-bubble.rename\"]",
+        "the rename line starts from the hovered file's name",
+        |v| ui_text(v).contains("ren-src.txt"),
+    )?;
     h.clear_line(owner)?;
     h.paste(owner, "over2.txt")?;
     h.key("Enter")?;
