@@ -180,13 +180,14 @@ fn quit_layer(count: u64, titles: &[String]) -> N {
     } else if count as usize > lines.len() {
         lines.push(format!("... and {} more", count as usize - lines.len()));
     }
-    let items = lines.iter().enumerate().map(|(index, line)| {
-        ui::item(serde_json::to_string(line).unwrap_or_default()).key((index + 1).to_string())
-    });
+    let items = lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| ui::item(line.clone()).key((index + 1).to_string()));
     ui::node("card")
         .key("quit")
         .role("yazi.quit-confirm")
-        .child(ui::text("Quit?"))
+        .prop("head", "Quit?")
         .child(ui::text(
             "There are unfinished tasks, quit anyway? (Open task manager with 'w')",
         ))
@@ -330,8 +331,16 @@ fn layer_card(role: &str, head: &str, list: N, hint: &str) -> N {
         .role(role)
         .prop("head", head)
         .child(list)
-        .child(muted(hint))
-        .child(button("close", ui::text("Close [Esc]"), Msg::LayerClose))
+        .child(
+            ui::row()
+                .key("footer")
+                .role("yazi.layer-controls")
+                .child(muted(hint))
+                .child(
+                    button("close", ui::text("Close [Esc]"), Msg::LayerClose)
+                        .role("yazi.layer-close"),
+                ),
+        )
 }
 
 /// Yazi's `Open with:` pick: one row per opener, with its command.
@@ -392,19 +401,22 @@ fn help_layer(at: usize, rows: u32) -> N {
 fn which(hint: &Hint) -> N {
     let chips = hint.keys.iter().map(|(key, desc)| {
         N::from(
-            ui::text(vec![
-                span(format!("{} ", key_label(key)), "strong"),
-                span(*desc, "muted"),
-            ])
-            .key(format!("which-{key}")),
+            ui::row()
+                .key(format!("which-{key}"))
+                .role("yazi.which-chip")
+                .child(N::from(ui::text(key_label(key))).role("yazi.which-key"))
+                .child(muted(*desc)),
         )
     });
     ui::row()
         .key("which")
         .role("yazi.which")
-        .prop("gap", "sm")
         .prop("wrap", true)
-        .child(N::from(ui::badge(hint.prefix).tone("accent")).key("prefix"))
+        .child(
+            N::from(ui::badge(hint.prefix).tone("accent"))
+                .key("prefix")
+                .role("yazi.which-prefix"),
+        )
         .children(chips)
         .into()
 }
@@ -817,16 +829,24 @@ impl Browser<'_> {
                 ui::row().children(children)
             }
             None => ui::row().child(match self.frame.notice {
-                Some((level, text)) => spans(vec![span(
-                    text,
-                    match level {
-                        Level::Error => "error",
-                        Level::Warn => "warn",
-                        Level::Info => "muted",
-                    },
-                )])
-                .role("yazi.notice"),
-                None => ui::text(" ").into(),
+                Some((level, text)) => {
+                    let (label, tone) = match level {
+                        Level::Error => ("ERROR", "error"),
+                        Level::Warn => ("WARN", "warn"),
+                        Level::Info => ("INFO", "info"),
+                    };
+                    ui::row()
+                        .key("notice")
+                        .role("yazi.notice")
+                        .child(
+                            N::from(ui::badge(label))
+                                .key("level")
+                                .role(format!("yazi.notice-level.{tone}")),
+                        )
+                        .child(ui::text(text).key("text"))
+                        .into()
+                }
+                None => N::from(ui::text(" ")),
             }),
         };
         row.key("input")

@@ -208,7 +208,7 @@
 
 /* Opaque native popovers retain hit testing and their existing scroll limits. */
 [data-role^="yazi.theme.editorial"] [data-role="yazi.layer"] [data-role="yazi.path-ancestors"],
-[data-role^="yazi.theme.editorial"] [data-role="yazi.layer"] [data-role="yazi.trash-confirm"] {
+[data-role^="yazi.theme.editorial"] [data-role="yazi.layer"] [data-role$="-confirm"] {
     min-width: 0;
     padding: 0;
     background: rgb(from var(--card) r g b / 100%);
@@ -220,7 +220,7 @@
 }
 
 [data-role^="yazi.theme.editorial"] [data-role="yazi.layer"] [data-role="yazi.path-ancestors"] > .sf-card-body,
-[data-role^="yazi.theme.editorial"] [data-role="yazi.layer"] [data-role="yazi.trash-confirm"] > .sf-card-body {
+[data-role^="yazi.theme.editorial"] [data-role="yazi.layer"] [data-role$="-confirm"] > .sf-card-body {
     padding: var(--yazi-path-padding);
 }
 
@@ -374,6 +374,15 @@
 /* Editorial Paper: no fills or radii; typographic fields split by a hairline rule. */
 [data-role^="yazi.theme.editorial"] [data-role="yazi.dock"] :is([data-role="yazi.status-left"], [data-role="yazi.status-progress"]) {
     --yazi-pill: var(--ink-pen);
+}
+
+/* The which hint stays typographic: pen-coloured keys, no fills or radii. */
+[data-role^="yazi.theme.editorial"] [data-role="yazi.dock"] [data-role="yazi.which"] {
+    --yazi-which: var(--ink-pen);
+    --yazi-which-fill: transparent;
+    --yazi-which-on: var(--ink-pen);
+    --yazi-which-tint: 0;
+    --yazi-which-radius: 0;
 }
 
 [data-role^="yazi.theme.editorial"] [data-role="yazi.dock"] :is([data-role^="yazi.status-left"], [data-role^="yazi.status-progress"]) {

@@ -349,9 +349,14 @@
     text-transform: none;
 }
 
-/* The picker and the task manager float over the browser, so they stay opaque. */
-[data-role="yazi.layer"] [data-role="yazi.theme-picker"],
-[data-role="yazi.layer"] [data-role="yazi.task-manager"] {
+/* Panels (pickers, spot, help, tasks) float over the browser, so they stay opaque. */
+[data-role="yazi.layer"] :is(
+    [data-role="yazi.theme-picker"],
+    [data-role="yazi.task-manager"],
+    [data-role="yazi.open-picker"],
+    [data-role="yazi.spot"],
+    [data-role="yazi.help"]
+) {
     background: rgb(from var(--card) r g b / 100%);
     color: var(--t1);
     border: 1px solid var(--l3);
@@ -363,8 +368,60 @@
     margin: 48px auto 0;
 }
 
-/* Confirmation must obscure the underlying file rows without restyling them. */
-[data-role="yazi.layer"] [data-role="yazi.trash-confirm"] {
+/* The layer wrapper fills the pane, so a long list panel (help, spot, openers) stops above
+   the status bar and scrolls its list instead of running off the pane. */
+[data-role="yazi.layer"] {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    min-height: 0;
+}
+
+[data-role="yazi.layer"] :is([data-role="yazi.open-picker"], [data-role="yazi.spot"], [data-role="yazi.help"]) {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    max-height: calc(100% - 96px);
+}
+
+[data-role="yazi.layer"] :is([data-role="yazi.open-picker"], [data-role="yazi.spot"], [data-role="yazi.help"]) > .sf-card-body,
+[data-role="yazi.layer"] :is([data-role="yazi.open-picker"], [data-role="yazi.spot"], [data-role="yazi.help"]) .sf-list {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+[data-role="yazi.layer"] :is([data-role="yazi.open-picker"], [data-role="yazi.spot"], [data-role="yazi.help"]) .sf-list-scroll.max {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: 100% !important;
+    overflow-y: auto;
+}
+
+/* Panel footers: the key hint on the left, the mouse close button on the right. */
+[data-role="yazi.layer"] [data-role="yazi.layer-controls"] {
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 8px;
+}
+
+/* Task rows read like the picker rows: the hovered one is tinted, not boxed. */
+[data-role="yazi.layer"] :is([data-role="yazi.task"], [data-role="yazi.task.hovered"]) {
+    gap: 2px;
+    padding: 4px 8px;
+    border-radius: 6px;
+}
+
+[data-role="yazi.layer"] [data-role="yazi.task.hovered"] {
+    background: rgb(from var(--t1) r g b / 6%);
+}
+
+/* Every confirmation (trash, delete, quit, overwrite) shares one card; it must obscure the
+   underlying file rows without restyling them. */
+[data-role="yazi.layer"] [data-role$="-confirm"] {
     background: rgb(from var(--card) r g b / 100%);
     color: var(--t1);
     border: 1px solid var(--l3);
@@ -373,9 +430,120 @@
     pointer-events: auto;
 }
 
-[data-role="yazi.layer"] [data-id="layer.trash.controls"] {
+[data-role="yazi.layer"] [data-id$=".controls"] {
     gap: 12px;
     margin-top: 12px;
     padding-top: 8px;
     border-top: 1px solid var(--l2);
+}
+
+/* The which hint speaks the footer's capsule language: the pending prefix is a filled
+   capsule, each continuation a tinted key cap followed by its description. Themes match
+   their footer through `--yazi-which` (colour), `--yazi-which-fill`/`--yazi-which-on`
+   (prefix fill and text), `--yazi-which-tint` (key cap alpha) and `--yazi-which-radius`. */
+[data-role="yazi.dock"] [data-role="yazi.which"] {
+    padding-bottom: 4px;
+    align-items: center;
+    column-gap: 14px;
+    row-gap: 4px;
+    font-size: 11.5px;
+    line-height: 18px;
+}
+
+/* Region-scoped so the capsule outranks Tern's badge tone classes. */
+[data-role="yazi.dock"] [data-role="yazi.which-prefix"] {
+    padding: 0 8px;
+    border: 0;
+    box-shadow: none;
+    border-radius: var(--yazi-which-radius, 999px);
+    background: var(--yazi-which-fill, var(--yazi-which, var(--accent)));
+    color: var(--yazi-which-on, var(--card));
+    font-weight: 700;
+    line-height: 18px;
+    text-transform: none;
+}
+
+[data-role="yazi.which-chip"] {
+    align-items: center;
+    gap: 6px;
+    flex-wrap: nowrap;
+    white-space: nowrap;
+}
+
+[data-role="yazi.which-key"] {
+    min-width: 18px;
+    padding: 0 5px;
+    box-sizing: border-box;
+    border-radius: var(--yazi-which-radius, 4px);
+    background: rgb(from var(--yazi-which, var(--accent)) r g b / var(--yazi-which-tint, 0.16));
+    color: var(--yazi-which, var(--accent));
+    font-weight: 700;
+    text-align: center;
+}
+
+/* A notice is a level capsule plus its message, like the left status capsule. */
+[data-role="yazi.notice"] {
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex-wrap: nowrap;
+    white-space: nowrap;
+    overflow: hidden;
+    font-size: 12px;
+}
+
+[data-role="yazi.main"] [data-role^="yazi.notice-level"] {
+    --yazi-pill: var(--accent);
+    flex: 0 0 auto;
+    padding: 0 8px;
+    border: 0;
+    box-shadow: none;
+    border-radius: 999px;
+    background: var(--yazi-pill);
+    color: var(--card);
+    font-size: 11.5px;
+    font-weight: 700;
+    line-height: 18px;
+}
+
+[data-role="yazi.main"] [data-role="yazi.notice-level.warn"] {
+    --yazi-pill: var(--warn);
+}
+
+[data-role="yazi.main"] [data-role="yazi.notice-level.error"] {
+    --yazi-pill: var(--bad, var(--warn));
+}
+
+[data-role="yazi.notice"] > :last-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* The vi mode sits beside the line's label as a tinted capsule; it takes the theme's
+   breadcrumb corners, which match the label's shape. */
+[data-role="yazi.main"] [data-role="yazi.command-vi"] {
+    flex: 0 0 auto;
+    box-shadow: none;
+    border: 0;
+    border-radius: var(--yazi-crumb-radius, 999px);
+    background: rgb(from var(--t1) r g b / 8%);
+    color: var(--t2);
+    font-weight: 700;
+}
+
+/* Panel close buttons share the path editor's quiet button. */
+[data-role="yazi.layer"] [data-role="yazi.layer-close"] {
+    flex: 0 0 auto;
+    background: rgb(from var(--t1) r g b / 4%);
+    border: 1px solid var(--l2);
+    padding: 2px 8px;
+    color: var(--t2);
+    pointer-events: auto;
+}
+
+[data-role="yazi.layer"] [data-role="yazi.layer-close"]:hover {
+    background: rgb(from var(--t1) r g b / 20%);
+    border-color: var(--t2);
+    color: var(--t1);
 }

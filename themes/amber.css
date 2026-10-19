@@ -244,7 +244,7 @@
 
 /* Opaque native popovers retain hit testing and their existing scroll limits. */
 [data-role^="yazi.theme.amber"] [data-role="yazi.layer"] [data-role="yazi.path-ancestors"],
-[data-role^="yazi.theme.amber"] [data-role="yazi.layer"] [data-role="yazi.trash-confirm"] {
+[data-role^="yazi.theme.amber"] [data-role="yazi.layer"] [data-role$="-confirm"] {
     min-width: 0;
     padding: 0;
     background: rgb(from var(--card) r g b / 100%);
@@ -256,7 +256,7 @@
 }
 
 [data-role^="yazi.theme.amber"] [data-role="yazi.layer"] [data-role="yazi.path-ancestors"] > .sf-card-body,
-[data-role^="yazi.theme.amber"] [data-role="yazi.layer"] [data-role="yazi.trash-confirm"] > .sf-card-body {
+[data-role^="yazi.theme.amber"] [data-role="yazi.layer"] [data-role$="-confirm"] > .sf-card-body {
     padding: var(--yazi-path-padding);
 }
 
@@ -387,6 +387,12 @@
 /* Amber Ledger: squared ledger tags; ink fill in normal mode, amber outside it. */
 [data-role^="yazi.theme.amber"] [data-role="yazi.dock"] :is([data-role="yazi.status-left"], [data-role="yazi.status-progress"]) {
     --yazi-pill: var(--t1);
+}
+
+/* The which hint wears the same squared ink tags. */
+[data-role^="yazi.theme.amber"] [data-role="yazi.dock"] [data-role="yazi.which"] {
+    --yazi-which: var(--t1);
+    --yazi-which-radius: 3px;
 }
 
 [data-role^="yazi.theme.amber"] [data-role="yazi.dock"] :is([data-role^="yazi.status-left"], [data-role^="yazi.status-progress"]) {

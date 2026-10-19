@@ -205,7 +205,7 @@
 
 /* Opaque native popovers retain hit testing and their existing scroll limits. */
 [data-role^="yazi.theme.zen"] [data-role="yazi.layer"] [data-role="yazi.path-ancestors"],
-[data-role^="yazi.theme.zen"] [data-role="yazi.layer"] [data-role="yazi.trash-confirm"] {
+[data-role^="yazi.theme.zen"] [data-role="yazi.layer"] [data-role$="-confirm"] {
     min-width: 0;
     padding: 0;
     background: rgb(from var(--card) r g b / 100%);
@@ -217,7 +217,7 @@
 }
 
 [data-role^="yazi.theme.zen"] [data-role="yazi.layer"] [data-role="yazi.path-ancestors"] > .sf-card-body,
-[data-role^="yazi.theme.zen"] [data-role="yazi.layer"] [data-role="yazi.trash-confirm"] > .sf-card-body {
+[data-role^="yazi.theme.zen"] [data-role="yazi.layer"] [data-role$="-confirm"] > .sf-card-body {
     padding: var(--yazi-path-padding);
 }
 
@@ -395,6 +395,14 @@
     background: transparent;
     color: var(--yazi-pill);
     font-weight: 600;
+}
+
+/* The which hint is quiet text too: only the keys carry the accent. */
+[data-role^="yazi.theme.zen"] [data-role="yazi.dock"] [data-role="yazi.which"] {
+    --yazi-which-fill: transparent;
+    --yazi-which-on: var(--accent);
+    --yazi-which-tint: 0;
+    --yazi-which-radius: 0;
 }
 
 [data-role^="yazi.theme.zen"] [data-role="yazi.dock"] :is([data-role="yazi.status-size"], [data-role="yazi.status-percent"]) {

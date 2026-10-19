@@ -217,7 +217,7 @@
 
 /* Opaque native popovers retain hit testing and their existing scroll limits. */
 [data-role^="yazi.theme.brutalist"] [data-role="yazi.layer"] [data-role="yazi.path-ancestors"],
-[data-role^="yazi.theme.brutalist"] [data-role="yazi.layer"] [data-role="yazi.trash-confirm"] {
+[data-role^="yazi.theme.brutalist"] [data-role="yazi.layer"] [data-role$="-confirm"] {
     min-width: 0;
     padding: 0;
     background: rgb(from var(--card) r g b / 100%);
@@ -229,11 +229,11 @@
 }
 
 [data-role^="yazi.theme.brutalist"] [data-role="yazi.layer"] [data-role="yazi.path-ancestors"] > .sf-card-body,
-[data-role^="yazi.theme.brutalist"] [data-role="yazi.layer"] [data-role="yazi.trash-confirm"] > .sf-card-body {
+[data-role^="yazi.theme.brutalist"] [data-role="yazi.layer"] [data-role$="-confirm"] > .sf-card-body {
     padding: var(--yazi-path-padding);
 }
 
-[data-role^="yazi.theme.brutalist"] [data-role="yazi.layer"] [data-id="layer.trash.controls"] {
+[data-role^="yazi.theme.brutalist"] [data-role="yazi.layer"] [data-id$=".controls"] {
     border-top: 2px solid var(--t1);
 }
 
@@ -379,6 +379,12 @@
 /* Brutalist: chunky bordered blocks in ink; non-normal modes keep the warn colour. */
 [data-role^="yazi.theme.brutalist"] [data-role="yazi.dock"] :is([data-role="yazi.status-left"], [data-role="yazi.status-progress"]) {
     --yazi-pill: var(--t1);
+}
+
+/* The which hint is ink blocks without rounding, like the footer. */
+[data-role^="yazi.theme.brutalist"] [data-role="yazi.dock"] [data-role="yazi.which"] {
+    --yazi-which: var(--t1);
+    --yazi-which-radius: 0;
 }
 
 [data-role^="yazi.theme.brutalist"] [data-role="yazi.dock"] :is([data-role^="yazi.status-left"], [data-role^="yazi.status-progress"]) {

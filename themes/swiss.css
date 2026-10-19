@@ -291,7 +291,7 @@
 
 /* Opaque native popovers retain hit testing and their existing scroll limits. */
 [data-role^="yazi.theme.swiss"] [data-role="yazi.layer"] [data-role="yazi.path-ancestors"],
-[data-role^="yazi.theme.swiss"] [data-role="yazi.layer"] [data-role="yazi.trash-confirm"] {
+[data-role^="yazi.theme.swiss"] [data-role="yazi.layer"] [data-role$="-confirm"] {
     min-width: 0;
     padding: 0;
     background: rgb(from var(--card) r g b / 100%);
@@ -304,12 +304,12 @@
     pointer-events: auto;
 }
 
-[data-role^="yazi.theme.swiss"] [data-role="yazi.layer"] [data-role="yazi.trash-confirm"] {
+[data-role^="yazi.theme.swiss"] [data-role="yazi.layer"] [data-role$="-confirm"] {
     border-top-color: var(--swiss-red);
 }
 
 [data-role^="yazi.theme.swiss"] [data-role="yazi.layer"] [data-role="yazi.path-ancestors"] > .sf-card-body,
-[data-role^="yazi.theme.swiss"] [data-role="yazi.layer"] [data-role="yazi.trash-confirm"] > .sf-card-body {
+[data-role^="yazi.theme.swiss"] [data-role="yazi.layer"] [data-role$="-confirm"] > .sf-card-body {
     padding: var(--yazi-path-padding);
 }
 
@@ -324,7 +324,7 @@
     text-transform: none;
 }
 
-[data-role^="yazi.theme.swiss"] [data-role="yazi.layer"] [data-id="layer.trash.controls"] {
+[data-role^="yazi.theme.swiss"] [data-role="yazi.layer"] [data-id$=".controls"] {
     border-top-color: var(--t1);
 }
 
@@ -455,6 +455,12 @@
 /* Swiss footer: a square red mode block (warn mode keeps warn); other fields are plain bold ink. */
 [data-role^="yazi.theme.swiss"] [data-role="yazi.dock"] :is([data-role="yazi.status-left"], [data-role="yazi.status-progress"]) {
     --yazi-pill: var(--swiss-red);
+}
+
+/* The which hint uses the footer's square red block. */
+[data-role^="yazi.theme.swiss"] [data-role="yazi.dock"] [data-role="yazi.which"] {
+    --yazi-which: var(--swiss-red);
+    --yazi-which-radius: 0;
 }
 
 [data-role^="yazi.theme.swiss"] [data-role="yazi.dock"] :is([data-role^="yazi.status-left"], [data-role^="yazi.status-progress"]) {
