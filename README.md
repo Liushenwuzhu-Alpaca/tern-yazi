@@ -67,6 +67,6 @@ require("tern"):setup()
 - **Inside Tern**: run `yazi` in any shell pane; the browser takes over that pane until `q`. The palette entry or Ctrl+Alt+Y opens a new pane to the right running the browser in the focused pane's directory.
 - **Outside Tern**: the wrapper runs your original Yazi with all arguments passed through.
 
-## Roadmap
+## License
 
-- [ ] Document and media previews (multi-page PDF, audio/video metadata, binary 3D formats).
+[MIT](LICENSE)
