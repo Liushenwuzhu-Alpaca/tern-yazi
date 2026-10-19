@@ -12,9 +12,10 @@
 
 - **原生界面**：三列米勒（Miller Columns）布局，各列独立滚动，带路径栏、标签页和状态栏，全部是声明式 Tern UI，无网页嵌入、无 ANSI 终端刮取。
 - **丰富预览**：支持语法高亮代码、Markdown、Mermaid 图表、位图/矢量 SVG 图片、PDF 首页封面、压缩包列表，以及可交互的文本 3D 模型（VRML、X3DV、OBJ、ASCII STL/PLY、内嵌缓冲区的 glTF、USDA）。
-- **Yazi 快捷键**：官方按键（`j/k`、`h/l`、`gg/G`、`/`、`?`、`f`、`Space`、`v`、`y`、`x`、`p`、`d`、`a`、`r`、标签页）直接驱动真实的 Yazi。
+- **Yazi 快捷键**：官方按键（`j/k`、`h/l`、`gg/G`、`/`、`?`、`f`、`Space`、`v`、`y`、`x`、`p`、`d`、`a`、`r`、标签页）直接驱动真实的 Yazi，包括递归搜索（`s`/`S`）、fzf 与 zoxide 跳转（`z`/`Z`）和任务管理器（`w`）。其余默认按键同样原生支持：`,` 排序和 `m` 显示模式前缀、`gh`/`gc`/`gd`/`g Space`/`gf`、`t r` 重命名标签页、`D` 永久删除、`O` 打开方式选择器、`Tab` 文件详情、有选中项时的批量重命名，以及 `~`/F1 打开帮助层。按下前缀后，可接的按键会显示在底栏。
+- **与 Yazi 一致的行为**：输入行遵循 Yazi 的 vi 键位（Esc 进入普通模式，再按一次 Esc 取消），Ctrl+Z 挂起浏览器直到 `fg`，`q`/`Q` 通过 Yazi 退出且在有任务运行时先确认，`--chooser-file` 让 Enter/`o` 选择文件，Yazi 的通知会显示为提示。
 - **Tern 操作**：`o`/Enter 在 Tern 文件块中打开文件（有选中项时打开全部选中项）；`W` 在下方打开当前目录的终端；`cc`/`cd`/`cf`/`cn` 把路径、所在目录、文件名或不带扩展名的文件名复制到剪贴板。
-- **Shell**：`:` 与 `;` 把命令交给 Yazi 的 `shell` 执行（分别为阻塞与后台，与 Yazi 一致），支持 `%h`、`%s` 等 Yazi 宏；不显示命令输出。
+- **Shell**：`:` 与 `;` 把命令交给 Yazi 的 `shell` 执行，支持 `%h`、`%s` 等 Yazi 宏。与 Yazi 一致，`:` 在 pane 中前台运行，输出保留在回滚缓冲区；`;` 作为后台任务运行，日志可在任务管理器中查看。
 - **布局主题**：8 款主题（`Current`、`Aurora Glass`、`Editorial Paper`、`Amber Ledger`、`Blueprint Draft`、`Brutalist Block`、`Zen Minimal`、`Swiss Grid`），在浏览器内按 `T` 选择。每个主题是 `themes/<id>.css` 下的独立样式文件，自定义或新增主题见 [DEVELOPMENT.md](DEVELOPMENT.md#layout-themes)。
 
 ## 主题
